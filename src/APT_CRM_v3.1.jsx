@@ -29,14 +29,10 @@ const ALLOWED_EMAILS = [
   "tahafayyazlp@gmail.com",
 ];
 
-const GAS_URL = import.meta.env.VITE_GAS_URL;
-const API_KEY = import.meta.env.VITE_API_KEY;
-
-// ── API helpers ───────────────────────────────────────────────
+// ── API helpers — all calls go through /api/gas (Vercel proxy, no CORS) ──
 async function gasGet(action, params = {}) {
-  const url = new URL(GAS_URL);
+  const url = new URL("/api/gas", window.location.origin);
   url.searchParams.set("action", action);
-  url.searchParams.set("key", API_KEY);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const res  = await fetch(url.toString());
   const json = await res.json();
@@ -45,10 +41,10 @@ async function gasGet(action, params = {}) {
 }
 
 async function gasPost(action, data, extra = {}) {
-  const res = await fetch(GAS_URL, {
+  const res = await fetch("/api/gas", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, key: API_KEY, data, ...extra }),
+    body: JSON.stringify({ action, data, ...extra }),
   });
   const json = await res.json();
   if (!json.success) throw new Error(json.error || "API error");
@@ -267,7 +263,7 @@ function CrmApp({ user, onLogout }) {
   // ── API actions ───────────────────────────────────────────
   const markPaid = async (invId) => {
     try {
-      await fetch(GAS_URL, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",key:API_KEY,invId})});
+      await fetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",invId})});
       notify(`✅ ${invId} marked as Paid`);
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); }
@@ -276,7 +272,7 @@ function CrmApp({ user, onLogout }) {
   const voidInvoice = async (invId) => {
     if(!confirm(`Void ${invId}? This will zero the total and reverse AR. Cannot be undone.`)) return;
     try {
-      await fetch(GAS_URL, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",key:API_KEY,invId})});
+      await fetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",invId})});
       notify(`✅ ${invId} voided`);
       closeModal();
       await loadData(true);
