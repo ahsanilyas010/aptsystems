@@ -283,11 +283,34 @@ function CrmApp({ user, onLogout }) {
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
+  const deleteInvoice = async (invId) => {
+    if(!confirm(`⚠️ WARNING: Are you sure you want to permanently DELETE ${invId}? This will completely remove it from the Google Sheet and cannot be undone.`)) return;
+    try {
+      const res = await fetch(GAS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_invoice", key: API_KEY, invId })
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || "Delete failed");
+      notify(`✅ ${invId} permanently deleted`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
   const saveInvoice = async (formData) => {
     try {
-      const result = await gasPost("save_invoice", {...formData, createdBy:user.email}, {createdBy:user.email});
+      const enrichedItems = formData.items.map(item => {
+        const pr = prodMap[item.pid];
+        return {
+          ...item,
+          pname: pr ? pr.name : (item.pname || "")
+        };
+      });
+      const result = await gasPost("save_invoice", {...formData, items: enrichedItems, createdBy:user.email}, {createdBy:user.email});
       if (result.pdfUrl) cachePdf(formData.invId||result.id, result.pdfUrl);
-      notify(`✅ ${result.id||"Invoice"} saved — ${fmt(formData.items.reduce((s,i)=>s+(i.qty*i.rate),0))}${result.pdfUrl?" · PDF ready":""}`);
+      notify(`✅ ${result.id||"Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}${result.pdfUrl?" · PDF ready":""}`);
       closeModal();
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); }
@@ -702,7 +725,18 @@ function CrmApp({ user, onLogout }) {
       const InvForm=()=>{
         const [f,setF]=useState({custId:"",date:todayStr(),payTerms:"COD",notes:"",items:[{pid:"",qty:1,rate:0}]});
         const total=f.items.reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
-        const setLine=(i,k,v)=>setF(p=>{const it=[...p.items];it[i]={...it[i],[k]:v};if(k==="pid"){const pr=prodMap[v];if(pr)it[i].rate=pr.price;}return{...p,items:it};});
+        const setLine=(i,k,v)=>setF(p=>{
+          const it=[...p.items];
+          it[i]={...it[i],[k]:v};
+          if(k==="pid"){
+            const pr=prodMap[v];
+            if(pr){
+              it[i].rate=pr.price;
+              it[i].pname=pr.name;
+            }
+          }
+          return{...p,items:it};
+        });
         return(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -767,10 +801,15 @@ function CrmApp({ user, onLogout }) {
             </div>
             <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)}/>
           </div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
-            {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="success" onClick={()=>{markPaid(inv.id);closeModal();}}>✓ Mark Paid</Btn>}
-            {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="secondary" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:inv.custId,invId:inv.id}});}}>💳 Partial</Btn>}
-            {inv.status!=="VOIDED"&&<Btn v="danger" onClick={()=>voidInvoice(inv.id)}>🗑 Void</Btn>}
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"space-between",alignItems:"center",width:"100%"}}>
+            <div>
+              <Btn v="danger" onClick={()=>deleteInvoice(inv.id)}>🗑️ Delete Permanently</Btn>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="success" onClick={()=>{markPaid(inv.id);closeModal();}}>✓ Mark Paid</Btn>}
+              {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="secondary" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:inv.custId,invId:inv.id}});}}>💳 Partial</Btn>}
+              {inv.status!=="VOIDED"&&<Btn v="danger" onClick={()=>voidInvoice(inv.id)}>🗑 Void</Btn>}
+            </div>
           </div>
         </Modal>
       );

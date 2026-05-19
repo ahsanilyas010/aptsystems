@@ -294,6 +294,14 @@ function doPost(e) {
         return _apiOk({ message:result });
       }
 
+      // ── Delete Invoice ─────────────────────────────────────
+      case "delete_invoice": {
+        var invId = body.invId;
+        if (!invId) return _apiErr("Missing invId");
+        var result = deleteInvoice(invId);
+        return _apiOk({ message:result });
+      }
+
       default: return _apiErr("Unknown action: " + action);
     }
   } catch(err) {
@@ -613,4 +621,45 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
       return;
     }
   }
+}
+
+// ── Delete Invoice ──
+function deleteInvoice(invId) {
+  if (!invId) return "Error: No Invoice ID provided";
+  var ss = SpreadsheetApp.openById(API_CFG.SHEET_ID);
+  
+  // 1. Delete from Invoice Headers
+  var sheetH = ss.getSheetByName(CFG.INV_H);
+  if (sheetH) {
+    var dataH = sheetH.getDataRange().getValues();
+    for (var i = dataH.length - 1; i >= 3; i--) {
+      if (dataH[i][0] && dataH[i][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
+        sheetH.deleteRow(i + 1);
+      }
+    }
+  }
+  
+  // 2. Delete from Invoice Items
+  var sheetI = ss.getSheetByName(CFG.INV_I);
+  if (sheetI) {
+    var dataI = sheetI.getDataRange().getValues();
+    for (var i = dataI.length - 1; i >= 3; i--) {
+      if (dataI[i][0] && dataI[i][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
+        sheetI.deleteRow(i + 1);
+      }
+    }
+  }
+
+  // 3. Delete matching Payments recorded against this invoice
+  var sheetPay = ss.getSheetByName(CFG.PAY);
+  if (sheetPay) {
+    var dataPay = sheetPay.getDataRange().getValues();
+    for (var i = dataPay.length - 1; i >= 3; i--) {
+      if (dataPay[i][5] && dataPay[i][5].toString().trim().toUpperCase() === invId.toUpperCase()) {
+        sheetPay.deleteRow(i + 1);
+      }
+    }
+  }
+
+  return "Invoice " + invId + " and associated items/payments deleted successfully";
 }
