@@ -12,7 +12,8 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { initializeApp } from "firebase/app";
 import {
-  getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+  getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+  signInWithEmailAndPassword
 } from "firebase/auth";
 
 const firebaseConfig = {
@@ -161,21 +162,112 @@ const PdfBtn = ({ invId, pdfUrl, onGenerate, sm }) => {
 };
 
 // ── Auth screens ──────────────────────────────────────────────
-const LoginScreen = ({onLogin, error}) => (
-  <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:`linear-gradient(135deg,#0D1F0E 0%,${G.dark} 100%)`,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
-    <div style={{background:G.white,borderRadius:20,padding:40,width:320,boxShadow:"0 40px 100px rgba(0,0,0,0.5)",textAlign:"center"}}>
-      <div style={{width:64,height:64,background:`linear-gradient(135deg,${G.mid},${G.accent})`,borderRadius:18,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 18px",boxShadow:`0 8px 24px ${G.mid}44`}}>🌿</div>
-      <h1 style={{margin:"0 0 3px",fontSize:24,fontWeight:800,color:G.ink}}>APT CRM</h1>
-      <p style={{margin:"0 0 6px",fontSize:10,color:G.muted,letterSpacing:"0.12em",textTransform:"uppercase",fontWeight:700}}>Assorted Produce Traders</p>
-      <p style={{margin:"0 0 28px",fontSize:12,color:G.muted}}>Distribution Management System</p>
-      {error&&<div style={{background:G.pink,borderRadius:8,padding:"10px 14px",marginBottom:18,fontSize:12,color:G.red,fontWeight:600}}>⛔ {error}</div>}
-      <button onClick={onLogin} style={{width:"100%",background:G.dark,color:G.white,border:"none",borderRadius:12,padding:"14px",fontSize:14,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
-        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#EA4335" d="M5.266 9.765A7.077 7.077 0 0 1 12 4.909c1.69 0 3.218.6 4.418 1.582L19.91 3C17.782 1.145 15.055 0 12 0 7.27 0 3.198 2.698 1.24 6.65l4.026 3.115z"/><path fill="#34A853" d="M16.04 18.013c-1.09.703-2.474 1.078-4.04 1.078a7.077 7.077 0 0 1-6.723-4.823l-4.04 3.067A11.965 11.965 0 0 0 12 24c2.933 0 5.735-1.043 7.834-3l-3.793-2.987z"/><path fill="#4A90E2" d="M19.834 21c2.195-2.048 3.62-5.096 3.62-9 0-.71-.109-1.473-.272-2.182H12v4.637h6.436c-.317 1.559-1.17 2.766-2.395 3.558L19.834 21z"/><path fill="#FBBC05" d="M5.277 14.268A7.12 7.12 0 0 1 4.909 12c0-.782.125-1.533.357-2.235L1.24 6.65A11.934 11.934 0 0 0 0 12c0 1.92.445 3.73 1.237 5.335l4.04-3.067z"/></svg>
-        Sign in with Google
-      </button>
+const LoginScreen = ({ error }) => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(error || "");
+
+  useEffect(() => {
+    setErr(error || "");
+  }, [error]);
+
+  const handleEmailLogin = async (e) => {
+    e.preventDefault();
+    if (!email || !password) {
+      setErr("Please enter both email and password.");
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (e) {
+      let msg = e.message;
+      if (e.code === "auth/user-not-found" || e.code === "auth/wrong-password" || e.code === "auth/invalid-credential") {
+        msg = "Invalid email or password. Please try again.";
+      } else if (e.code === "auth/invalid-email") {
+        msg = "The email address is badly formatted.";
+      }
+      setErr(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setLoading(true);
+    setErr("");
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch(e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:`linear-gradient(135deg,#0D1F0E 0%,${G.dark} 100%)`,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+      <div style={{background:G.white,borderRadius:20,padding:35,width:340,boxShadow:"0 40px 100px rgba(0,0,0,0.5)",textAlign:"center"}}>
+        <div style={{width:64,height:64,background:`linear-gradient(135deg,${G.mid},${G.accent})`,borderRadius:18,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 18px",boxShadow:`0 8px 24px ${G.mid}44`}}>🌿</div>
+        <h1 style={{margin:"0 0 3px",fontSize:24,fontWeight:800,color:G.ink}}>APT CRM</h1>
+        <p style={{margin:"0 0 6px",fontSize:10,color:G.muted,letterSpacing:"0.12em",textTransform:"uppercase",fontWeight:700}}>Assorted Produce Traders</p>
+        <p style={{margin:"0 0 24px",fontSize:12,color:G.muted}}>Distribution Management System</p>
+        
+        {err && <div style={{background:G.pink,borderRadius:8,padding:"10px 14px",marginBottom:18,fontSize:12,color:G.red,fontWeight:600,textAlign:"left"}}>⛔ {err}</div>}
+        
+        <form onSubmit={handleEmailLogin} style={{textAlign:"left",marginBottom:20}}>
+          <div style={{marginBottom:14}}>
+            <label style={{display:"block",fontSize:11,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:5}}>Email Address</label>
+            <input 
+              type="email" 
+              placeholder="e.g. user@assortedtrade.com" 
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              disabled={loading}
+              style={{width:"100%",boxSizing:"border-box",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.border}`,fontSize:13,outline:"none",transition:"border 0.2s"}}
+            />
+          </div>
+          <div style={{marginBottom:20}}>
+            <label style={{display:"block",fontSize:11,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:5}}>Password</label>
+            <input 
+              type="password" 
+              placeholder="••••••••" 
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              disabled={loading}
+              style={{width:"100%",boxSizing:"border-box",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.border}`,fontSize:13,outline:"none",transition:"border 0.2s"}}
+            />
+          </div>
+          <button 
+            type="submit" 
+            disabled={loading}
+            style={{width:"100%",background:G.mid,color:G.white,border:"none",borderRadius:12,padding:"12px",fontSize:14,fontWeight:700,cursor:loading?"wait":"pointer",boxShadow:`0 4px 12px ${G.mid}33`}}
+          >
+            {loading ? "⏳ Connecting..." : "🔑 Sign In with Password"}
+          </button>
+        </form>
+
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+          <div style={{flex:1,height:"1px",background:G.border}}/>
+          <span style={{fontSize:11,color:G.muted,fontWeight:600}}>OR CONNECT WITH</span>
+          <div style={{flex:1,height:"1px",background:G.border}}/>
+        </div>
+
+        <button 
+          onClick={handleGoogleLogin} 
+          disabled={loading}
+          type="button"
+          style={{width:"100%",background:"#f1f5f9",color:"#334155",border:`1px solid ${G.border}`,borderRadius:12,padding:"12px",fontSize:14,fontWeight:700,cursor:loading?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10,transition:"background 0.2s"}}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#EA4335" d="M5.266 9.765A7.077 7.077 0 0 1 12 4.909c1.69 0 3.218.6 4.418 1.582L19.91 3C17.782 1.145 15.055 0 12 0 7.27 0 3.198 2.698 1.24 6.65l4.026 3.115z"/><path fill="#34A853" d="M16.04 18.013c-1.09.703-2.474 1.078-4.04 1.078a7.077 7.077 0 0 1-6.723-4.823l-4.04 3.067A11.965 11.965 0 0 0 12 24c2.933 0 5.735-1.043 7.834-3l-3.793-2.987z"/><path fill="#4A90E2" d="M19.834 21c2.195-2.048 3.62-5.096 3.62-9 0-.71-.109-1.473-.272-2.182H12v4.637h6.436c-.317 1.559-1.17 2.766-2.395 3.558L19.834 21z"/><path fill="#FBBC05" d="M5.277 14.268A7.12 7.12 0 0 1 4.909 12c0-.782.125-1.533.357-2.235L1.24 6.65A11.934 11.934 0 0 0 0 12c0 1.92.445 3.73 1.237 5.335l4.04-3.067z"/></svg>
+          Continue with Google
+        </button>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const AccessDenied = ({user,onLogout}) => (
   <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:G.bg,flexDirection:"column",gap:14,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
@@ -1140,7 +1232,7 @@ export default function App() {
   const handleLogout = () => signOut(auth);
 
   if (authState==="loading") return <LoadingScreen msg="Initialising APT CRM…"/>;
-  if (authState==="login")   return <LoginScreen onLogin={handleLogin} error={loginError}/>;
+  if (authState==="login")   return <LoginScreen error={loginError}/>;
   if (authState==="denied")  return <AccessDenied user={user} onLogout={handleLogout}/>;
   return <CrmApp user={user} onLogout={handleLogout}/>;
 }
