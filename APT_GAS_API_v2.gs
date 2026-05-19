@@ -158,16 +158,52 @@ function doPost(e) {
         var d = body.data;
         if (!d||!d.custId||!d.items||!d.items.length) return _apiErr("Missing custId or items");
         d.createdBy = body.createdBy || d.createdBy || "api";
+        
+        // Ensure customer name is populated inside d
+        var custName = d.custName || d.customerName || d.customer || "";
+        if (!custName) {
+          try {
+            var custWs = ss.getSheetByName(CFG.CUST);
+            if (custWs) {
+              var cData = custWs.getDataRange().getValues();
+              for (var i=3; i<cData.length; i++) {
+                if (cData[i][0] && cData[i][0].toString().trim() === d.custId) {
+                  custName = cData[i][1] || "";
+                  break;
+                }
+              }
+            }
+          } catch(e) {}
+        }
+        d.custName = custName;
+        d.customerName = custName;
+        d.customer = custName;
+
         // Call your existing saveInvoice function
         var result = saveInvoice(d);
-        // Generate PDF immediately and return URL
-        var invId = d.invId || nextINV();
+        var invId = d.invId || (typeof nextINV !== "undefined" ? nextINV() : "");
+        
+        // Generate PDF immediately and return URL (avoid double generation)
+        Utilities.sleep(1000); // Wait 1 second for any sheet triggers
         var pdfUrl = "";
-        try {
-          var total = d.items.reduce(function(s,i){return s+(i.qty*i.rate);},0)*(1+(d.tax||0)/100);
-          pdfUrl = _generatePDF(d, total);
-        } catch(pdfErr) { pdfUrl = ""; }
-        return _apiOk({ message:result, id:d.invId, pdfUrl:pdfUrl });
+        if (invId) {
+          pdfUrl = _findPdfInDrive(invId);
+        }
+        
+        if (!pdfUrl) {
+          try {
+            var total = d.items.reduce(function(s,i){return s+(i.qty*i.rate);},0)*(1+(d.tax||0)/100);
+            pdfUrl = _generatePDF(d, total);
+          } catch(pdfErr) { pdfUrl = ""; }
+        }
+        
+        // Rename the generated file to "Customer Name - Invoice Number.pdf"
+        if (invId) {
+          _renamePdfFile(invId, custName);
+          pdfUrl = _findPdfInDrive(invId) || pdfUrl;
+        }
+        
+        return _apiOk({ message:result, id:invId, pdfUrl:pdfUrl });
       }
 
       // ── Save Expense ───────────────────────────────────────
@@ -592,11 +628,24 @@ function _generatePdfForInvoice(ss, invId) {
     }
   }
 
-  var d = { invId:invId, date:_fmtDate(inv[1]), custId:inv[2]||"", payTerms:inv[6]||"COD", notes:"Thank you for your business.", tax:0, items:items };
+  var d = { 
+    invId: invId, 
+    date: _fmtDate(inv[1]), 
+    custId: inv[2]||"", 
+    custName: custName,
+    customerName: custName,
+    customer: custName,
+    payTerms: inv[6]||"COD", 
+    notes: "Thank you for your business.", 
+    tax: 0, 
+    items: items 
+  };
   var total = items.reduce(function(s,i){return s+i.total;},0);
 
   try {
-    return _generatePDF(d, total);
+    var pdfUrl = _generatePDF(d, total);
+    _renamePdfFile(invId, custName);
+    return _findPdfInDrive(invId) || pdfUrl;
   } catch(e) {
     return null;
   }
@@ -662,4 +711,25 @@ function deleteInvoice(invId) {
   }
 
   return "Invoice " + invId + " and associated items/payments deleted successfully";
+}
+
+// ── Rename PDF File in Drive ──
+function _renamePdfFile(invId, custName) {
+  try {
+    var folder = DriveApp.getFolderById(API_CFG.DRIVE_FOLDER);
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var f = files.next();
+      var name = f.getName();
+      // If the file is named "undefined - INV-xxx.pdf" or just "INV-xxx.pdf"
+      if (name.indexOf(invId) !== -1) {
+        var cleanName = (custName ? custName.toString().trim() : "Customer") + " - " + invId + ".pdf";
+        if (name !== cleanName) {
+          f.setName(cleanName);
+        }
+      }
+    }
+  } catch(e) {
+    Logger.log("Rename failed: " + e.message);
+  }
 }

@@ -264,6 +264,22 @@ function CrmApp({ user, onLogout }) {
   // ── PDF cache handler ─────────────────────────────────────
   const cachePdf = (invId, url) => setPdfCache(p=>({...p,[invId]:url}));
 
+  const triggerPdfDownload = (url) => {
+    if (!url) return;
+    let downloadUrl = url;
+    const m = url.match(/\/file\/d\/([^\/]+)/) || url.match(/id=([^&]+)/);
+    if (m && m[1]) {
+      downloadUrl = `https://drive.google.com/uc?export=download&id=${m[1]}`;
+    }
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.target = "_blank";
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   // ── API actions ───────────────────────────────────────────
   const markPaid = async (invId) => {
     try {
@@ -301,6 +317,8 @@ function CrmApp({ user, onLogout }) {
 
   const saveInvoice = async (formData) => {
     try {
+      const cust = customers.find(c => c.id === formData.custId);
+      const custName = cust ? cust.name : "";
       const enrichedItems = formData.items.map(item => {
         const pr = prodMap[item.pid];
         return {
@@ -308,12 +326,26 @@ function CrmApp({ user, onLogout }) {
           pname: pr ? pr.name : (item.pname || "")
         };
       });
-      const result = await gasPost("save_invoice", {...formData, items: enrichedItems, createdBy:user.email}, {createdBy:user.email});
-      if (result.pdfUrl) cachePdf(formData.invId||result.id, result.pdfUrl);
-      notify(`✅ ${result.id||"Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}${result.pdfUrl?" · PDF ready":""}`);
+      const result = await gasPost("save_invoice", {
+        ...formData, 
+        custName,
+        customerName: custName,
+        customer: custName,
+        items: enrichedItems, 
+        createdBy: user.email
+      }, {createdBy: user.email});
+      
+      const invId = formData.invId || result.id;
+      if (result.pdfUrl) {
+        cachePdf(invId, result.pdfUrl);
+        // Auto-download PDF immediately in browser
+        triggerPdfDownload(result.pdfUrl);
+      }
+      
+      notify(`✅ ${invId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
       closeModal();
       await loadData(true);
-    } catch(e) { notify("❌ "+e.message,"err"); }
+    } catch(e) { notify("❌ "+e.message,"err"); throw e; }
   };
 
   const saveExpense = async (d) => {
@@ -724,7 +756,21 @@ function CrmApp({ user, onLogout }) {
     if(modal.t==="newInvoice"){
       const InvForm=()=>{
         const [f,setF]=useState({custId:"",date:todayStr(),payTerms:"COD",notes:"",items:[{pid:"",qty:1,rate:0}]});
+        const [loading, setLoading] = useState(false);
         const total=f.items.reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
+        
+        const handleSave = async () => {
+          if (!f.custId) { notify("Please select a store", "err"); return; }
+          if (f.items.some(item => !item.pid)) { notify("Please select a product for all lines", "err"); return; }
+          setLoading(true);
+          try {
+            await saveInvoice(f);
+          } catch(e) {
+            // Error is handled inside saveInvoice
+          } finally {
+            setLoading(false);
+          }
+        };
         const setLine=(i,k,v)=>setF(p=>{
           const it=[...p.items];
           it[i]={...it[i],[k]:v};
@@ -770,9 +816,11 @@ function CrmApp({ user, onLogout }) {
             <div style={{background:"#E8F0FE",borderRadius:8,padding:"9px 12px",fontSize:11,color:G.blue,fontWeight:600}}>
               💾 Saves to Sheet · 🖨 PDF generated via invoice-generator.com · 📂 Saved to Drive
             </div>
-            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6,paddingTop:10,borderTop:`1px solid ${G.pale}`}}>
-              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>saveInvoice(f)}>💾 Save + Generate PDF</Btn>
+             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6,paddingTop:10,borderTop:`1px solid ${G.pale}`}}>
+              <Btn v="secondary" onClick={closeModal} disabled={loading}>Cancel</Btn>
+              <Btn onClick={handleSave} disabled={loading}>
+                {loading ? "⏳ Saving & Generating PDF..." : "💾 Save + Generate PDF"}
+              </Btn>
             </div>
           </div>
         );
