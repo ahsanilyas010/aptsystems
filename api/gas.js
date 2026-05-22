@@ -30,7 +30,24 @@ export default async function handler(req, res) {
       });
 
       const upstream = await fetch(url.toString(), { redirect: "follow" });
-      const data = await upstream.json();
+      const text = await upstream.text();
+      
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (jsonErr) {
+        if (text.trim().startsWith("<")) {
+          return res.status(502).json({
+            success: false,
+            error: "Upstream Google Apps Script returned an HTML page (likely a Google login prompt, permission error, or runtime crash). Make sure the Web App is deployed in Apps Script (Deploy -> Manage Deployments -> Edit -> New Version -> Deploy), executed as 'Me' (your email), and accessible by 'Anyone'."
+          });
+        }
+        return res.status(502).json({
+          success: false,
+          error: "Failed to parse JSON from upstream Apps Script: " + jsonErr.message,
+          rawResponse: text.substring(0, 300)
+        });
+      }
       return res.status(upstream.status).json(data);
 
     } else if (req.method === "POST") {
@@ -42,7 +59,24 @@ export default async function handler(req, res) {
         body: JSON.stringify({ ...body, key: API_KEY }),
         redirect: "follow",
       });
-      const data = await upstream.json();
+      const text = await upstream.text();
+      
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (jsonErr) {
+        if (text.trim().startsWith("<")) {
+          return res.status(502).json({
+            success: false,
+            error: "Upstream Google Apps Script returned an HTML page (likely a Google login prompt, permission error, or runtime crash). Make sure the Web App is deployed in Apps Script (Deploy -> Manage Deployments -> Edit -> New Version -> Deploy), executed as 'Me' (your email), and accessible by 'Anyone'."
+          });
+        }
+        return res.status(502).json({
+          success: false,
+          error: "Failed to parse JSON from upstream Apps Script: " + jsonErr.message,
+          rawResponse: text.substring(0, 300)
+        });
+      }
       return res.status(upstream.status).json(data);
 
     } else {

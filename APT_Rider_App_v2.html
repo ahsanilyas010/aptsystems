@@ -319,6 +319,33 @@ var CFG = {
   get RIDER_NM(){ return localStorage.getItem("apt_rider_name")||"Rider"; },
 };
 
+// Robust and safe fetch helper to handle non-JSON responses gracefully
+async function safeFetchJson(url, options) {
+  var res = await fetch(url, options);
+  var text = await res.text();
+  
+  if (!res.ok) {
+    try {
+      var errJson = JSON.parse(text);
+      throw new Error(errJson.error || errJson.message || "HTTP status " + res.status);
+    } catch(e) {
+      if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+        throw new Error("Server returned HTML page instead of JSON. Check if your API Endpoint URL is correct (not the editor URL) and deployed as 'Anyone'.");
+      }
+      throw new Error(text.substring(0, 100) || "HTTP status " + res.status);
+    }
+  }
+  
+  try {
+    return JSON.parse(text);
+  } catch(ex) {
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+      throw new Error("Server returned HTML page instead of JSON (Apps Script backend might have crashed or been misconfigured).");
+    }
+    throw new Error("Invalid JSON: " + ex.message + " (" + text.substring(0, 50) + ")");
+  }
+}
+
 // ══════════════════════════════════════════════════════
 //  STATE
 // ══════════════════════════════════════════════════════
@@ -433,7 +460,7 @@ function clearLocal() {
 async function syncAll() {
   if(STATE.syncing) return;
   if(!STATE.online) { showToast("Offline — using cached data","err"); return; }
-  if(!CFG.GAS_URL) { showToast("https://script.google.com/macros/s/AKfycbyHHNRfheiNAJYzdprb4jFOKen1ta5L2pyZRUDVGQUr/dev","err"); return; }
+  if(!CFG.GAS_URL) { showToast("API Endpoint not configured! Please set it in the Profile tab.","err"); return; }
 
   STATE.syncing=true;
   var btn=document.getElementById("syncBtn");
@@ -441,8 +468,7 @@ async function syncAll() {
 
   try {
     var url=CFG.GAS_URL+"?action=all&key="+encodeURIComponent(CFG.API_KEY);
-    var res=await fetch(url);
-    var json=await res.json();
+    var json=await safeFetchJson(url);
     if(!json.success) throw new Error(json.error||"API error");
 
     var d=json.data;
@@ -660,7 +686,7 @@ async function syncOrderToSheet(order) {
     var invId = "INV-RIDER-"+Date.now().toString().slice(-6);
     order.invId = invId;
 
-    var res=await fetch(CFG.GAS_URL, {
+    var json=await safeFetchJson(CFG.GAS_URL, {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({
@@ -679,7 +705,6 @@ async function syncOrderToSheet(order) {
         }
       })
     });
-    var json=await res.json();
     if(json.success){
       order.synced=true;
       order.sheetId=json.data&&json.data.id;

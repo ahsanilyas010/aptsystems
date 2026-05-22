@@ -22,12 +22,38 @@ var API_CFG = {
   TZ:          "Asia/Karachi",
 };
 
+// ── SAFE CFG FALLBACK ────────────────────────────────────────
+// If CFG is not defined globally (e.g. in a standalone project),
+// we define it here so the script works independently and won't crash!
+if (typeof CFG === "undefined") {
+  var CFG = {
+    SHEET_ID:     API_CFG.SHEET_ID,
+    API_KEY:      API_CFG.API_KEY,
+    DRIVE_FOLDER: API_CFG.DRIVE_FOLDER,
+    INV_API_KEY:  API_CFG.INV_API_KEY,
+    TZ:           API_CFG.TZ,
+    
+    // Sheet Names mapping
+    CUST:         "02_Customers",
+    VEN:          "03_Vendors",
+    PROD:         "04_Products",
+    INV_H:        "05_Invoice_Headers",
+    INV_I:        "06_Invoice_Items",
+    PUR_H:        "08_Purchase_Headers",
+    PAY:          "10_Payments",
+    EXP:          "11_Expenses",
+    AR:           "12_AR_Ledger",
+    AP:           "13_AP_Ledger",
+    INV_L:        "14_Inventory_List"
+  };
+}
+
 // ── CORS + Response helpers ──────────────────────────────────
 function _apiCors(out) {
-  return out
-    .setHeader("Access-Control-Allow-Origin", "*")
-    .setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-    .setHeader("Access-Control-Allow-Headers", "Content-Type,X-API-Key");
+  // Google Apps Script handles CORS automatically via redirects from script.google.com
+  // to script.googleusercontent.com when returning ContentService output.
+  // Calling .setHeader() on a TextOutput object throws a TypeError, causing a 500 HTML error page.
+  return out;
 }
 function _apiJson(obj) {
   return _apiCors(ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON));
@@ -45,16 +71,18 @@ function _apiAuth(e) {
 
 // ── OPTIONS preflight (CORS) ─────────────────────────────────
 function doOptions(e) {
-  return _apiCors(ContentService.createTextOutput("").setMimeType(ContentService.MimeType.TEXT));
+  return ContentService.createTextOutput("").setMimeType(ContentService.MimeType.TEXT);
 }
 
 // ============================================================
 //  doGet — READ
 // ============================================================
 function doGet(e) {
+  e = e || {};
   if (!_apiAuth(e)) return _apiErr("Unauthorized", 401);
   var action = (e.parameter && e.parameter.action) || "dashboard";
-  var ss = SpreadsheetApp.openById(API_CFG.SHEET_ID);
+  var ss = _getSs();
+  if (!ss) return _apiErr("Spreadsheet not found or inaccessible. Please verify SHEET_ID.", 500);
 
   try {
     switch (action) {
@@ -143,12 +171,20 @@ function doGet(e) {
 //  doPost — WRITE
 // ============================================================
 function doPost(e) {
+  if (!e || !e.postData || !e.postData.contents) {
+    return _apiErr("Missing POST request body / empty payload", 400);
+  }
   var body = {};
-  try { body = JSON.parse(e.postData.contents); } catch(ex) { return _apiErr("Invalid JSON body"); }
+  try { 
+    body = JSON.parse(e.postData.contents); 
+  } catch(ex) { 
+    return _apiErr("Malformed or invalid JSON body: " + ex.message, 400); 
+  }
   if (!_apiAuth({postData:{contents:JSON.stringify(body)}})) return _apiErr("Unauthorized",401);
 
   var action = body.action;
-  var ss = SpreadsheetApp.openById(API_CFG.SHEET_ID);
+  var ss = _getSs();
+  if (!ss) return _apiErr("Spreadsheet not found or inaccessible. Please verify SHEET_ID.", 500);
 
   try {
     switch(action) {
@@ -347,6 +383,25 @@ function doPost(e) {
 // ============================================================
 //  READ HELPERS
 // ============================================================
+
+// Helper to safely retrieve the Spreadsheet object
+function _getSs(ss) {
+  if (ss) return ss;
+  try {
+    if (API_CFG.SHEET_ID) {
+      return SpreadsheetApp.openById(API_CFG.SHEET_ID);
+    }
+  } catch(e) {
+    Logger.log("openById failed: " + e.message);
+  }
+  try {
+    return SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  } catch(e) {
+    Logger.log("getActiveSpreadsheet failed: " + e.message);
+  }
+  return null;
+}
+
 function _today() {
   return Utilities.formatDate(new Date(), API_CFG.TZ, "yyyy-MM-dd");
 }
@@ -386,6 +441,8 @@ function _getNextId(ws, prefix) {
 }
 
 function _getNextCustomerId(ss) {
+  ss = _getSs(ss);
+  if (!ss) return "C-001";
   var ws=ss.getSheetByName(CFG.CUST);
   if (!ws||ws.getLastRow()<4) return "C-001";
   var data=ws.getRange(4,1,ws.getLastRow()-3,1).getValues();
@@ -398,6 +455,8 @@ function _getNextCustomerId(ss) {
 }
 
 function _readCustomers(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.CUST);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,8).getValues();
@@ -410,6 +469,8 @@ function _readCustomers(ss) {
 }
 
 function _readVendors(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.VEN);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,8).getValues();
@@ -422,6 +483,8 @@ function _readVendors(ss) {
 }
 
 function _readProducts(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.PROD);
   if (!ws||ws.getLastRow()<4) return [];
   var numCols=Math.min(ws.getLastColumn(),9);
@@ -435,6 +498,8 @@ function _readProducts(ss) {
 }
 
 function _readInvoices(ss, limit) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.INV_H);
   if (!ws||ws.getLastRow()<4) return [];
   var lastRow=ws.getLastRow();
@@ -451,6 +516,8 @@ function _readInvoices(ss, limit) {
 }
 
 function _readPurchases(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.PUR_H);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,7).getValues();
@@ -464,6 +531,8 @@ function _readPurchases(ss) {
 }
 
 function _readPayments(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.PAY);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,8).getValues();
@@ -477,6 +546,8 @@ function _readPayments(ss) {
 }
 
 function _readExpenses(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.EXP);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,7).getValues();
@@ -490,6 +561,8 @@ function _readExpenses(ss) {
 }
 
 function _readAR(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.AR);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,7).getValues();
@@ -502,6 +575,8 @@ function _readAR(ss) {
 }
 
 function _readAP(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.AP);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,6).getValues();
@@ -514,6 +589,8 @@ function _readAP(ss) {
 }
 
 function _readInventory(ss) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var ws=ss.getSheetByName(CFG.INV_L);
   if (!ws||ws.getLastRow()<4) return [];
   var data=ws.getRange(4,1,ws.getLastRow()-3,10).getValues();
@@ -526,6 +603,8 @@ function _readInventory(ss) {
 }
 
 function _readDashboard(ss) {
+  ss = _getSs(ss);
+  if (!ss) return { totalInvoiced:0, totalReceived:0, totalPurchases:0, totalExpenses:0, netProfit:0, outstandingAR:0 };
   // Try Control Panel first
   var sheets = ss.getSheets();
   var cp = null;
@@ -554,6 +633,8 @@ function _readDashboard(ss) {
 
 // ── Rider journey plan ───────────────────────────────────────
 function _readRiderJourney(ss, riderId) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   var customers = _readCustomers(ss);
   // Group by area/zone using _detectZone
   var zones = {};
@@ -567,6 +648,8 @@ function _readRiderJourney(ss, riderId) {
 }
 
 function _readRiderOrders(ss, riderId) {
+  ss = _getSs(ss);
+  if (!ss) return [];
   // Return today's pending invoices for rider tracking
   var invoices = _readInvoices(ss, 100);
   var today = _today();
@@ -596,6 +679,8 @@ function _findPdfInDrive(invId) {
 }
 
 function _generatePdfForInvoice(ss, invId) {
+  ss = _getSs(ss);
+  if (!ss) return null;
   var invH  = ss.getSheetByName(CFG.INV_H);
   var invI  = ss.getSheetByName(CFG.INV_I);
   var custWs= ss.getSheetByName(CFG.CUST);
@@ -649,9 +734,11 @@ function _generatePdfForInvoice(ss, invId) {
 }
 
 function _updateInvoiceStatus(ss, invId, amtReceived) {
+  ss = _getSs(ss);
+  if (!ss) return;
   var ws = ss.getSheetByName(CFG.INV_H);
   if (!ws) return;
-  var data = ws.getDataRange().getValues();
+  var data = ws.getLastRow()<4 ? [] : ws.getRange(4,1,ws.getLastRow()-3,6).getValues();
   // Find total paid from payments
   var payWs = ss.getSheetByName(CFG.PAY);
   var totalPaid = amtReceived;
@@ -659,11 +746,11 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
     var pData = payWs.getRange(4,1,payWs.getLastRow()-3,7).getValues();
     pData.forEach(function(p){ if(p[5]&&p[5].toString().trim()===invId&&p[2]==="Received") totalPaid+=parseFloat(p[6])||0; });
   }
-  for (var i=3;i<data.length;i++) {
+  for (var i=0;i<data.length;i++) {
     if (data[i][0]&&data[i][0].toString().trim().toUpperCase()===invId.toUpperCase()) {
       var total=parseFloat(data[i][4])||0;
       var status=totalPaid>=total?"Paid":totalPaid>0?"Partial":"Unpaid";
-      ws.getRange(i+1,6).setValue(status);
+      ws.getRange(i+4,6).setValue(status);
       return;
     }
   }
@@ -672,7 +759,8 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
 // ── Delete Invoice ──
 function deleteInvoice(invId) {
   if (!invId) return "Error: No Invoice ID provided";
-  var ss = SpreadsheetApp.openById(API_CFG.SHEET_ID);
+  var ss = _getSs();
+  if (!ss) return "Error: Spreadsheet not found or inaccessible";
   
   // 1. Delete from Invoice Headers
   var sheetH = ss.getSheetByName(CFG.INV_H);

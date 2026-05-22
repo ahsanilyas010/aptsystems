@@ -30,24 +30,48 @@ const ALLOWED_EMAILS = [
   "tahafayyazlp@gmail.com",
 ];
 
-// ── API helpers — all calls go through /api/gas (Vercel proxy, no CORS) ──
+// Robust fetch helper that handles HTML/non-JSON responses gracefully
+async function safeGasFetch(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  
+  if (!res.ok) {
+    try {
+      const errJson = JSON.parse(text);
+      throw new Error(errJson.error || errJson.message || `HTTP status ${res.status}`);
+    } catch(e) {
+      if (text.trim().startsWith("<")) {
+        throw new Error("Vercel Serverless Function or upstream Apps Script returned HTML. Check API deployment and logs.");
+      }
+      throw new Error(text.substring(0, 100) || `HTTP status ${res.status}`);
+    }
+  }
+  
+  try {
+    return JSON.parse(text);
+  } catch(e) {
+    if (text.trim().startsWith("<")) {
+      throw new Error("Server returned HTML page instead of JSON. Ensure Web App is deployed and 'Anyone' can access it.");
+    }
+    throw new Error(`Invalid JSON response: ${e.message} (${text.substring(0, 50)})`);
+  }
+}
+
 async function gasGet(action, params = {}) {
   const url = new URL("/api/gas", window.location.origin);
   url.searchParams.set("action", action);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const res  = await fetch(url.toString());
-  const json = await res.json();
+  const json = await safeGasFetch(url.toString());
   if (!json.success) throw new Error(json.error || "API error");
   return json.data;
 }
 
 async function gasPost(action, data, extra = {}) {
-  const res = await fetch("/api/gas", {
+  const json = await safeGasFetch("/api/gas", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, data, ...extra }),
   });
-  const json = await res.json();
   if (!json.success) throw new Error(json.error || "API error");
   return json.data;
 }
@@ -371,7 +395,7 @@ function CrmApp({ user, onLogout }) {
   // ── API actions ───────────────────────────────────────────
   const markPaid = async (invId) => {
     try {
-      await fetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",invId})});
+      await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",invId})});
       notify(`✅ ${invId} marked as Paid`);
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); }
@@ -380,7 +404,7 @@ function CrmApp({ user, onLogout }) {
   const voidInvoice = async (invId) => {
     if(!confirm(`Void ${invId}? This will zero the total and reverse AR. Cannot be undone.`)) return;
     try {
-      await fetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",invId})});
+      await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",invId})});
       notify(`✅ ${invId} voided`);
       closeModal();
       await loadData(true);
@@ -390,12 +414,11 @@ function CrmApp({ user, onLogout }) {
   const deleteInvoice = async (invId) => {
     if(!confirm(`⚠️ WARNING: Are you sure you want to permanently DELETE ${invId}? This will completely remove it from the Google Sheet and cannot be undone.`)) return;
     try {
-      const res = await fetch("/api/gas", {
+      const json = await safeGasFetch("/api/gas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "delete_invoice", invId })
       });
-      const json = await res.json();
       if (!json.success) throw new Error(json.error || "Delete failed");
       notify(`✅ ${invId} permanently deleted`);
       closeModal();
