@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="APT Rider">
+<meta name="theme-color" content="#0F2419">
+<title>APT Rider App</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgcng9IjIyIiBmaWxsPSIjMUEzRDI2Ii8+PHRleHQgeD0iNTAiIHk9IjQyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjQzVFMDAwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtd2VpZ2h0PSI5MDAiIGZvbnQtc2l6ZT0iMzAiPkFQVDwvdGV4dD48dGV4dCB4PSI1MCIgeT0iNjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZpbGw9IiNBNUQ2QTciIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC13ZWlnaHQ9IjUwMCIgZm9udC1zaXplPSIxMiI+UklERVI8L3RleHQ+PC9zdmc+">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --g0:#0F2419;--g1:#1A3D26;--g2:#2E7D32;--g3:#4CAF50;
+  --acc:#C5E000;--acc2:#FFD600;--red:#FF4444;--orange:#FF8C00;
+  --white:#F8FBF8;--mute:#8BA88C;--card:#162E1C;--border:rgba(255,255,255,0.08);
+  --r:14px;--fh:'Syne',sans-serif;--fb:'DM Sans',sans-serif;--fm:'DM Mono',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:var(--fb);background:var(--g0);color:var(--white);min-height:100vh;overflow-x:hidden;padding-bottom:72px}
+
+/* ── HEADER ── */
+.hdr{background:var(--g0);padding:10px 16px 8px;position:sticky;top:0;z-index:100;border-bottom:1px solid var(--border)}
+.hdr-row{display:flex;align-items:center;justify-content:space-between}
+.hdr-left{display:flex;align-items:center;gap:10px}
+.logo{width:36px;height:36px;background:var(--g2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-weight:800;font-size:13px;color:var(--acc)}
+.hdr-title{font-family:var(--fh);font-size:16px;font-weight:800;color:var(--acc)}
+.hdr-sub{font-size:9px;color:var(--mute);font-family:var(--fm);margin-top:1px}
+.sync-btn{background:var(--card);border:1px solid var(--border);color:var(--mute);padding:6px 11px;border-radius:20px;font-size:11px;font-family:var(--fm);cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .2s}
+.sync-btn.syncing{color:var(--acc);border-color:var(--acc)}
+.sync-btn:active{background:var(--g2)}
+.offbadge{background:var(--orange);color:#000;font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;font-family:var(--fm);display:none}
+.offbadge.on{display:block}
+
+/* ── NAV ── */
+.nav{position:fixed;bottom:0;left:0;right:0;background:var(--g1);border-top:1px solid var(--border);display:grid;grid-template-columns:repeat(5,1fr);z-index:100;padding-bottom:env(safe-area-inset-bottom)}
+.nb{background:none;border:none;color:var(--mute);padding:8px 4px 7px;font-family:var(--fb);font-size:10px;font-weight:500;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;position:relative;transition:color .2s}
+.nb.active{color:var(--acc)}
+.ni{font-size:20px;line-height:1}
+.nbadge{position:absolute;top:3px;right:calc(50% - 18px);background:var(--red);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:10px;min-width:16px;text-align:center;display:none}
+.nbadge.on{display:block}
+
+/* ── SCREENS ── */
+.scr{display:none;animation:fadeIn .2s ease}
+.scr.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ── COMMON ── */
+.sec{padding:12px 16px 0}
+.sec-lbl{font-family:var(--fm);font-size:9px;color:var(--mute);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px}
+.sel{width:100%;background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--white);font-family:var(--fb);font-size:14px;padding:11px 14px;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238BA88C' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:36px}
+.sel:focus{outline:none;border-color:var(--g3)}
+.inp{width:100%;background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--white);font-family:var(--fb);font-size:14px;padding:11px 14px}
+.inp:focus{outline:none;border-color:var(--g3)}
+.inp::placeholder{color:var(--mute)}
+
+/* ── SEARCH ── */
+.srchwrap{padding:10px 16px 0}
+.srchi{width:100%;background:var(--card);border:1px solid var(--border);border-radius:12px;color:var(--white);font-family:var(--fb);font-size:13px;padding:9px 12px 9px 36px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238BA88C' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:11px center}
+.srchi:focus{outline:none;border-color:var(--g3)}
+.srchi::placeholder{color:var(--mute)}
+
+/* ── CATEGORY BAR ── */
+.catbar{overflow-x:auto;white-space:nowrap;padding:9px 16px 8px;scrollbar-width:none}
+.catbar::-webkit-scrollbar{display:none}
+.cp{display:inline-block;background:var(--card);border:1px solid var(--border);color:var(--mute);font-size:11px;font-weight:500;padding:5px 13px;border-radius:20px;margin-right:7px;cursor:pointer;transition:all .2s;white-space:nowrap}
+.cp.on{background:var(--acc);color:var(--g0);border-color:var(--acc);font-weight:700}
+
+/* ── PRODUCTS GRID ── */
+.pgrid{padding:0 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pc{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column;transition:border-color .2s}
+.pc.hq{border-color:var(--g3)}
+.pi{width:100%;aspect-ratio:1;object-fit:cover;background:#1a2e1c}
+.pph{width:100%;aspect-ratio:1;background:var(--g1);display:flex;align-items:center;justify-content:center;font-size:32px}
+.pb{padding:8px 9px 8px;flex:1;display:flex;flex-direction:column}
+.pid{font-family:var(--fm);font-size:9px;color:var(--g3);margin-bottom:2px}
+.pn{font-size:11px;font-weight:600;color:var(--white);line-height:1.3;margin-bottom:4px;flex:1}
+.pp{font-family:var(--fm);font-size:12px;color:var(--acc);margin-bottom:7px;font-weight:500}
+.qc{display:flex;align-items:center;background:var(--g1);border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+.qb{background:none;border:none;color:var(--white);flex:1;padding:6px 0;font-size:18px;cursor:pointer;font-weight:300;transition:background .15s}
+.qb:active{background:var(--g2)}
+.qb.add{color:var(--acc)}
+.qv{min-width:28px;text-align:center;font-family:var(--fm);font-size:13px;font-weight:600}
+
+/* ── ORDER BAR ── */
+.obar{position:fixed;bottom:64px;left:16px;right:16px;background:var(--g2);border-radius:var(--r);padding:11px 14px;display:none;align-items:center;justify-content:space-between;z-index:90;box-shadow:0 -4px 24px rgba(0,0,0,.5)}
+.obar.on{display:flex}
+.obi{font-family:var(--fm);font-size:9px;color:rgba(255,255,255,.65);margin-bottom:2px}
+.obt{font-family:var(--fh);font-size:16px;font-weight:700;color:var(--acc)}
+.subbtn{background:var(--acc);color:var(--g0);border:none;border-radius:12px;padding:10px 16px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity .15s}
+.subbtn:active{opacity:.8}
+
+/* ── NOTES ── */
+.nwrap{padding:10px 16px 0}
+.ntxt{width:100%;background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--white);font-family:var(--fb);font-size:13px;padding:11px 13px;resize:none;height:60px}
+.ntxt:focus{outline:none;border-color:var(--g3)}
+.ntxt::placeholder{color:var(--mute)}
+
+/* ── CARDS ── */
+.shd{padding:14px 16px 8px;display:flex;align-items:center;justify-content:space-between}
+.stit{font-family:var(--fh);font-size:16px;font-weight:800;color:var(--white)}
+.scnt{font-family:var(--fm);font-size:10px;color:var(--mute)}
+.empty{text-align:center;padding:50px 24px;color:var(--mute)}
+.emico{font-size:44px;margin-bottom:12px}
+.empty p{font-size:13px;line-height:1.7}
+.ocard{background:var(--card);border:1px solid var(--border);border-radius:var(--r);margin:0 16px 11px;overflow:hidden}
+.och{padding:12px 14px;display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.ocstore{font-family:var(--fh);font-size:13px;font-weight:700;margin-bottom:2px}
+.ocmeta{font-family:var(--fm);font-size:10px;color:var(--mute);line-height:1.6}
+.ocst{background:rgba(255,214,0,.15);color:var(--acc2);font-family:var(--fm);font-size:10px;font-weight:600;padding:3px 9px;border-radius:20px;white-space:nowrap;flex-shrink:0}
+.ocst.sy{background:rgba(76,175,80,.15);color:var(--g3)}
+.ocil{border-top:1px solid var(--border);padding:8px 14px}
+.ocir{display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px}
+.ocir:last-child{margin-bottom:0}
+.ocin{flex:1;padding-right:8px;color:rgba(255,255,255,.7)}
+.ociq{font-family:var(--fm);color:var(--acc);font-weight:600}
+.ocnr{font-size:11px;color:var(--mute);padding:5px 14px 8px;border-top:1px solid var(--border);font-style:italic}
+.ocf{padding:10px 14px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.octlbl{font-family:var(--fm);font-size:9px;color:var(--mute);margin-bottom:1px}
+.octtot{font-family:var(--fh);font-size:14px;font-weight:700;color:var(--acc)}
+
+/* ── KPI GRID ── */
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px 16px}
+.kcard{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px}
+.klbl{font-family:var(--fm);font-size:9px;color:var(--mute);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+.kval{font-family:var(--fh);font-size:17px;font-weight:700;color:var(--white)}
+.kval.green{color:var(--acc)}
+.kval.red{color:var(--red)}
+.kval.amber{color:var(--acc2)}
+.ksub{font-size:10px;color:var(--mute);margin-top:2px}
+
+/* ── JOURNEY PLAN ── */
+.zone-hdr{background:var(--g2);margin:0 16px 6px;border-radius:10px;padding:9px 14px;display:flex;justify-content:space-between;align-items:center}
+.zone-name{font-family:var(--fh);font-size:12px;font-weight:700;color:var(--acc)}
+.zone-day{font-family:var(--fm);font-size:10px;color:rgba(255,255,255,.65)}
+.store-row{display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid var(--border)}
+.store-row:last-child{border-bottom:none}
+.store-name{font-size:13px;font-weight:600;color:var(--white)}
+.store-area{font-family:var(--fm);font-size:10px;color:var(--mute);margin-top:1px}
+.visit-btn{background:var(--g2);border:none;color:var(--acc);padding:5px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--fb)}
+.visit-btn:active{background:var(--g3)}
+
+/* ── TOAST ── */
+.toast{position:fixed;top:68px;left:50%;transform:translateX(-50%);background:var(--g2);color:var(--white);padding:10px 20px;border-radius:20px;font-size:13px;font-weight:600;z-index:999;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none;white-space:nowrap;font-family:var(--fb)}
+.toast.err{background:var(--red)}
+.toast.on{display:block;animation:fadeIn .2s ease}
+
+/* ── MODAL ── */
+.moverlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:none;align-items:flex-end;justify-content:center}
+.moverlay.on{display:flex}
+.modal{background:var(--g1);border-radius:20px 20px 0 0;width:100%;max-height:85vh;overflow-y:auto;padding:20px 16px 32px}
+.mhdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.mtit{font-family:var(--fh);font-size:16px;font-weight:700;color:var(--white)}
+.mcls{background:none;border:none;color:var(--mute);font-size:22px;cursor:pointer;padding:2px 6px}
+.mrow{margin-bottom:12px}
+.mlbl{font-family:var(--fm);font-size:9px;color:var(--mute);letter-spacing:.08em;text-transform:uppercase;margin-bottom:5px}
+.mval{font-size:14px;color:var(--white)}
+.mbtn{width:100%;background:var(--acc);color:var(--g0);border:none;border-radius:12px;padding:14px;font-family:var(--fh);font-size:15px;font-weight:700;cursor:pointer;margin-top:12px}
+.mbtn:active{opacity:.8}
+.mbtn.sec{background:var(--card);color:var(--white);border:1px solid var(--border);margin-top:8px}
+.pdf-link{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--g3);border-radius:10px;padding:10px 14px;margin-top:10px;text-decoration:none;color:var(--acc);font-weight:700;font-size:13px}
+
+/* ── LOADING ── */
+.loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:14px;color:var(--mute)}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- HEADER -->
+<div class="hdr">
+  <div class="hdr-row">
+    <div class="hdr-left">
+      <div class="logo">APT</div>
+      <div>
+        <div class="hdr-title">APT Rider</div>
+        <div class="hdr-sub" id="riderLabel">Loading...</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="offbadge" id="offBadge">OFFLINE</span>
+      <button class="sync-btn" id="syncBtn" onclick="syncAll()">⟳ Sync</button>
+    </div>
+  </div>
+</div>
+
+<!-- SCREENS -->
+
+<!-- ── ORDER TAB ── -->
+<div class="scr active" id="scrOrder">
+  <div class="sec">
+    <div class="sec-lbl">Today's Store</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select class="sel" id="custSel" onchange="onCustChange()" style="flex:1">
+        <option value="">Loading stores...</option>
+      </select>
+    </div>
+  </div>
+  <div class="srchwrap" style="margin-top:8px">
+    <input class="srchi" id="prodSearch" placeholder="Search products..." oninput="renderProducts()">
+  </div>
+  <div class="catbar" id="catbar"></div>
+  <div class="pgrid" id="pgrid">
+    <div class="loading"><div class="spinner"></div><span>Loading products...</span></div>
+  </div>
+  <div class="nwrap" style="margin-top:10px">
+    <div class="sec-lbl">Order Notes</div>
+    <textarea class="ntxt" id="orderNotes" placeholder="Special instructions, delivery notes..."></textarea>
+  </div>
+  <div style="height:60px"></div>
+</div>
+
+<!-- ── PENDING ORDERS TAB ── -->
+<div class="scr" id="scrPending">
+  <div class="shd">
+    <div class="stit">Pending Orders</div>
+    <div class="scnt" id="pendingCount">—</div>
+  </div>
+  <div id="pendingList"></div>
+</div>
+
+<!-- ── JOURNEY PLAN TAB ── -->
+<div class="scr" id="scrJourney">
+  <div class="shd">
+    <div class="stit">Journey Plan</div>
+    <div class="scnt" id="journeyDay"></div>
+  </div>
+  <div id="journeyList"></div>
+</div>
+
+<!-- ── TODAY TAB ── -->
+<div class="scr" id="scrToday">
+  <div class="shd">
+    <div class="stit">My Day</div>
+    <div class="scnt" id="todayDate"></div>
+  </div>
+  <div class="kgrid" id="todayKpis"></div>
+  <div id="todayOrders"></div>
+</div>
+
+<!-- ── PROFILE TAB ── -->
+<div class="scr" id="scrProfile">
+  <div class="shd"><div class="stit">My Profile</div></div>
+  <div style="padding:0 16px">
+    <div class="ocard" style="padding:16px">
+      <div style="text-align:center;margin-bottom:16px">
+        <div style="width:64px;height:64px;background:var(--g2);border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-weight:800;font-size:22px;color:var(--acc);margin:0 auto 10px" id="profileAvatar">R</div>
+        <div style="font-family:var(--fh);font-size:18px;font-weight:700;color:var(--white)" id="profileName">Rider</div>
+        <div style="font-family:var(--fm);font-size:10px;color:var(--mute)" id="profileId">Loading...</div>
+      </div>
+      <div class="mrow">
+        <div class="mlbl">Rider ID</div>
+        <input class="inp" id="riderIdInput" placeholder="e.g. R-001" style="margin-top:6px" oninput="saveRiderConfig()">
+      </div>
+      <div class="mrow" style="margin-top:10px">
+        <div class="mlbl">Your Name</div>
+        <input class="inp" id="riderNameInput" placeholder="e.g. Ali Hassan" style="margin-top:6px" oninput="saveRiderConfig()">
+      </div>
+      <div class="mrow" style="margin-top:10px">
+        <div class="mlbl">API Endpoint</div>
+        <input class="inp" id="apiUrlInput" placeholder="https://script.google.com/macros/s/.../exec" style="margin-top:6px;font-size:11px" oninput="saveRiderConfig()">
+      </div>
+      <div class="mrow" style="margin-top:10px">
+        <div class="mlbl">API Key</div>
+        <input class="inp" id="apiKeyInput" type="password" placeholder="APT_SECRET_2025" style="margin-top:6px" oninput="saveRiderConfig()">
+      </div>
+      <button class="mbtn" onclick="syncAll()" style="margin-top:16px">⟳ Sync with Sheet Now</button>
+      <button class="mbtn sec" onclick="clearLocal()">🗑 Clear Local Data</button>
+    </div>
+    <div style="text-align:center;padding:14px;font-family:var(--fm);font-size:9px;color:var(--mute)">
+      APT Rider App v2.0 · Assorted Produce Traders · D-12 Markaz
+    </div>
+  </div>
+</div>
+
+<!-- BOTTOM NAV -->
+<nav class="nav">
+  <button class="nb active" id="nb_order"   onclick="switchTab('order')">  <span class="ni">📦</span><span>Order</span>  </button>
+  <button class="nb"         id="nb_pending" onclick="switchTab('pending')"><span class="ni">⏳</span><span>Pending</span><span class="nbadge" id="pendingBadge"></span></button>
+  <button class="nb"         id="nb_journey" onclick="switchTab('journey')"><span class="ni">🗺</span><span>Journey</span></button>
+  <button class="nb"         id="nb_today"   onclick="switchTab('today')">  <span class="ni">📊</span><span>My Day</span></button>
+  <button class="nb"         id="nb_profile" onclick="switchTab('profile')"><span class="ni">👤</span><span>Profile</span></button>
+</nav>
+
+<!-- ORDER DETAIL MODAL -->
+<div class="moverlay" id="orderModal" onclick="closeModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="mhdr">
+      <div class="mtit" id="mTitle">Order</div>
+      <button class="mcls" onclick="closeOrderModal()">✕</button>
+    </div>
+    <div id="mBody"></div>
+  </div>
+</div>
+
+<!-- ORDER BAR -->
+<div class="obar" id="obar">
+  <div>
+    <div class="obi" id="obarStore">Select a store</div>
+    <div class="obt" id="obarTotal">PKR 0</div>
+  </div>
+  <button class="subbtn" onclick="submitOrder()">Submit Order →</button>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════
+//  CONFIG — reads from localStorage
+// ══════════════════════════════════════════════════════
+var CFG = {
+  get GAS_URL() { return localStorage.getItem("apt_gas_url")||""; },
+  get API_KEY() { return localStorage.getItem("apt_api_key")||"APT_SECRET_2025"; },
+  get RIDER_ID(){ return localStorage.getItem("apt_rider_id")||"R-001"; },
+  get RIDER_NM(){ return localStorage.getItem("apt_rider_name")||"Rider"; },
+};
+
+// Robust and safe fetch helper to handle non-JSON responses gracefully
+async function safeFetchJson(url, options) {
+  var res = await fetch(url, options);
+  var text = await res.text();
+  
+  if (!res.ok) {
+    try {
+      var errJson = JSON.parse(text);
+      throw new Error(errJson.error || errJson.message || "HTTP status " + res.status);
+    } catch(e) {
+      if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+        throw new Error("Server returned HTML page instead of JSON. Check if your API Endpoint URL is correct (not the editor URL) and deployed as 'Anyone'.");
+      }
+      throw new Error(text.substring(0, 100) || "HTTP status " + res.status);
+    }
+  }
+  
+  try {
+    return JSON.parse(text);
+  } catch(ex) {
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+      throw new Error("Server returned HTML page instead of JSON (Apps Script backend might have crashed or been misconfigured).");
+    }
+    throw new Error("Invalid JSON: " + ex.message + " (" + text.substring(0, 50) + ")");
+  }
+}
+
+// ══════════════════════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════════════════════
+var STATE = {
+  customers: [],
+  products:  [],
+  cart:      {}, // pid → qty
+  selectedCust: "",
+  activeTab: "order",
+  activeCat: "All",
+  pendingOrders: [], // local submitted orders not yet synced
+  todayOrders:   [], // orders submitted today
+  syncing: false,
+  online: navigator.onLine,
+};
+
+// Persist cart
+function saveCart() { localStorage.setItem("apt_cart", JSON.stringify({cart:STATE.cart,cust:STATE.selectedCust})); }
+function loadCart() {
+  try {
+    var d=JSON.parse(localStorage.getItem("apt_cart")||"{}");
+    if(d.cart) STATE.cart=d.cart;
+    if(d.cust) STATE.selectedCust=d.cust;
+  }catch(e){}
+}
+
+// ══════════════════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════════════════
+window.addEventListener("DOMContentLoaded", function() {
+  loadCart();
+  loadLocalData();
+  renderProfileForm();
+  renderProducts();
+  renderCustomerSelect();
+  updateOrderBar();
+  updateOnlineStatus();
+  syncAll();
+
+  setInterval(function(){ updateOrderBar(); }, 5000);
+  setInterval(syncAll, 5*60*1000); // auto-sync every 5 min
+});
+
+window.addEventListener("online",  function(){ STATE.online=true;  updateOnlineStatus(); syncAll(); });
+window.addEventListener("offline", function(){ STATE.online=false; updateOnlineStatus(); });
+
+function updateOnlineStatus() {
+  var badge=document.getElementById("offBadge");
+  if(badge) { badge.className=STATE.online?"offbadge":"offbadge on"; }
+}
+
+// ══════════════════════════════════════════════════════
+//  LOCAL STORAGE
+// ══════════════════════════════════════════════════════
+function loadLocalData() {
+  try {
+    var d=JSON.parse(localStorage.getItem("apt_data")||"{}");
+    if(d.customers&&d.customers.length) STATE.customers=d.customers;
+    if(d.products &&d.products.length)  STATE.products =d.products;
+    if(d.pendingOrders) STATE.pendingOrders=d.pendingOrders;
+    if(d.todayOrders)   STATE.todayOrders  =d.todayOrders;
+  }catch(e){}
+}
+
+function saveLocalData() {
+  localStorage.setItem("apt_data", JSON.stringify({
+    customers:STATE.customers, products:STATE.products,
+    pendingOrders:STATE.pendingOrders, todayOrders:STATE.todayOrders,
+    savedAt: new Date().toISOString()
+  }));
+}
+
+function saveRiderConfig() {
+  localStorage.setItem("apt_rider_id",   document.getElementById("riderIdInput").value.trim());
+  localStorage.setItem("apt_rider_name", document.getElementById("riderNameInput").value.trim());
+  localStorage.setItem("apt_gas_url",    document.getElementById("apiUrlInput").value.trim());
+  localStorage.setItem("apt_api_key",    document.getElementById("apiKeyInput").value.trim());
+  renderProfileForm();
+  document.getElementById("riderLabel").textContent = CFG.RIDER_NM + " · " + CFG.RIDER_ID;
+}
+
+function renderProfileForm() {
+  var ri=document.getElementById("riderIdInput");
+  var rn=document.getElementById("riderNameInput");
+  var au=document.getElementById("apiUrlInput");
+  var ak=document.getElementById("apiKeyInput");
+  if(ri) ri.value = CFG.RIDER_ID;
+  if(rn) rn.value = CFG.RIDER_NM;
+  if(au) au.value = CFG.GAS_URL;
+  if(ak) ak.value = CFG.API_KEY;
+  var av=document.getElementById("profileAvatar");
+  var pn=document.getElementById("profileName");
+  var pi=document.getElementById("profileId");
+  if(av) av.textContent=CFG.RIDER_NM.charAt(0).toUpperCase();
+  if(pn) pn.textContent=CFG.RIDER_NM;
+  if(pi) pi.textContent=CFG.RIDER_ID+" · APT Rider";
+  document.getElementById("riderLabel").textContent=CFG.RIDER_NM+" · "+CFG.RIDER_ID;
+}
+
+function clearLocal() {
+  if(!confirm("Clear all local data? You'll need to sync again.")) return;
+  localStorage.removeItem("apt_data");
+  localStorage.removeItem("apt_cart");
+  STATE.customers=[]; STATE.products=[]; STATE.cart={}; STATE.pendingOrders=[]; STATE.todayOrders=[];
+  renderProducts(); renderCustomerSelect(); updateOrderBar();
+  showToast("Local data cleared");
+}
+
+// ══════════════════════════════════════════════════════
+//  SYNC
+// ══════════════════════════════════════════════════════
+async function syncAll() {
+  if(STATE.syncing) return;
+  if(!STATE.online) { showToast("Offline — using cached data","err"); return; }
+  if(!CFG.GAS_URL) { showToast("API Endpoint not configured! Please set it in the Profile tab.","err"); return; }
+
+  STATE.syncing=true;
+  var btn=document.getElementById("syncBtn");
+  if(btn){btn.textContent="⟳ Syncing...";btn.className="sync-btn syncing";}
+
+  try {
+    var url=CFG.GAS_URL+"?action=all&key="+encodeURIComponent(CFG.API_KEY);
+    var json=await safeFetchJson(url);
+    if(!json.success) throw new Error(json.error||"API error");
+
+    var d=json.data;
+    if(d.customers) STATE.customers=d.customers;
+    if(d.products)  STATE.products=d.products;
+    if(d.invoices)  STATE.todayOrders=d.invoices.filter(function(i){return i.status==="Unpaid"||i.status==="Partial";}).slice(0,30);
+
+    saveLocalData();
+    renderCustomerSelect();
+    renderProducts();
+    renderPending();
+    renderJourney();
+    renderTodayKpis(d);
+
+    showToast("✅ Synced — "+STATE.customers.length+" stores, "+STATE.products.length+" products");
+  } catch(err) {
+    showToast("Sync failed: "+err.message, "err");
+  } finally {
+    STATE.syncing=false;
+    if(btn){btn.textContent="⟳ Sync";btn.className="sync-btn";}
+  }
+}
+
+// ══════════════════════════════════════════════════════
+//  TAB SWITCHING
+// ══════════════════════════════════════════════════════
+function switchTab(tab) {
+  STATE.activeTab=tab;
+  ["order","pending","journey","today","profile"].forEach(function(t){
+    var scr=document.getElementById("scr"+t.charAt(0).toUpperCase()+t.slice(1));
+    var nb =document.getElementById("nb_"+t);
+    if(scr){scr.className=t===tab?"scr active":"scr";}
+    if(nb) {nb.className=t===tab?"nb active":"nb";}
+  });
+  if(tab==="pending") renderPending();
+  if(tab==="journey") renderJourney();
+  if(tab==="today")   renderTodayTab();
+  // Show/hide order bar
+  document.getElementById("obar").className=tab==="order"&&getCartCount()>0?"obar on":"obar";
+}
+
+// ══════════════════════════════════════════════════════
+//  CUSTOMER SELECT
+// ══════════════════════════════════════════════════════
+function renderCustomerSelect() {
+  var sel=document.getElementById("custSel");
+  if(!sel) return;
+  var prev=STATE.selectedCust;
+  sel.innerHTML='<option value="">— Select store —</option>'+
+    STATE.customers.map(function(c){
+      return '<option value="'+c.id+'"'+(c.id===prev?" selected":"")+'>'+(c.id||"")+" — "+(c.name||"")+'</option>';
+    }).join("");
+}
+
+function onCustChange() {
+  STATE.selectedCust=document.getElementById("custSel").value;
+  saveCart();
+  updateOrderBar();
+}
+
+// ══════════════════════════════════════════════════════
+//  PRODUCTS
+// ══════════════════════════════════════════════════════
+function getCategories() {
+  var cats=["All"];
+  STATE.products.forEach(function(p){ if(p.category&&cats.indexOf(p.category)===-1) cats.push(p.category); });
+  return cats;
+}
+
+function renderCatBar() {
+  var cats=getCategories();
+  document.getElementById("catbar").innerHTML=cats.map(function(c){
+    return '<span class="cp'+(c===STATE.activeCat?" on":"")+" cat-"+c.replace(/[^a-zA-Z0-9]/g,"")+'" onclick="setCat(\''+c+'\')">'+(c==="All"?"All ✦":c)+'</span>';
+  }).join("");
+}
+
+function setCat(cat) {
+  STATE.activeCat=cat;
+  renderCatBar();
+  renderProducts();
+}
+
+var PROD_ICONS = {
+  "Orthopaedic":"🦴","Medical":"💊","Contraceptives":"🛡","Food":"🥗","Skincare":"✨","Haircare":"💆","Other":"📦"
+};
+
+function renderProducts() {
+  renderCatBar();
+  var search=(document.getElementById("prodSearch")||{}).value||"";
+  var prods=STATE.products.filter(function(p){
+    if(STATE.activeCat!=="All"&&p.category!==STATE.activeCat) return false;
+    if(search){var s=search.toLowerCase();return (p.name||"").toLowerCase().includes(s)||(p.id||"").toLowerCase().includes(s);}
+    return true;
+  });
+
+  if(!prods.length) {
+    document.getElementById("pgrid").innerHTML='<div style="grid-column:span 2;text-align:center;padding:40px 20px;color:var(--mute)"><div style="font-size:32px;margin-bottom:8px">🔍</div><p>No products found</p></div>';
+    return;
+  }
+
+  document.getElementById("pgrid").innerHTML=prods.map(function(p){
+    var qty=STATE.cart[p.id]||0;
+    var icon=PROD_ICONS[p.category]||"📦";
+    return '<div class="pc'+(qty>0?" hq":"")+'">'+
+      '<div class="pph">'+icon+'</div>'+
+      '<div class="pb">'+
+        '<div class="pid">'+p.id+'</div>'+
+        '<div class="pn">'+p.name+'</div>'+
+        '<div class="pp">PKR '+formatNum(p.price||0)+'</div>'+
+        '<div class="qc">'+
+          '<button class="qb" onclick="addToCart(\''+p.id+'\',-1)">−</button>'+
+          '<span class="qv" id="qv_'+p.id+'">'+(qty||"0")+'</span>'+
+          '<button class="qb add" onclick="addToCart(\''+p.id+'\',1)">+</button>'+
+        '</div>'+
+      '</div>'+
+    '</div>';
+  }).join("");
+}
+
+function addToCart(pid, delta) {
+  var p=STATE.products.find(function(x){return x.id===pid;});
+  if(!p) return;
+  var cur=STATE.cart[pid]||0;
+  var nv=Math.max(0,cur+delta);
+  if(nv>0) STATE.cart[pid]=nv; else delete STATE.cart[pid];
+  var el=document.getElementById("qv_"+pid);
+  if(el){el.textContent=nv||"0";}
+  // Highlight card
+  var card=el&&el.closest(".pc");
+  if(card){card.className=nv>0?"pc hq":"pc";}
+  updateOrderBar();
+  saveCart();
+}
+
+function getCartCount() {
+  return Object.values(STATE.cart).reduce(function(s,v){return s+v;},0);
+}
+
+function getCartTotal() {
+  var total=0;
+  Object.entries(STATE.cart).forEach(function(e){
+    var p=STATE.products.find(function(x){return x.id===e[0];});
+    if(p) total+=p.price*e[1];
+  });
+  return total;
+}
+
+function updateOrderBar() {
+  var cnt=getCartCount();
+  var tot=getCartTotal();
+  var cust=STATE.customers.find(function(c){return c.id===STATE.selectedCust;});
+  var obar=document.getElementById("obar");
+  var store=document.getElementById("obarStore");
+  var totEl=document.getElementById("obarTotal");
+  if(obar)  obar.className=cnt>0&&STATE.activeTab==="order"?"obar on":"obar";
+  if(store) store.textContent=cust?(cust.name+" ("+cust.area+")"):"Select a store first";
+  if(totEl) totEl.textContent="PKR "+formatNum(tot)+"  ·  "+cnt+" item"+(cnt!==1?"s":"");
+}
+
+// ══════════════════════════════════════════════════════
+//  SUBMIT ORDER
+// ══════════════════════════════════════════════════════
+async function submitOrder() {
+  if(!STATE.selectedCust) { showToast("Select a store first","err"); return; }
+  var items=[];
+  Object.entries(STATE.cart).forEach(function(e){
+    var p=STATE.products.find(function(x){return x.id===e[0];});
+    if(p&&e[1]>0) items.push({pid:p.id,pname:p.name,qty:e[1],rate:p.price||0,total:(p.price||0)*e[1]});
+  });
+  if(!items.length) { showToast("Add products first","err"); return; }
+
+  var cust=STATE.customers.find(function(c){return c.id===STATE.selectedCust;});
+  var total=items.reduce(function(s,i){return s+i.total;},0);
+  var notes=document.getElementById("orderNotes").value||"";
+
+  // Build order object
+  var order = {
+    custId: STATE.selectedCust,
+    custName: cust?cust.name:"",
+    date: new Date().toISOString().split("T")[0],
+    items: items,
+    total: total,
+    notes: notes,
+    status: "Pending",
+    submittedAt: new Date().toISOString(),
+    riderId: CFG.RIDER_ID,
+    riderName: CFG.RIDER_NM,
+    synced: false,
+  };
+
+  // Save locally first (offline-safe)
+  STATE.pendingOrders.push(order);
+  saveLocalData();
+
+  // Show confirmation modal
+  showOrderConfirm(order);
+
+  // Clear cart
+  STATE.cart={};
+  saveCart();
+  document.getElementById("orderNotes").value="";
+  renderProducts();
+  updateOrderBar();
+  updatePendingBadge();
+
+  // Try to sync to sheet
+  if(STATE.online && CFG.GAS_URL) {
+    syncOrderToSheet(order);
+  }
+}
+
+async function syncOrderToSheet(order) {
+  try {
+    // Get next invoice ID from products
+    var invId = "INV-RIDER-"+Date.now().toString().slice(-6);
+    order.invId = invId;
+
+    var json=await safeFetchJson(CFG.GAS_URL, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        action:"rider_order",
+        key: CFG.API_KEY,
+        riderId: CFG.RIDER_ID,
+        data: {
+          invId: invId,
+          custId: order.custId,
+          date: order.date,
+          payTerms: "COD",
+          notes: "[Rider: "+CFG.RIDER_NM+"] "+(order.notes||""),
+          tax: 0,
+          items: order.items,
+          createdBy: CFG.RIDER_NM+" ("+CFG.RIDER_ID+")"
+        }
+      })
+    });
+    if(json.success){
+      order.synced=true;
+      order.sheetId=json.data&&json.data.id;
+      order.pdfUrl=json.data&&json.data.pdfUrl;
+      saveLocalData();
+      showToast("✅ Saved to Sheet — "+invId);
+    }
+  } catch(err) {
+    showToast("Saved locally — will sync when online","err");
+  }
+}
+
+function showOrderConfirm(order) {
+  document.getElementById("mTitle").textContent="✅ Order Submitted";
+  document.getElementById("mBody").innerHTML=
+    '<div class="mrow"><div class="mlbl">Store</div><div class="mval">'+order.custName+'</div></div>'+
+    '<div class="mrow"><div class="mlbl">Items</div>'+
+      order.items.map(function(i){return '<div class="ocir"><span class="ocin">'+i.pname+'</span><span class="ociq">×'+i.qty+' — PKR '+formatNum(i.total)+'</span></div>';}).join("")+
+    '</div>'+
+    '<div class="mrow" style="background:var(--g2);border-radius:10px;padding:12px 14px;margin-top:8px">'+
+      '<div class="mlbl">Total</div><div style="font-family:var(--fh);font-size:22px;font-weight:700;color:var(--acc)">PKR '+formatNum(order.total)+'</div>'+
+    '</div>'+
+    (order.notes?'<div class="mrow"><div class="mlbl">Notes</div><div class="mval" style="font-size:12px;color:var(--mute)">'+order.notes+'</div></div>':'')+
+    '<div style="font-family:var(--fm);font-size:10px;color:var(--mute);margin-top:10px;text-align:center">'+
+      (STATE.online?"Syncing to Google Sheet...":"Saved locally — will sync when online")+
+    '</div>'+
+    '<button class="mbtn sec" onclick="closeOrderModal()">Close</button>';
+  document.getElementById("orderModal").className="moverlay on";
+}
+
+function closeOrderModal() {
+  document.getElementById("orderModal").className="moverlay";
+}
+function closeModal(e) { if(e.target===e.currentTarget) closeOrderModal(); }
+
+// ══════════════════════════════════════════════════════
+//  PENDING ORDERS
+// ══════════════════════════════════════════════════════
+function updatePendingBadge() {
+  var unsyncedCount=STATE.pendingOrders.filter(function(o){return !o.synced;}).length;
+  var badge=document.getElementById("pendingBadge");
+  if(badge){badge.textContent=unsyncedCount||"";badge.className=unsyncedCount>0?"nbadge on":"nbadge";}
+  var cnt=document.getElementById("pendingCount");
+  if(cnt){cnt.textContent=STATE.pendingOrders.length+" order"+(STATE.pendingOrders.length!==1?"s":"");}
+}
+
+function renderPending() {
+  updatePendingBadge();
+  var list=document.getElementById("pendingList");
+  if(!list) return;
+
+  // Also show sheet orders not collected
+  var allOrders=[...STATE.pendingOrders,...STATE.todayOrders.filter(function(i){
+    return !STATE.pendingOrders.some(function(p){return p.sheetId===i.id;});
+  }).map(function(i){return {custName:i.custName,custId:i.custId,submittedAt:i.date,total:i.total,items:[],synced:true,sheetId:i.id,status:i.status};})];
+
+  if(!allOrders.length){
+    list.innerHTML='<div class="empty"><div class="emico">📋</div><p>No orders yet today.<br>Tap the Order tab to book one.</p></div>';
+    return;
+  }
+
+  list.innerHTML=allOrders.map(function(o,idx){
+    var time=o.submittedAt?new Date(o.submittedAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"—";
+    return '<div class="ocard">'+
+      '<div class="och">'+
+        '<div><div class="ocstore">'+(o.custName||"Store")+'</div><div class="ocmeta">'+time+(o.sheetId?" · "+o.sheetId:"")+'</div></div>'+
+        '<div class="ocst'+(o.synced?" sy":"")+'">'+( o.synced?"✅ Synced":"⏳ Pending")+'</div>'+
+      '</div>'+
+      (o.items&&o.items.length?
+        '<div class="ocil">'+o.items.map(function(i){return '<div class="ocir"><span class="ocin">'+i.pname+'</span><span class="ociq">×'+i.qty+'</span></div>';}).join("")+'</div>':'')+
+      '<div class="ocf">'+
+        '<div><div class="octlbl">Total</div><div class="octtot">PKR '+formatNum(o.total||0)+'</div></div>'+
+        (!o.synced?'<button class="visit-btn" onclick="retrySyncOrder('+idx+')">↑ Retry</button>':''+
+        (o.pdfUrl?'<a href="'+o.pdfUrl+'" target="_blank" style="background:var(--g2);color:var(--acc);border-radius:8px;padding:5px 12px;font-size:11px;font-weight:700;text-decoration:none">📄 PDF</a>':'')+
+        '')+
+      '</div>'+
+    '</div>';
+  }).join("");
+}
+
+async function retrySyncOrder(idx) {
+  var order=STATE.pendingOrders[idx];
+  if(!order||order.synced) return;
+  if(!STATE.online||!CFG.GAS_URL){showToast("Offline","err");return;}
+  showToast("Retrying...");
+  await syncOrderToSheet(order);
+  renderPending();
+}
+
+// ══════════════════════════════════════════════════════
+//  JOURNEY PLAN
+// ══════════════════════════════════════════════════════
+function renderJourney() {
+  var list=document.getElementById("journeyList");
+  if(!list) return;
+  var jd=document.getElementById("journeyDay");
+  var days=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  if(jd) jd.textContent=days[new Date().getDay()]+" — Today's Beat";
+
+  if(!STATE.customers.length){
+    list.innerHTML='<div class="empty"><div class="emico">🗺</div><p>Sync to load journey plan.</p></div>';
+    return;
+  }
+
+  // Group by area
+  var zones={};
+  STATE.customers.forEach(function(c){
+    var area=c.area||"Other";
+    if(!zones[area]) zones[area]=[];
+    zones[area].push(c);
+  });
+
+  list.innerHTML=Object.entries(zones).map(function(e){
+    var area=e[0]; var stores=e[1];
+    return '<div class="zone-hdr"><div><div class="zone-name">📍 '+area+'</div></div><div class="zone-day">'+stores.length+' store'+( stores.length!==1?"s":"")+'</div></div>'+
+      '<div class="ocard" style="margin-bottom:14px">'+
+      stores.map(function(s){
+        return '<div class="store-row">'+
+          '<div>'+
+            '<div class="store-name">'+s.name+'</div>'+
+            '<div class="store-area">'+s.id+(s.phone?" · "+s.phone:"")+'</div>'+
+          '</div>'+
+          '<button class="visit-btn" onclick="visitStore(\''+s.id+'\')">Order →</button>'+
+        '</div>';
+      }).join("")+
+      '</div>';
+  }).join("");
+}
+
+function visitStore(custId) {
+  STATE.selectedCust=custId;
+  document.getElementById("custSel").value=custId;
+  saveCart();
+  updateOrderBar();
+  switchTab("order");
+  showToast("Store selected");
+}
+
+// ══════════════════════════════════════════════════════
+//  TODAY STATS
+// ══════════════════════════════════════════════════════
+function renderTodayTab() {
+  var dt=document.getElementById("todayDate");
+  if(dt) dt.textContent=new Date().toLocaleDateString("en-PK",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  renderTodayKpis({});
+}
+
+function renderTodayKpis(data) {
+  var todayOrderCount=STATE.pendingOrders.filter(function(o){
+    return o.submittedAt&&o.submittedAt.startsWith(new Date().toISOString().split("T")[0]);
+  }).length;
+  var todayTotal=STATE.pendingOrders.filter(function(o){
+    return o.submittedAt&&o.submittedAt.startsWith(new Date().toISOString().split("T")[0]);
+  }).reduce(function(s,o){return s+( o.total||0);},0);
+  var synced=STATE.pendingOrders.filter(function(o){return o.synced;}).length;
+  var pending=STATE.pendingOrders.filter(function(o){return !o.synced;}).length;
+
+  var kpis=document.getElementById("todayKpis");
+  if(kpis) kpis.innerHTML=[
+    {l:"Today's Orders",   v:todayOrderCount, cls:"green"},
+    {l:"Today's Revenue",  v:"PKR "+formatNum(todayTotal), cls:"green"},
+    {l:"Synced to Sheet",  v:synced,  cls:"green"},
+    {l:"Pending Sync",     v:pending, cls:pending>0?"amber":"green"},
+  ].map(function(k){
+    return '<div class="kcard"><div class="klbl">'+k.l+'</div><div class="kval '+k.cls+'">'+k.v+'</div></div>';
+  }).join("");
+
+  // Recent orders
+  var todayList=document.getElementById("todayOrders");
+  if(todayList){
+    var recent=STATE.pendingOrders.slice(-5).reverse();
+    todayList.innerHTML=recent.length?
+      '<div class="shd" style="padding-top:6px"><div class="stit" style="font-size:14px">Recent Orders</div></div>'+
+      recent.map(function(o){
+        return '<div class="ocard">'+
+          '<div class="och"><div><div class="ocstore">'+o.custName+'</div><div class="ocmeta">'+(o.items?o.items.length+" products":"")+' · '+(o.submittedAt?new Date(o.submittedAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"")+'</div></div>'+
+          '<div class="ocst'+(o.synced?" sy":"")+'">'+( o.synced?"✅":"⏳")+'</div></div>'+
+          '<div class="ocf"><div><div class="octlbl">Total</div><div class="octtot">PKR '+formatNum(o.total||0)+'</div></div>'+
+          (o.pdfUrl?'<a href="'+o.pdfUrl+'" target="_blank" class="pdf-link" style="padding:6px 12px;font-size:11px">📄 PDF</a>':'')+
+          '</div></div>';
+      }).join(""):
+      '<div class="empty" style="padding:30px 20px"><div class="emico" style="font-size:28px">📋</div><p>No orders today yet.</p></div>';
+  }
+}
+
+// ══════════════════════════════════════════════════════
+//  TOAST
+// ══════════════════════════════════════════════════════
+var toastTimer=null;
+function showToast(msg,type) {
+  var t=document.getElementById("toast");
+  if(!t)return;
+  t.textContent=msg;
+  t.className="toast on"+(type==="err"?" err":"");
+  if(toastTimer) clearTimeout(toastTimer);
+  toastTimer=setTimeout(function(){t.className="toast";},3200);
+}
+
+// ══════════════════════════════════════════════════════
+//  UTILS
+// ══════════════════════════════════════════════════════
+function formatNum(n){
+  return Math.round(n||0).toLocaleString("en-PK");
+}
+</script>
+</body>
+</html>
