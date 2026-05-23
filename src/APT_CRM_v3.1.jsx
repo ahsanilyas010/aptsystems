@@ -427,38 +427,38 @@ function CrmApp({ user, onLogout }) {
   };
 
   const saveInvoice = async (formData) => {
-    try {
-      const cust = customers.find(c => c.id === formData.custId);
-      const custName = cust ? cust.name : "";
-      const enrichedItems = formData.items.map(item => {
-        const pr = prodMap[item.pid];
-        return {
-          ...item,
-          pname: pr ? pr.name : (item.pname || "")
-        };
-      });
-      const result = await gasPost("save_invoice", {
-        ...formData, 
-        custName,
-        customerName: custName,
-        customer: custName,
-        items: enrichedItems, 
-        createdBy: user.email
-      }, {createdBy: user.email});
-      
-      const invId = formData.invId || result.id;
-      if (result.pdfUrl) {
-        cachePdf(invId, result.pdfUrl);
-        // Auto-download PDF immediately in browser
-        triggerPdfDownload(result.pdfUrl);
-      }
-      
-      notify(`✅ ${invId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
-      closeModal();
-      await loadData(true);
-    } catch(e) { notify("❌ "+e.message,"err"); throw e; }
-  };
-
+  try {
+    const cust = customers.find(c => c.id === formData.custId);
+    const custName = cust ? cust.name : "";
+    const enrichedItems = formData.items.map(item => {
+      const pr = prodMap[item.pid];
+      return {
+        ...item,
+        pname: pr ? pr.name : (item.pname || "")
+      };
+    });
+    // Generate a unique invoice ID if not provided
+    const invId = formData.invId || `INV-${Date.now()}`;
+    const result = await gasPost("save_invoice", {
+      ...formData,
+      invId,
+      custName,
+      customerName: custName,
+      customer: custName,
+      items: enrichedItems,
+      createdBy: user.email
+    }, {createdBy: user.email});
+    const finalInvId = formData.invId || result.id || invId;
+    if (result.pdfUrl) {
+      cachePdf(finalInvId, result.pdfUrl);
+      // Auto-download PDF immediately in browser
+      triggerPdfDownload(result.pdfUrl);
+    }
+    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0)}`);
+    closeModal();
+    await loadData(true);
+  } catch(e) { notify("❌ "+e.message,"err"); throw e; }
+};
   const saveExpense = async (d) => {
     try { await gasPost("save_expense",{...d,by:user.email}); notify("✅ Expense saved"); closeModal(); await loadData(true); }
     catch(e) { notify("❌ "+e.message,"err"); }
@@ -474,10 +474,26 @@ function CrmApp({ user, onLogout }) {
     catch(e) { notify("❌ "+e.message,"err"); }
   };
 
-  const addCustomer = async (d) => {
-    try { const r=await gasPost("add_customer",d); notify("✅ "+r.id+" added"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
-  };
+// Helper to generate next customer ID like C-060
+   const getNextCustomerId = () => {
+     const ids = customers.map(c => c.id).filter(id => /^C-\d+$/.test(id));
+     const nums = ids.map(id => parseInt(id.split('-')[1], 10));
+     const max = nums.length ? Math.max(...nums) : 0;
+     const next = max + 1;
+     return `C-${String(next).padStart(3, '0')}`;
+   };
+
+   const addCustomer = async (d) => {
+     try {
+-    const r=await gasPost("add_customer",d);
+-    notify("✅ "+r.id+" added"); closeModal(); await loadData(true);
++    const payload = { ...d, id: d.id || getNextCustomerId() };
++    const r = await gasPost("add_customer", payload);
++    notify(`✅ ${r.id} added`);
++    closeModal();
++    await loadData(true);
+     } catch(e) { notify("❌ "+e.message,"err"); }
+   };
 
   if (loading) return <LoadingScreen msg="Loading APT ERP from Google Sheet…"/>;
 
