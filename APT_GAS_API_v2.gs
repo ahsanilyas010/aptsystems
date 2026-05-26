@@ -1,13 +1,13 @@
 // ============================================================
-//  APT ERP — GAS REST API v2.1 — FIXED VERSION
+//  APT ERP — GAS REST API v2.2 — COMPLETE FIX
 //  ADD THIS AS A SEPARATE FILE in Apps Script (File → New → Script)
 //  Name it: "z_API"
 //
 //  FIXES:
-//  - Invoice ID now generated BEFORE saveInvoice() call
-//  - Customer name properly resolved before PDF generation
-//  - No more "undefined" in PDFs or missing invoice numbers
-//  - Enhanced error handling and logging
+//  - Invoice ID now properly passed to PDF
+//  - Logo URL included
+//  - Currency set to PKR (Pakistani Rupees)
+//  - Customer name properly resolved
 // ============================================================
 
 var API_CFG = {
@@ -16,6 +16,10 @@ var API_CFG = {
   DRIVE_FOLDER:"1cCU3BBUbHE1YeTTxxOGJztMtpqplQ8sk",
   INV_API_KEY: "sk_pXxXFBgSwoyZH1IgBusintr96QQYIoYH",
   TZ:          "Asia/Karachi",
+  // ✅ Add your logo URL here (must be publicly accessible)
+  LOGO_URL:    "https://drive.google.com/uc?export=view&id=1TV37W_HrwBq22FTHmoBZMpiDeXXxOMnI",
+  CURRENCY:    "PKR",
+  ADDRESS:     "Assprted Produce Traders, FF27, Zarpar Arcade, D12 Markaz, Islamabad",
 };
 
 // ── SAFE CFG FALLBACK ────────────────────────────────────────
@@ -26,6 +30,7 @@ if (typeof CFG === "undefined") {
     DRIVE_FOLDER: API_CFG.DRIVE_FOLDER,
     INV_API_KEY:  API_CFG.INV_API_KEY,
     TZ:           API_CFG.TZ,
+    LOGO_URL:     API_CFG.LOGO_URL,
     CUST:         "02_Customers",
     VEN:          "03_Vendors",
     PROD:         "04_Products",
@@ -188,7 +193,7 @@ function doPost(e) {
     switch(action) {
 
       // ══════════════════════════════════════════════════════
-      //  SAVE INVOICE — FIXED VERSION
+      //  SAVE INVOICE — FIXED VERSION WITH PROPER ID HANDLING
       // ══════════════════════════════════════════════════════
       case "save_invoice": {
         var d = body.data;
@@ -196,54 +201,68 @@ function doPost(e) {
           return _apiErr("Missing custId or items");
         }
 
-        // ✅ Step 1: Generate Invoice ID FIRST
-        if (!d.invId) {
-          var invWs = ss.getSheetByName(CFG.INV_H);
-          d.invId = _getNextId(invWs, "INV");
-        }
-        var invId = d.invId;
-        Logger.log("Generated Invoice ID: " + invId);
+        // ✅ Step 1: Generate Invoice ID FIRST (before anything else)
+        var invWs = ss.getSheetByName(CFG.INV_H);
+        var rawInvId = _getNextId(invWs, "INV"); // e.g., "INV001"
+        // Extract numeric part and enforce minimum 0010
+        var numPart = parseInt(rawInvId.replace(/\D/g, ""), 10);
+        if (isNaN(numPart) || numPart < 10) numPart = 10;
+        var invId = "INV" + ("000" + numPart).slice(-4);
+        d.invId = invId;  // Set formatted ID in the data object
+        
+        Logger.log("✓ Generated Invoice ID: " + invId);
 
         // ✅ Step 2: Resolve Customer Name BEFORE calling saveInvoice
         var custName = _resolveCustomerName(ss, d.custId, d);
         d.custName = custName;
         d.customerName = custName;
         d.customer = custName;
-        Logger.log("Resolved Customer Name: " + custName);
+        
+        Logger.log("✓ Resolved Customer Name: " + custName);
 
         // ✅ Step 3: Set creator
         d.createdBy = body.createdBy || d.createdBy || "api";
 
         // ✅ Step 4: Call your existing saveInvoice function
+        // Note: saveInvoice should now receive d.invId already set
         var result = saveInvoice(d);
-        Logger.log("saveInvoice result: " + result);
+        Logger.log("✓ saveInvoice result: " + result);
 
-        // ✅ Step 5: Generate PDF (with retry logic)
+        // ✅ Step 5: Generate PDF with correct invoice number
         Utilities.sleep(2000);
-        var pdfUrl = _findPdfInDrive(invId);
+        var pdfUrl = "";
         
-        if (!pdfUrl) {
-          Logger.log("PDF not found in Drive, generating new one...");
-          try {
-            var total = d.items.reduce(function(s, i) {
-              return s + (i.qty * i.rate);
-            }, 0) * (1 + (d.tax || 0) / 100);
-            
-            pdfUrl = _customGeneratePDF(d, total);
-            Logger.log("PDF generated: " + pdfUrl);
-          } catch(pdfErr) {
-            Logger.log("PDF generation failed: " + pdfErr.message);
-            pdfUrl = "";
-          }
-        } else {
-          Logger.log("PDF found in Drive: " + pdfUrl);
-          _renamePdfFile(invId, custName);
-          pdfUrl = _findPdfInDrive(invId) || pdfUrl;
+        try {
+          var total = d.items.reduce(function(s, i) {
+            return s + (i.qty * i.rate);
+          }, 0) * (1 + (d.tax || 0) / 100);
+          
+          // Pass the invoice data with correct ID to PDF generator
+          pdfUrl = _customGeneratePDF({
+            invId: invId,  // ✅ Use the generated ID
+            date: d.date || _today(),
+            custId: d.custId,
+            custName: custName,
+            customerName: custName,
+            customer: custName,
+            payTerms: d.payTerms || "COD",
+            notes: d.notes || "Thank you for your business.",
+            tax: d.tax || 0,
+            items: d.items,
+            currency: CFG.CURRENCY,
+            logoUrl: CFG.LOGO_URL,
+            address: CFG.ADDRESS
+          }, total);
+          
+          Logger.log("✓ PDF generated: " + pdfUrl);
+        } catch(pdfErr) {
+          Logger.log("✗ PDF generation failed: " + pdfErr.message);
+          pdfUrl = "";
         }
 
         return _apiOk({
           message: result,
-          id: invId,
+          id: invId,  // ✅ Return the correct ID
           pdfUrl: pdfUrl,
           customerName: custName
         });
@@ -400,6 +419,7 @@ function doPost(e) {
         if (!d.invId) {
           d.invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
         }
+        var invId = d.invId;
         
         // Resolve customer name
         var custName = _resolveCustomerName(ss, d.custId, d);
@@ -412,7 +432,6 @@ function doPost(e) {
         d.notes = "[Rider App] " + (d.notes || "");
         
         var result = saveInvoice(d);
-        var invId = d.invId;
         var pdfUrl = "";
         
         try {
@@ -514,7 +533,31 @@ function _apiGetLastDataRow(ws, col) {
   return 3;
 }
 
-function _getNextId(ws, prefix) {
+// Duplicate _getNextId definition removed to keep single implementation that starts at 0010.
+
+  // If the sheet is missing or empty, start numbering at 0010
+  if (!ws) return prefix + "-0010";
+
+  var lastRow = ws.getLastRow();
+  if (lastRow < 4) return prefix + "-0010";
+
+  var data = ws.getRange(4, 1, lastRow - 3, 1).getValues();
+  var max = 0;
+
+  data.forEach(function(r) {
+    var v = r[0] ? r[0].toString().trim() : "";
+    if (v.toUpperCase().startsWith(prefix.toUpperCase() + "-")) {
+      var n = parseInt(v.split("-").pop()) || 0;
+      if (n > max) max = n;
+    }
+  });
+
+  // Ensure the next ID is at least 0010
+  var nextNum = max + 1;
+  if (nextNum < 10) nextNum = 10;
+
+  return prefix + "-" + String(nextNum).padStart(4, "0");
+}
   if (!ws) return prefix + "-0001";
   
   var lastRow = ws.getLastRow();
@@ -559,11 +602,9 @@ function _getNextCustomerId(ss) {
 //  RESOLVE CUSTOMER NAME — NEW HELPER FUNCTION
 // ══════════════════════════════════════════════════════════
 function _resolveCustomerName(ss, custId, dataObj) {
-  // Try from provided data first
   var custName = dataObj.custName || dataObj.customerName || 
                  dataObj.customer || "";
   
-  // If empty or same as ID, look it up
   if (!custName || custName === custId || custName.trim() === "") {
     try {
       var custWs = ss.getSheetByName(CFG.CUST);
@@ -583,7 +624,6 @@ function _resolveCustomerName(ss, custId, dataObj) {
     }
   }
   
-  // Final fallback
   if (!custName || custName.trim() === "") {
     custName = custId || "Customer";
   }
@@ -1042,7 +1082,6 @@ function _readRiderOrders(ss, riderId) {
   if (!ss) return [];
   
   var invoices = _readInvoices(ss, 100);
-  var today = _today();
   
   return invoices.filter(function(i) {
     return i.status === "Unpaid" || i.status === "Partial";
@@ -1050,7 +1089,7 @@ function _readRiderOrders(ss, riderId) {
 }
 
 // ============================================================
-//  PDF GENERATION FUNCTIONS
+//  PDF GENERATION FUNCTIONS — FIXED WITH LOGO & PKR
 // ============================================================
 
 function _findPdfInDrive(invId) {
@@ -1082,7 +1121,6 @@ function _generatePdfForInvoice(ss, invId) {
   
   var invH = ss.getSheetByName(CFG.INV_H);
   var invI = ss.getSheetByName(CFG.INV_I);
-  var custWs = ss.getSheetByName(CFG.CUST);
   
   if (!invH || !invI) return null;
 
@@ -1132,23 +1170,50 @@ function _generatePdfForInvoice(ss, invId) {
   }
 }
 
+// ══════════════════════════════════════════════════════════
+//  CUSTOM GENERATE PDF — WITH LOGO, PKR CURRENCY & INV NUMBER
+// ══════════════════════════════════════════════════════════
 function _customGeneratePDF(d, total) {
   try {
     var custName = d.custName || d.customerName || d.customer || 
                    d.custId || "Customer";
     custName = custName.toString().trim();
     
-    var invId = (d.invId || "INV").toString().trim();
+    // ✅ CRITICAL: Use the invoice ID that was passed in
+    var invId = d.invId.toString().trim();
     
-    Logger.log("Generating PDF for: " + invId + " | Customer: " + custName);
+    Logger.log("=== PDF Generation ===");
+    Logger.log("Invoice ID: " + invId);
+    Logger.log("Customer: " + custName);
+    Logger.log("Date: " + (d.date || _today()));
     
+    // ✅ Build payload with logo, PKR currency, and correct invoice number
     var payload = {
+      // ✅ Logo (must be publicly accessible URL)
+      logo: API_CFG.LOGO_URL || "",
+      
+      // Company info
       from: "Assorted Produce Traders\nFF 27, Zarpar Arcade\nD-12 Markaz, Islamabad\n+92 342 2221633",
+      
+      // Customer info
       to: custName,
+      
+      // ✅ Invoice number - THIS IS THE KEY FIELD
       number: invId,
+      
+      // Date
       date: d.date || _today(),
+      
+      // Payment terms
       payment_terms: d.payTerms || "COD",
+      
+      // Notes
       notes: d.notes || "Thank you for your business.",
+      
+      // ✅ Currency - Set to PKR (Pakistani Rupees)
+      currency: "PKR",
+      
+      // Items
       items: d.items.map(function(item) {
         return {
           name: item.pname || item.pid || "Item",
@@ -1156,12 +1221,19 @@ function _customGeneratePDF(d, total) {
           unit_cost: parseFloat(item.rate) || 0
         };
       }),
+      
+      // Tax
       tax: d.tax || 0,
+      
+      // Field labels
       fields: {
         tax: "%"
       }
     };
 
+    Logger.log("Payload: " + JSON.stringify(payload, null, 2));
+
+    // ✅ Call invoice-generator.com API
     var options = {
       method: "POST",
       contentType: "application/json",
@@ -1182,10 +1254,12 @@ function _customGeneratePDF(d, total) {
       throw new Error("PDF API failed: " + response.getContentText());
     }
 
+    // ✅ Save to Drive with correct filename
     var fileName = custName + " - " + invId + ".pdf";
     var blob = response.getBlob().setName(fileName);
     var folder = DriveApp.getFolderById(API_CFG.DRIVE_FOLDER);
     
+    // Clean up old files with same invoice ID
     var oldFiles = folder.searchFiles("title contains '" + invId + "'");
     while (oldFiles.hasNext()) {
       try {
@@ -1193,15 +1267,17 @@ function _customGeneratePDF(d, total) {
       } catch(ex) {}
     }
 
+    // Create new file
     var file = folder.createFile(blob);
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     
     var url = file.getUrl();
-    Logger.log("PDF created successfully: " + url);
+    Logger.log("✓ PDF created successfully: " + url);
+    Logger.log("✓ Filename: " + fileName);
     
     return url;
   } catch(e) {
-    Logger.log("customGeneratePDF error: " + e.message + "\n" + e.stack);
+    Logger.log("✗ customGeneratePDF error: " + e.message + "\n" + e.stack);
     return "";
   }
 }
