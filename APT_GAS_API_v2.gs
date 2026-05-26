@@ -585,10 +585,10 @@ function _getNextId(ws, prefix) {
 
 function _getNextCustomerId(ss) {
   ss = _getSs(ss);
-  if (!ss) return "C-001";
+  if (!ss) return "C-0070";
   
   var ws = ss.getSheetByName(CFG.CUST);
-  if (!ws || ws.getLastRow() < 4) return "C-001";
+  if (!ws || ws.getLastRow() < 4) return "C-0070";
   
   var data = ws.getRange(4, 1, ws.getLastRow() - 3, 1).getValues();
   var max = 0;
@@ -601,7 +601,10 @@ function _getNextCustomerId(ss) {
     }
   });
   
-  return "C-" + String(max + 1).padStart(3, "0");
+  var nextNum = max + 1;
+  if (nextNum < 70) nextNum = 70;
+  
+  return "C-" + String(nextNum).padStart(4, "0");
 }
 
 // ══════════════════════════════════════════════════════════
