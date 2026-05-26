@@ -207,7 +207,7 @@ function doPost(e) {
         // Extract numeric part and enforce minimum 0010
         var numPart = parseInt(rawInvId.replace(/\D/g, ""), 10);
         if (isNaN(numPart) || numPart < 10) numPart = 10;
-        var invId = "INV" + ("000" + numPart).slice(-4);
+        var invId = "INV-" + ("000" + numPart).slice(-4);
         d.invId = invId;  // Set formatted ID in the data object
         
         Logger.log("✓ Generated Invoice ID: " + invId);
