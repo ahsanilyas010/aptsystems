@@ -533,8 +533,8 @@ function _apiGetLastDataRow(ws, col) {
   return 3;
 }
 
-// Duplicate _getNextId definition removed to keep single implementation that starts at 0010.
-
+function _getNextId(ws, prefix) {
+  prefix = prefix || "INV";
   // If the sheet is missing or empty, start numbering at 0010
   if (!ws) return prefix + "-0010";
 
@@ -558,7 +558,13 @@ function _apiGetLastDataRow(ws, col) {
 
   return prefix + "-" + String(nextNum).padStart(4, "0");
 }
-  if (!ws) return prefix + "-0001";
+
+
+
+
+
+/*
+
   
   var lastRow = ws.getLastRow();
   if (lastRow < 4) return prefix + "-0001";
@@ -575,7 +581,7 @@ function _apiGetLastDataRow(ws, col) {
   });
   
   return prefix + "-" + String(max + 1).padStart(4, "0");
-}
+*/
 
 function _getNextCustomerId(ss) {
   ss = _getSs(ss);
