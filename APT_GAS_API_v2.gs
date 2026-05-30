@@ -87,6 +87,44 @@ function doOptions(e) {
 // ============================================================
 function doGet(e) {
   e = e || {};
+  
+  // ── PUBLIC RIDER APP ENDPOINT (BYPASSES AUTH) ─────────────────
+  var type = e.parameter && e.parameter.type;
+  if (type === "GET_PRODUCT") {
+    var pid = (e.parameter.pid || "").toString().trim().toUpperCase();
+    if (!pid) {
+      return ContentService.createTextOutput(JSON.stringify({}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    var ss = _getSs();
+    if (!ss) {
+      return ContentService.createTextOutput(JSON.stringify({ error: "Spreadsheet not found" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    // Support "04_Product_Master" or configured fallback "04_Products"
+    var sheet = ss.getSheetByName("04_Product_Master") || ss.getSheetByName(CFG.PROD || "04_Products");
+    if (!sheet) {
+      return ContentService.createTextOutput(JSON.stringify({ error: "Product sheet not found" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (data[i][0] && data[i][0].toString().trim().toUpperCase() === pid) {
+        return ContentService.createTextOutput(JSON.stringify({
+          name: data[i][1] ? data[i][1].toString().trim() : "",
+          category: data[i][2] ? data[i][2].toString().trim() : "",
+          vendor: data[i][4] ? data[i][4].toString().trim() : "",
+          trade_price: parseFloat(data[i][6]) || 0
+        })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  
   if (!_apiAuth(e)) return _apiErr("Unauthorized", 401);
   
   var action = (e.parameter && e.parameter.action) || "dashboard";
