@@ -441,15 +441,16 @@ function CrmApp({ user, onLogout }) {
           pname: pr ? pr.name : (item.pname || "")
         };
       });
-      const result = await gasPost("save_invoice", {
-        ...formData, 
-        custName,
-        customerName: custName,
-        customer: custName,
-        items: enrichedItems, 
-        createdBy: user.email
-      }, {createdBy: user.email});
-      
+const { invId: existingInvId, ...restForm } = formData;
+const result = await gasPost("save_invoice", {
+  ...restForm,
+  ...(existingInvId ? { invId: existingInvId } : {}),
+  custName,
+  customerName: custName,
+  customer: custName,
+  items: enrichedItems,
+  createdBy: user.email,
+});      
       const invId = formData.invId || result.id;
       if (result.pdfUrl) {
         cachePdf(invId, result.pdfUrl);
