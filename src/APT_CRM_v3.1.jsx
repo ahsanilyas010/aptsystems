@@ -454,7 +454,7 @@ function CrmApp({ user, onLogout }) {
       // Auto-download PDF immediately in browser
       triggerPdfDownload(result.pdfUrl);
     }
-    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0)}`);
+    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
     closeModal();
     await loadData(true);
   } catch(e) { notify("❌ "+e.message,"err"); throw e; }
@@ -485,13 +485,11 @@ function CrmApp({ user, onLogout }) {
 
    const addCustomer = async (d) => {
      try {
--    const r=await gasPost("add_customer",d);
--    notify("✅ "+r.id+" added"); closeModal(); await loadData(true);
-+    const payload = { ...d, id: d.id || getNextCustomerId() };
-+    const r = await gasPost("add_customer", payload);
-+    notify(`✅ ${r.id} added`);
-+    closeModal();
-+    await loadData(true);
+    const payload = { ...d, id: d.id || getNextCustomerId() };
+    const r = await gasPost("add_customer", payload);
+    notify(`✅ ${r.id} added`);
+    closeModal();
+    await loadData(true);
      } catch(e) { notify("❌ "+e.message,"err"); }
    };
 
@@ -1107,7 +1105,7 @@ function CrmApp({ user, onLogout }) {
         const [f,setF]=useState({name:"",category:"",contact:"",phone:"",openBal:"0",notes:""});
         const save=async()=>{
           if(!f.name){notify("Enter vendor name","err");return;}
-          try{await gasPost("save_vendor"||"add_customer",{...f});notify("✅ Vendor added");closeModal();await loadData(true);}
+          try{await gasPost("save_vendor",{...f});notify("✅ Vendor added");closeModal();await loadData(true);}
           catch(e){notify("❌ "+e.message,"err");}
         };
         return(
