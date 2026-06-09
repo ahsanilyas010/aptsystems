@@ -454,7 +454,7 @@ function CrmApp({ user, onLogout }) {
       // Auto-download PDF immediately in browser
       triggerPdfDownload(result.pdfUrl);
     }
-    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0)}`);
+    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
     closeModal();
     await loadData(true);
   } catch(e) { notify("❌ "+e.message,"err"); throw e; }
@@ -474,26 +474,14 @@ function CrmApp({ user, onLogout }) {
     catch(e) { notify("❌ "+e.message,"err"); }
   };
 
-// Helper to generate next customer ID like C-060
-   const getNextCustomerId = () => {
-     const ids = customers.map(c => c.id).filter(id => /^C-\d+$/.test(id));
-     const nums = ids.map(id => parseInt(id.split('-')[1], 10));
-     const max = nums.length ? Math.max(...nums) : 0;
-     const next = max + 1;
-     return `C-${String(next).padStart(3, '0')}`;
-   };
-
-   const addCustomer = async (d) => {
-     try {
--    const r=await gasPost("add_customer",d);
--    notify("✅ "+r.id+" added"); closeModal(); await loadData(true);
-+    const payload = { ...d, id: d.id || getNextCustomerId() };
-+    const r = await gasPost("add_customer", payload);
-+    notify(`✅ ${r.id} added`);
-+    closeModal();
-+    await loadData(true);
-     } catch(e) { notify("❌ "+e.message,"err"); }
-   };
+  const addCustomer = async (d) => {
+    try {
+      const r = await gasPost("add_customer", d);
+      notify(`✅ ${r.id} added`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
 
   if (loading) return <LoadingScreen msg="Loading APT ERP from Google Sheet…"/>;
 
@@ -910,8 +898,16 @@ function CrmApp({ user, onLogout }) {
           }
           return{...p,items:it};
         });
+        const nextInvId = (() => {
+          const ids = invoices.map(i=>i.id).filter(id=>/^INV-\d+$/.test(id));
+          const max = ids.length ? Math.max(...ids.map(id=>parseInt(id.split('-')[1],10))) : 9;
+          return `INV-${String(Math.max(max+1,10)).padStart(4,'0')}`;
+        })();
         return(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:G.pale,borderRadius:8,padding:"7px 12px",fontSize:11,color:G.dark,fontWeight:600,marginBottom:2}}>
+              Invoice # <span style={{color:G.mid,fontWeight:800}}>{nextInvId}</span> <span style={{color:G.muted,fontWeight:400}}>(auto-assigned on save)</span>
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
               <Sel label="Customer" value={f.custId} onChange={e=>setF(p=>({...p,custId:e.target.value}))}>
                 <option value="">— Select Store —</option>
@@ -961,7 +957,7 @@ function CrmApp({ user, onLogout }) {
       return(
         <Modal title={`Invoice — ${inv.id}`} onClose={closeModal} wide>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
-            {[{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
+            {[{l:"Invoice #",v:inv.id},{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
               <div key={r.l} style={{background:G.pale,borderRadius:7,padding:"8px 11px"}}>
                 <div style={{fontSize:8,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:2}}>{r.l}</div>
                 <div style={{fontSize:12,fontWeight:600,color:G.ink}}>{r.v}</div>
@@ -1107,7 +1103,7 @@ function CrmApp({ user, onLogout }) {
         const [f,setF]=useState({name:"",category:"",contact:"",phone:"",openBal:"0",notes:""});
         const save=async()=>{
           if(!f.name){notify("Enter vendor name","err");return;}
-          try{await gasPost("save_vendor"||"add_customer",{...f});notify("✅ Vendor added");closeModal();await loadData(true);}
+          try{await gasPost("save_vendor",{...f});notify("✅ Vendor added");closeModal();await loadData(true);}
           catch(e){notify("❌ "+e.message,"err");}
         };
         return(

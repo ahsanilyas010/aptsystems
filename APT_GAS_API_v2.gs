@@ -239,45 +239,36 @@ function doPost(e) {
           return _apiErr("Missing custId or items");
         }
 
-        // ✅ Step 1: Generate Invoice ID FIRST (before anything else)
-        var invWs = ss.getSheetByName(CFG.INV_H);
-        var rawInvId = _getNextId(invWs, "INV"); // e.g., "INV001"
-        // Extract numeric part and enforce minimum 0010
-        var numPart = parseInt(rawInvId.replace(/\D/g, ""), 10);
-        if (isNaN(numPart) || numPart < 10) numPart = 10;
-        var invId = "INV-" + ("000" + numPart).slice(-4);
-        d.invId = invId;  // Set formatted ID in the data object
-        
+        // Step 1: Generate Invoice ID
+        var invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
+        d.invId = invId;
         Logger.log("✓ Generated Invoice ID: " + invId);
 
-        // ✅ Step 2: Resolve Customer Name BEFORE calling saveInvoice
+        // Step 2: Resolve Customer Name
         var custName = _resolveCustomerName(ss, d.custId, d);
         d.custName = custName;
         d.customerName = custName;
         d.customer = custName;
-        
         Logger.log("✓ Resolved Customer Name: " + custName);
 
-        // ✅ Step 3: Set creator
+        // Step 3: Set creator
         d.createdBy = body.createdBy || d.createdBy || "api";
 
-        // ✅ Step 4: Call your existing saveInvoice function
-        // Note: saveInvoice should now receive d.invId already set
-        var result = saveInvoice(d);
-        Logger.log("✓ saveInvoice result: " + result);
+        // Step 4: Compute total
+        var total = d.items.reduce(function(s, i) {
+          return s + ((parseFloat(i.qty) || 0) * (parseFloat(i.rate) || 0));
+        }, 0) * (1 + (parseFloat(d.tax) || 0) / 100);
 
-        // ✅ Step 5: Generate PDF with correct invoice number
+        // Step 5: Write directly to sheet (no legacy saveInvoice call)
+        var result = _writeInvoiceToSheet(ss, invId, d, total);
+        Logger.log("✓ " + result);
+
+        // Step 6: Generate PDF (PKR, logo, address)
         Utilities.sleep(2000);
         var pdfUrl = "";
-        
         try {
-          var total = d.items.reduce(function(s, i) {
-            return s + (i.qty * i.rate);
-          }, 0) * (1 + (d.tax || 0) / 100);
-          
-          // Pass the invoice data with correct ID to PDF generator
           pdfUrl = _customGeneratePDF({
-            invId: invId,  // ✅ Use the generated ID
+            invId: invId,
             date: d.date || _today(),
             custId: d.custId,
             custName: custName,
@@ -291,7 +282,6 @@ function doPost(e) {
             logoUrl: CFG.LOGO_URL,
             address: CFG.ADDRESS
           }, total);
-          
           Logger.log("✓ PDF generated: " + pdfUrl);
         } catch(pdfErr) {
           Logger.log("✗ PDF generation failed: " + pdfErr.message);
@@ -453,29 +443,28 @@ function doPost(e) {
           return _apiErr("Missing custId or items");
         }
         
-        // Generate invoice ID first
-        if (!d.invId) {
-          d.invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
-        }
-        var invId = d.invId;
-        
+        // Generate invoice ID
+        var invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
+        d.invId = invId;
+
         // Resolve customer name
         var custName = _resolveCustomerName(ss, d.custId, d);
         d.custName = custName;
         d.customerName = custName;
         d.customer = custName;
-        
+
         d.createdBy = body.riderId || "rider";
         d.payTerms = d.payTerms || "COD";
         d.notes = "[Rider App] " + (d.notes || "");
-        
-        var result = saveInvoice(d);
+
+        var total = d.items.reduce(function(s, i) {
+          return s + ((parseFloat(i.qty) || 0) * (parseFloat(i.rate) || 0));
+        }, 0);
+
+        var result = _writeInvoiceToSheet(ss, invId, d, total);
         var pdfUrl = "";
-        
+
         try {
-          var total = d.items.reduce(function(s, i) {
-            return s + (i.qty * i.rate);
-          }, 0);
           pdfUrl = _customGeneratePDF(d, total);
         } catch(ex) {
           Logger.log("Rider order PDF error: " + ex.message);
@@ -621,28 +610,67 @@ function _getNextId(ws, prefix) {
   return prefix + "-" + String(max + 1).padStart(4, "0");
 */
 
+// Write a new invoice directly to INV_H and INV_I sheets.
+// Replaces the legacy saveInvoice() call to avoid double-PDF generation.
+function _writeInvoiceToSheet(ss, invId, d, total) {
+  var invH = ss.getSheetByName(CFG.INV_H);
+  if (!invH) throw new Error("Invoice Headers sheet not found");
+
+  var hRow = _apiGetLastDataRow(invH, 1) + 1;
+  if (hRow < 4) hRow = 4;
+
+  var custName = d.custName || d.customerName || d.customer || d.custId || "";
+
+  invH.getRange(hRow, 1, 1, 8).setValues([[
+    invId,
+    d.date || _today(),
+    d.custId || "",
+    custName,
+    total,
+    "Unpaid",
+    d.payTerms || "COD",
+    d.createdBy || "api"
+  ]]);
+
+  var invI = ss.getSheetByName(CFG.INV_I);
+  if (!invI) throw new Error("Invoice Items sheet not found");
+
+  var iRow = _apiGetLastDataRow(invI, 1) + 1;
+  if (iRow < 4) iRow = 4;
+
+  var itemRows = d.items.map(function(item) {
+    var qty = parseFloat(item.qty) || 0;
+    var rate = parseFloat(item.rate) || 0;
+    return [invId, item.pid || "", item.pname || "", qty, rate, qty * rate, item.notes || ""];
+  });
+
+  if (itemRows.length > 0) {
+    invI.getRange(iRow, 1, itemRows.length, 7).setValues(itemRows);
+  }
+
+  _ensureCustomerInAR(ss, d.custId);
+  return "Invoice " + invId + " saved";
+}
+
 function _getNextCustomerId(ss) {
   ss = _getSs(ss);
-  if (!ss) return "C-0070";
-  
+  if (!ss) return "C-0001";
+
   var ws = ss.getSheetByName(CFG.CUST);
-  if (!ws || ws.getLastRow() < 4) return "C-0070";
-  
+  if (!ws || ws.getLastRow() < 4) return "C-0001";
+
   var data = ws.getRange(4, 1, ws.getLastRow() - 3, 1).getValues();
   var max = 0;
-  
+
   data.forEach(function(r) {
     var v = r[0] ? r[0].toString().trim() : "";
-    if (v.match(/^C-\d+$/)) {
-      var n = parseInt(v.replace("C-", "")) || 0;
+    if (v.match(/^C-\d+$/i)) {
+      var n = parseInt(v.replace(/^C-/i, "")) || 0;
       if (n > max) max = n;
     }
   });
-  
-  var nextNum = max + 1;
-  if (nextNum < 70) nextNum = 70;
-  
-  return "C-" + String(nextNum).padStart(4, "0");
+
+  return "C-" + String(max + 1).padStart(4, "0");
 }
 
 // ══════════════════════════════════════════════════════════
