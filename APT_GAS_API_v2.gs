@@ -344,7 +344,10 @@ function doPost(e) {
         if (d.invId && d.type === "Received") {
           _updateInvoiceStatus(ss, d.invId, parseFloat(d.amount));
         }
-        
+        if (d.custId && d.type === "Received") {
+          _recalcAR(ss, d.custId);
+        }
+
         return _apiOk({ message: result });
       }
 
@@ -397,10 +400,213 @@ function doPost(e) {
         ws.getRange(row, 8).setValue(d.notes || "");
         
         _ensureCustomerInAR(ss, newId);
-        
+
         return _apiOk({
           id: newId,
           message: "Customer " + newId + " added: " + d.name
+        });
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  EDIT CUSTOMER
+      // ══════════════════════════════════════════════════════
+      case "edit_customer": {
+        var d = body.data;
+        if (!d || !d.id) return _apiErr("Missing customer id");
+
+        var ws = ss.getSheetByName(CFG.CUST);
+        if (!ws) return _apiErr("Customers sheet not found");
+
+        var data = ws.getDataRange().getValues();
+        var custId = d.id.toString().trim();
+
+        for (var i = 3; i < data.length; i++) {
+          if (data[i][0] && data[i][0].toString().trim() === custId) {
+            var row = i + 1;
+            if (d.name !== undefined)    ws.getRange(row, 2).setValue(d.name);
+            if (d.city !== undefined)    ws.getRange(row, 3).setValue(d.city);
+            if (d.area !== undefined)    ws.getRange(row, 4).setValue(d.area);
+            if (d.contact !== undefined) ws.getRange(row, 5).setValue(d.contact);
+            if (d.phone !== undefined)   ws.getRange(row, 6).setValue(d.phone);
+            if (d.openBal !== undefined) ws.getRange(row, 7).setValue(parseFloat(d.openBal) || 0);
+            if (d.notes !== undefined)   ws.getRange(row, 8).setValue(d.notes);
+
+            // Keep AR ledger name in sync
+            if (d.name) {
+              var arWs = ss.getSheetByName(CFG.AR);
+              if (arWs) {
+                var arData = arWs.getDataRange().getValues();
+                for (var j = 3; j < arData.length; j++) {
+                  if (arData[j][0] && arData[j][0].toString().trim() === custId) {
+                    arWs.getRange(j + 1, 2).setValue(d.name);
+                    break;
+                  }
+                }
+              }
+            }
+
+            return _apiOk({ id: custId, message: "Customer " + custId + " updated" });
+          }
+        }
+        return _apiErr("Customer not found: " + custId);
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  ADD VENDOR
+      // ══════════════════════════════════════════════════════
+      case "save_vendor": {
+        var d = body.data;
+        if (!d || !d.name) return _apiErr("Missing vendor name");
+
+        var ws = ss.getSheetByName(CFG.VEN);
+        if (!ws) return _apiErr("Vendors sheet not found");
+
+        var max = 0;
+        if (ws.getLastRow() > 3) {
+          ws.getRange(4, 1, ws.getLastRow() - 3, 1).getValues().forEach(function(r) {
+            var v = r[0] ? r[0].toString().trim() : "";
+            var m = v.match(/^V-?(\d+)$/i);
+            if (m) {
+              var n = parseInt(m[1]) || 0;
+              if (n > max) max = n;
+            }
+          });
+        }
+        var newId = "V-" + String(max + 1).padStart(3, "0");
+
+        var row = _apiGetLastDataRow(ws, 1) + 1;
+        if (row < 4) row = 4;
+
+        ws.getRange(row, 1, 1, 7).setValues([[
+          newId, d.name, d.category || "", d.contact || "",
+          d.phone || "", parseFloat(d.openBal) || 0, d.notes || ""
+        ]]);
+
+        return _apiOk({
+          id: newId,
+          message: "Vendor " + newId + " added: " + d.name
+        });
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  EDIT VENDOR
+      // ══════════════════════════════════════════════════════
+      case "edit_vendor": {
+        var d = body.data;
+        if (!d || !d.id) return _apiErr("Missing vendor id");
+
+        var ws = ss.getSheetByName(CFG.VEN);
+        if (!ws) return _apiErr("Vendors sheet not found");
+
+        var data = ws.getDataRange().getValues();
+        var venId = d.id.toString().trim();
+
+        for (var i = 3; i < data.length; i++) {
+          if (data[i][0] && data[i][0].toString().trim() === venId) {
+            var row = i + 1;
+            if (d.name !== undefined)     ws.getRange(row, 2).setValue(d.name);
+            if (d.category !== undefined) ws.getRange(row, 3).setValue(d.category);
+            if (d.contact !== undefined)  ws.getRange(row, 4).setValue(d.contact);
+            if (d.phone !== undefined)    ws.getRange(row, 5).setValue(d.phone);
+            if (d.openBal !== undefined)  ws.getRange(row, 6).setValue(parseFloat(d.openBal) || 0);
+            if (d.notes !== undefined)    ws.getRange(row, 7).setValue(d.notes);
+            return _apiOk({ id: venId, message: "Vendor " + venId + " updated" });
+          }
+        }
+        return _apiErr("Vendor not found: " + venId);
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  EDIT INVOICE — update header + replace items + new PDF
+      // ══════════════════════════════════════════════════════
+      case "edit_invoice": {
+        var d = body.data;
+        if (!d || !d.invId || !d.custId || !d.items || !d.items.length) {
+          return _apiErr("Missing invId, custId or items");
+        }
+        var invId = d.invId.toString().trim();
+
+        var invH = ss.getSheetByName(CFG.INV_H);
+        if (!invH) return _apiErr("Invoice Headers sheet not found");
+
+        var hData = invH.getDataRange().getValues();
+        var rowIdx = -1, oldCustId = "";
+        for (var i = 3; i < hData.length; i++) {
+          if (hData[i][0] &&
+              hData[i][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
+            rowIdx = i + 1;
+            oldCustId = hData[i][2] ? hData[i][2].toString().trim() : "";
+            break;
+          }
+        }
+        if (rowIdx < 0) return _apiErr("Invoice not found: " + invId);
+
+        var custName = _resolveCustomerName(ss, d.custId, d);
+        var custRecord = _lookupCustomer(ss, d.custId);
+
+        var total = d.items.reduce(function(s, i) {
+          return s + ((parseFloat(i.qty) || 0) * (parseFloat(i.rate) || 0));
+        }, 0) * (1 + (parseFloat(d.tax) || 0) / 100);
+
+        // Update header (status col 6 and creator col 8 are preserved)
+        invH.getRange(rowIdx, 2).setValue(d.date || _today());
+        invH.getRange(rowIdx, 3).setValue(d.custId);
+        invH.getRange(rowIdx, 4).setValue(custName);
+        invH.getRange(rowIdx, 5).setValue(total);
+        invH.getRange(rowIdx, 7).setValue(d.payTerms || "COD");
+
+        // Replace line items
+        var invI = ss.getSheetByName(CFG.INV_I);
+        if (invI) {
+          var iData = invI.getDataRange().getValues();
+          for (var i = iData.length - 1; i >= 3; i--) {
+            if (iData[i][0] &&
+                iData[i][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
+              invI.deleteRow(i + 1);
+            }
+          }
+          var iRow = _apiGetLastDataRow(invI, 1) + 1;
+          if (iRow < 4) iRow = 4;
+          var itemRows = d.items.map(function(item) {
+            var qty = parseFloat(item.qty) || 0;
+            var rate = parseFloat(item.rate) || 0;
+            return [invId, item.pid || "", item.pname || "", qty, rate, qty * rate, item.notes || ""];
+          });
+          invI.getRange(iRow, 1, itemRows.length, 7).setValues(itemRows);
+        }
+
+        // Refresh status against recorded payments + AR balances
+        _updateInvoiceStatus(ss, invId, 0);
+        _ensureCustomerInAR(ss, d.custId);
+        _recalcAR(ss, d.custId);
+        if (oldCustId && oldCustId !== d.custId) _recalcAR(ss, oldCustId);
+
+        // Regenerate PDF (replaces old file in Drive)
+        var pdfUrl = "";
+        try {
+          pdfUrl = _customGeneratePDF({
+            invId: invId,
+            date: d.date || _today(),
+            custId: d.custId,
+            custName: custName,
+            customerName: custName,
+            customer: custName,
+            custArea:    custRecord ? custRecord.area    : "",
+            custContact: custRecord ? custRecord.contact : "",
+            custPhone:   custRecord ? custRecord.phone   : "",
+            payTerms: d.payTerms || "COD",
+            notes: d.notes || "Thank you for your business.",
+            tax: d.tax || 0,
+            items: d.items
+          }, total);
+        } catch(pdfErr) {
+          Logger.log("Edit invoice PDF error: " + pdfErr.message);
+        }
+
+        return _apiOk({
+          message: "Invoice " + invId + " updated",
+          id: invId,
+          pdfUrl: pdfUrl
         });
       }
 
@@ -494,8 +700,10 @@ function doPost(e) {
       case "void_invoice": {
         var invId = body.invId;
         if (!invId) return _apiErr("Missing invId");
-        
+
+        var voidCustId = _findInvoiceCustId(ss, invId);
         var result = voidInvoice(invId);
+        if (voidCustId) _recalcAR(ss, voidCustId);
         return _apiOk({ message: result });
       }
 
@@ -505,8 +713,10 @@ function doPost(e) {
       case "delete_invoice": {
         var invId = body.invId;
         if (!invId) return _apiErr("Missing invId");
-        
+
+        var delCustId = _findInvoiceCustId(ss, invId);
         var result = _deleteInvoice(ss, invId);
+        if (delCustId) _recalcAR(ss, delCustId);
         return _apiOk({ message: result });
       }
 
@@ -660,7 +870,57 @@ function _writeInvoiceToSheet(ss, invId, d, total) {
   }
 
   _ensureCustomerInAR(ss, d.custId);
+  _recalcAR(ss, d.custId);
   return "Invoice " + invId + " saved";
+}
+
+// Recompute AR (billed / paid / balance) for one customer from
+// actual invoice + payment rows. Skips cells driven by sheet formulas.
+function _recalcAR(ss, custId) {
+  try {
+    if (!custId) return;
+    custId = custId.toString().trim();
+    var arWs = ss.getSheetByName(CFG.AR);
+    if (!arWs || arWs.getLastRow() < 4) return;
+
+    var arData = arWs.getDataRange().getValues();
+    var rowIdx = -1;
+    for (var i = 3; i < arData.length; i++) {
+      if (arData[i][0] && arData[i][0].toString().trim() === custId) {
+        rowIdx = i + 1;
+        break;
+      }
+    }
+    if (rowIdx < 0) return;
+    if (arWs.getRange(rowIdx, 4).getFormula()) return;
+
+    var billed = 0;
+    var invWs = ss.getSheetByName(CFG.INV_H);
+    if (invWs && invWs.getLastRow() > 3) {
+      invWs.getRange(4, 1, invWs.getLastRow() - 3, 6).getValues().forEach(function(r) {
+        var status = r[5] ? r[5].toString().trim().toUpperCase() : "";
+        if (r[2] && r[2].toString().trim() === custId && status !== "VOIDED") {
+          billed += parseFloat(r[4]) || 0;
+        }
+      });
+    }
+
+    var paid = 0;
+    var payWs = ss.getSheetByName(CFG.PAY);
+    if (payWs && payWs.getLastRow() > 3) {
+      payWs.getRange(4, 1, payWs.getLastRow() - 3, 7).getValues().forEach(function(r) {
+        if (r[3] && r[3].toString().trim() === custId && r[2] === "Received") {
+          paid += parseFloat(r[6]) || 0;
+        }
+      });
+    }
+
+    arWs.getRange(rowIdx, 4).setValue(billed);
+    if (!arWs.getRange(rowIdx, 5).getFormula()) arWs.getRange(rowIdx, 5).setValue(paid);
+    if (!arWs.getRange(rowIdx, 6).getFormula()) arWs.getRange(rowIdx, 6).setValue(billed - paid);
+  } catch(e) {
+    Logger.log("recalcAR error: " + e.message);
+  }
 }
 
 function _getNextCustomerId(ss) {
@@ -1459,6 +1719,23 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
       return;
     }
   }
+}
+
+function _findInvoiceCustId(ss, invId) {
+  try {
+    var ws = ss.getSheetByName(CFG.INV_H);
+    if (!ws || ws.getLastRow() < 4) return "";
+    var data = ws.getRange(4, 1, ws.getLastRow() - 3, 3).getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (data[i][0] &&
+          data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+        return data[i][2] ? data[i][2].toString().trim() : "";
+      }
+    }
+  } catch(e) {
+    Logger.log("findInvoiceCustId error: " + e.message);
+  }
+  return "";
 }
 
 function _deleteInvoice(ss, invId) {

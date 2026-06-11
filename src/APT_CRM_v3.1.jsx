@@ -181,6 +181,41 @@ const PdfBtn = ({ invId, pdfUrl, onGenerate, sm }) => {
   );
 };
 
+// ── Invoice Line Items (fetched on demand) ───────────────────
+const InvoiceItems = ({ invId }) => {
+  const [items, setItems] = useState(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let on = true;
+    setItems(null); setErr("");
+    gasGet("invoice_items", { id: invId })
+      .then(d => { if (on) setItems(Array.isArray(d) ? d : []); })
+      .catch(e => { if (on) setErr(e.message); });
+    return () => { on = false; };
+  }, [invId]);
+
+  if (err) return <div style={{fontSize:11,color:G.red,padding:"8px 2px"}}>❌ Could not load items: {err}</div>;
+  if (items === null) return <div style={{fontSize:11,color:G.muted,padding:"8px 2px"}}>⏳ Loading line items…</div>;
+  if (!items.length) return <div style={{fontSize:11,color:G.muted,padding:"8px 2px"}}>No line items found for this invoice.</div>;
+
+  const total = items.reduce((s,it)=>s+(it.total || it.qty*it.rate || 0),0);
+  return (
+    <div style={{marginBottom:14}}>
+      <div style={{fontWeight:700,color:G.dark,fontSize:10,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:6}}>Line Items</div>
+      <TblWrap compact heads={["Product","Qty","Rate","Amount"]}
+        rows={items.map(it=>[
+          <span style={{fontWeight:600,fontSize:11}}>{it.pname || it.pid}</span>,
+          <span style={{fontSize:11}}>{it.qty}</span>,
+          <span style={{fontSize:11}}>{fmt(it.rate)}</span>,
+          <span style={{fontWeight:700,fontSize:11}}>{fmt(it.total || it.qty*it.rate)}</span>,
+        ])}
+      />
+      <div style={{textAlign:"right",fontWeight:800,fontSize:12,color:G.ink,padding:"8px 4px 0"}}>Items Total: {fmt(total)}</div>
+    </div>
+  );
+};
+
 // ── Auth screens ──────────────────────────────────────────────
 const LoginScreen = ({ error }) => {
   const [email, setEmail] = useState("");
@@ -459,6 +494,48 @@ function CrmApp({ user, onLogout }) {
     await loadData(true);
   } catch(e) { notify("❌ "+e.message,"err"); throw e; }
 };
+  const editInvoice = async (formData) => {
+    try {
+      const cust = customers.find(c => c.id === formData.custId);
+      const custName = cust ? cust.name : "";
+      const enrichedItems = formData.items.map(item => {
+        const pr = prodMap[item.pid];
+        return { ...item, pname: pr ? pr.name : (item.pname || "") };
+      });
+      const result = await gasPost("edit_invoice", {
+        ...formData,
+        custName,
+        items: enrichedItems,
+        editedBy: user.email
+      });
+      if (result.pdfUrl) {
+        cachePdf(formData.invId, result.pdfUrl);
+        triggerPdfDownload(result.pdfUrl);
+      }
+      notify(`✅ ${formData.invId} updated — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); throw e; }
+  };
+
+  const updateCustomer = async (d) => {
+    try {
+      await gasPost("edit_customer", d);
+      notify(`✅ ${d.id} updated`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  const updateVendor = async (d) => {
+    try {
+      await gasPost("edit_vendor", d);
+      notify(`✅ ${d.id} updated`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
   const saveExpense = async (d) => {
     try { await gasPost("save_expense",{...d,by:user.email}); notify("✅ Expense saved"); closeModal(); await loadData(true); }
     catch(e) { notify("❌ "+e.message,"err"); }
@@ -831,7 +908,13 @@ function CrmApp({ user, onLogout }) {
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
           <div style={{background:G.red,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>⚠ AR Aging</span></div>
           <TblWrap compact heads={["Customer","Outstanding","Invoices","Action"]}
-            rows={ar.filter(r=>r.balance>0).sort((a,b)=>b.balance-a.balance).map(r=>[<span style={{fontWeight:700,fontSize:11}}>{r.custName}</span>,<span style={{fontWeight:800,color:G.red,fontSize:11}}>{fmt(r.balance)}</span>,<span style={{fontSize:10,color:G.muted}}>{invoices.filter(i=>i.custId===r.custId&&i.status!=="Paid"&&i.status!=="VOIDED").length}</span>,<Btn sm v="danger">Follow Up</Btn>])}
+            rows={ar.filter(r=>r.balance>0).sort((a,b)=>b.balance-a.balance).map(r=>[<span style={{fontWeight:700,fontSize:11}}>{r.custName}</span>,<span style={{fontWeight:800,color:G.red,fontSize:11}}>{fmt(r.balance)}</span>,<span style={{fontSize:10,color:G.muted}}>{invoices.filter(i=>i.custId===r.custId&&i.status!=="Paid"&&i.status!=="VOIDED").length}</span>,<Btn sm v="danger" onClick={()=>{
+              const c=custMap[r.custId];
+              const ph=(c?.phone||"").replace(/[^\d]/g,"");
+              if(!ph){notify("No phone number saved for "+r.custName,"err");return;}
+              const msg=encodeURIComponent(`Dear ${r.custName}, your outstanding balance with Assorted Produce Traders is ${fmt(r.balance)}. Kindly arrange payment at your earliest convenience. Thank you.`);
+              window.open(`https://wa.me/${ph.startsWith("92")?ph:ph.replace(/^0/,"92")}?text=${msg}`,"_blank");
+            }}>Follow Up</Btn>])}
           />
         </div>
       </div>
@@ -846,7 +929,10 @@ function CrmApp({ user, onLogout }) {
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
         {vendors.map(v=>{const apRow=ap.find(a=>a.vendorId===v.id)||{};return(
           <div key={v.id} style={{background:G.card,borderRadius:11,padding:16,boxShadow:"0 2px 10px rgba(26,92,32,0.07)",borderLeft:`4px solid ${G.mid}`}}>
-            <div style={{fontWeight:800,fontSize:14,color:G.ink,marginBottom:2}}>{v.name}</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div style={{fontWeight:800,fontSize:14,color:G.ink,marginBottom:2}}>{v.name}</div>
+              <Btn sm v="ghost" onClick={()=>setModal({t:"editVendor",d:v})}>✏️</Btn>
+            </div>
             <div style={{fontSize:10,color:G.muted,marginBottom:2}}>{v.id} · {v.category}</div>
             <div style={{fontSize:10,color:G.muted,marginBottom:10}}>{v.contact} · {v.phone}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
@@ -867,21 +953,38 @@ function CrmApp({ user, onLogout }) {
   const renderModal = () => {
     if(!modal) return null;
 
-    // ── New Invoice ──────────────────────────────────────────
-    if(modal.t==="newInvoice"){
+    // ── New / Edit Invoice ────────────────────────────────────
+    if(modal.t==="newInvoice"||modal.t==="editInvoice"){
+      const editing = modal.t==="editInvoice" ? modal.d : null;
       const InvForm=()=>{
-        const [f,setF]=useState({custId:"",date:todayStr(),payTerms:"COD",notes:"",items:[{pid:"",qty:1,rate:0}]});
+        const [f,setF]=useState({custId:editing?.custId||"",date:editing?.date||todayStr(),payTerms:editing?.payTerms||"COD",notes:"",items:[{pid:"",qty:1,rate:0}]});
         const [loading, setLoading] = useState(false);
+        const [itemsLoading, setItemsLoading] = useState(!!editing);
         const total=f.items.reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
-        
+
+        useEffect(()=>{
+          if(!editing) return;
+          let on=true;
+          gasGet("invoice_items",{id:editing.id})
+            .then(d=>{
+              if(!on) return;
+              const items=(Array.isArray(d)&&d.length)?d.map(it=>({pid:it.pid,pname:it.pname,qty:it.qty,rate:it.rate})):[{pid:"",qty:1,rate:0}];
+              setF(p=>({...p,items}));
+              setItemsLoading(false);
+            })
+            .catch(e=>{ if(on){ notify("❌ Could not load items: "+e.message,"err"); setItemsLoading(false);} });
+          return ()=>{on=false;};
+        },[]);
+
         const handleSave = async () => {
           if (!f.custId) { notify("Please select a store", "err"); return; }
           if (f.items.some(item => !item.pid)) { notify("Please select a product for all lines", "err"); return; }
           setLoading(true);
           try {
-            await saveInvoice(f);
+            if (editing) await editInvoice({...f, invId: editing.id});
+            else await saveInvoice(f);
           } catch(e) {
-            // Error is handled inside saveInvoice
+            // Error is handled inside saveInvoice/editInvoice
           } finally {
             setLoading(false);
           }
@@ -906,8 +1009,9 @@ function CrmApp({ user, onLogout }) {
         return(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div style={{background:G.pale,borderRadius:8,padding:"7px 12px",fontSize:11,color:G.dark,fontWeight:600,marginBottom:2}}>
-              Invoice # <span style={{color:G.mid,fontWeight:800}}>{nextInvId}</span> <span style={{color:G.muted,fontWeight:400}}>(auto-assigned on save)</span>
+              Invoice # <span style={{color:G.mid,fontWeight:800}}>{editing?editing.id:nextInvId}</span> {!editing&&<span style={{color:G.muted,fontWeight:400}}>(auto-assigned on save)</span>}
             </div>
+            {itemsLoading&&<div style={{fontSize:11,color:G.muted}}>⏳ Loading invoice items…</div>}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
               <Sel label="Customer" value={f.custId} onChange={e=>setF(p=>({...p,custId:e.target.value}))}>
                 <option value="">— Select Store —</option>
@@ -941,14 +1045,14 @@ function CrmApp({ user, onLogout }) {
             </div>
              <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6,paddingTop:10,borderTop:`1px solid ${G.pale}`}}>
               <Btn v="secondary" onClick={closeModal} disabled={loading}>Cancel</Btn>
-              <Btn onClick={handleSave} disabled={loading}>
-                {loading ? "⏳ Saving & Generating PDF..." : "💾 Save + Generate PDF"}
+              <Btn onClick={handleSave} disabled={loading||itemsLoading}>
+                {loading ? "⏳ Saving & Generating PDF..." : editing ? "💾 Update + Regenerate PDF" : "💾 Save + Generate PDF"}
               </Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="🧾 New Invoice → Sheet + PDF + Drive" onClose={closeModal} wide><InvForm/></Modal>;
+      return <Modal title={editing?`✏️ Edit Invoice — ${editing.id}`:"🧾 New Invoice → Sheet + PDF + Drive"} onClose={closeModal} wide><InvForm/></Modal>;
     }
 
     // ── View Invoice (with PDF download + Void) ──────────────
@@ -964,6 +1068,8 @@ function CrmApp({ user, onLogout }) {
               </div>
             ))}
           </div>
+          {/* Line items detail */}
+          <InvoiceItems invId={inv.id}/>
           {/* PDF Button — prominently placed */}
           <div style={{background:"#E3F2FD",borderRadius:10,padding:"12px 14px",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div>
@@ -973,7 +1079,8 @@ function CrmApp({ user, onLogout }) {
             <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)}/>
           </div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"space-between",alignItems:"center",width:"100%"}}>
-            <div>
+            <div style={{display:"flex",gap:8}}>
+              {inv.status!=="VOIDED"&&<Btn v="secondary" onClick={()=>setModal({t:"editInvoice",d:inv})}>✏️ Edit</Btn>}
               <Btn v="danger" onClick={()=>deleteInvoice(inv.id)}>🗑️ Delete Permanently</Btn>
             </div>
             <div style={{display:"flex",gap:8}}>
@@ -1126,6 +1233,55 @@ function CrmApp({ user, onLogout }) {
       return <Modal title="🏭 Add Vendor → Google Sheet" onClose={closeModal}><VenForm/></Modal>;
     }
 
+    // ── Edit Customer ─────────────────────────────────────────
+    if(modal.t==="editCustomer"){
+      const c=modal.d;
+      const EditCustForm=()=>{
+        const [f,setF]=useState({name:c.name||"",city:c.city||"ISB",area:c.area||"",contact:c.contact||"",phone:c.phone||"",notes:c.notes||""});
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <Inp label="Store Name" value={f.name} onChange={e=>setF(p=>({...p,name:e.target.value}))}/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Inp label="Area / Zone" value={f.area} onChange={e=>setF(p=>({...p,area:e.target.value}))} placeholder="F-7 Markaz"/>
+              <Inp label="City" value={f.city} onChange={e=>setF(p=>({...p,city:e.target.value}))} placeholder="ISB"/>
+              <Inp label="Purchaser Name" value={f.contact} onChange={e=>setF(p=>({...p,contact:e.target.value}))}/>
+              <Inp label="Purchaser Phone" value={f.phone} onChange={e=>setF(p=>({...p,phone:e.target.value}))} placeholder="+92..."/>
+            </div>
+            <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn onClick={()=>{if(!f.name){notify("Enter store name","err");return;}updateCustomer({...f,id:c.id});}}>💾 Update</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`✏️ Edit Store — ${c.id}`} onClose={closeModal}><EditCustForm/></Modal>;
+    }
+
+    // ── Edit Vendor ───────────────────────────────────────────
+    if(modal.t==="editVendor"){
+      const v=modal.d;
+      const EditVenForm=()=>{
+        const [f,setF]=useState({name:v.name||"",category:v.category||"",contact:v.contact||"",phone:v.phone||"",notes:v.notes||""});
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <Inp label="Vendor Name" value={f.name} onChange={e=>setF(p=>({...p,name:e.target.value}))}/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Inp label="Category" value={f.category} onChange={e=>setF(p=>({...p,category:e.target.value}))}/>
+              <Inp label="Contact Person" value={f.contact} onChange={e=>setF(p=>({...p,contact:e.target.value}))}/>
+              <Inp label="Phone" value={f.phone} onChange={e=>setF(p=>({...p,phone:e.target.value}))} placeholder="+92..."/>
+            </div>
+            <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn onClick={()=>{if(!f.name){notify("Enter vendor name","err");return;}updateVendor({...f,id:v.id});}}>💾 Update</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`✏️ Edit Vendor — ${v.id}`} onClose={closeModal}><EditVenForm/></Modal>;
+    }
+
     // ── View Customer ─────────────────────────────────────────
     if(modal.t==="viewCustomer"){
       const c=modal.d;
@@ -1145,6 +1301,9 @@ function CrmApp({ user, onLogout }) {
             <span style={{fontWeight:700,color:G.red,fontSize:12}}>⚠ Outstanding: {fmt(outstanding)}</span>
             <Btn sm v="success" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:c.id}});}}>Collect</Btn>
           </div>}
+          <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}>
+            <Btn sm v="secondary" onClick={()=>setModal({t:"editCustomer",d:c})}>✏️ Edit Store</Btn>
+          </div>
           <TblWrap compact heads={["Invoice","Date","Total","Status","PDF"]}
             rows={cinv.map(inv=>[
               <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
