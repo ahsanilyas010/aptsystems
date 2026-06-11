@@ -244,12 +244,16 @@ function doPost(e) {
         d.invId = invId;
         Logger.log("✓ Generated Invoice ID: " + invId);
 
-        // Step 2: Resolve Customer Name
+        // Step 2: Resolve Customer Name + area/purchaser details
         var custName = _resolveCustomerName(ss, d.custId, d);
         d.custName = custName;
         d.customerName = custName;
         d.customer = custName;
         Logger.log("✓ Resolved Customer Name: " + custName);
+        var custRecord  = _lookupCustomer(ss, d.custId);
+        var custArea    = custRecord ? custRecord.area    : "";
+        var custContact = custRecord ? custRecord.contact : "";
+        var custPhone   = custRecord ? custRecord.phone   : "";
 
         // Step 3: Set creator
         d.createdBy = body.createdBy || d.createdBy || "api";
@@ -274,6 +278,9 @@ function doPost(e) {
             custName: custName,
             customerName: custName,
             customer: custName,
+            custArea: custArea,
+            custContact: custContact,
+            custPhone: custPhone,
             payTerms: d.payTerms || "COD",
             notes: d.notes || "Thank you for your business.",
             tax: d.tax || 0,
@@ -447,11 +454,15 @@ function doPost(e) {
         var invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
         d.invId = invId;
 
-        // Resolve customer name
+        // Resolve customer name + area/purchaser details
         var custName = _resolveCustomerName(ss, d.custId, d);
         d.custName = custName;
         d.customerName = custName;
         d.customer = custName;
+        var custRecord  = _lookupCustomer(ss, d.custId);
+        d.custArea    = custRecord ? custRecord.area    : "";
+        d.custContact = custRecord ? custRecord.contact : "";
+        d.custPhone   = custRecord ? custRecord.phone   : "";
 
         d.createdBy = body.riderId || "rider";
         d.payTerms = d.payTerms || "COD";
@@ -749,6 +760,23 @@ function _ensureCustomerInAR(ss, custId) {
 // ============================================================
 //  READ FUNCTIONS
 // ============================================================
+
+function _lookupCustomer(ss, custId) {
+  var ws = ss.getSheetByName(CFG.CUST);
+  if (!ws) return null;
+  var data = ws.getDataRange().getValues();
+  for (var i = 3; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().trim() === custId) {
+      return {
+        name:    data[i][1] ? data[i][1].toString().trim() : "",
+        area:    data[i][3] ? data[i][3].toString().trim() : "",
+        contact: data[i][4] ? data[i][4].toString().trim() : "",
+        phone:   data[i][5] ? data[i][5].toString().trim() : ""
+      };
+    }
+  }
+  return null;
+}
 
 function _readCustomers(ss) {
   ss = _getSs(ss);
@@ -1220,6 +1248,7 @@ function _generatePdfForInvoice(ss, invId) {
     custName = _resolveCustomerName(ss, inv[2], {});
   }
 
+  var custRecord = _lookupCustomer(ss, inv[2]);
   var d = {
     invId: invId,
     date: _fmtDate(inv[1]),
@@ -1227,6 +1256,9 @@ function _generatePdfForInvoice(ss, invId) {
     custName: custName,
     customerName: custName,
     customer: custName,
+    custArea:    custRecord ? custRecord.area    : "",
+    custContact: custRecord ? custRecord.contact : "",
+    custPhone:   custRecord ? custRecord.phone   : "",
     payTerms: inv[6] || "COD",
     notes: "Thank you for your business.",
     tax: 0,
@@ -1270,8 +1302,18 @@ function _customGeneratePDF(d, total) {
       // Company info
       from: "Assorted Produce Traders\nFF 27, Zarpar Arcade\nD-12 Markaz, Islamabad\n+92 342 2221633",
       
-      // Customer info
-      to: custName,
+      // Customer info — store name, purchaser, area
+      to: (function() {
+        var lines = [custName];
+        var contact = (d.custContact || "").trim();
+        var phone   = (d.custPhone   || "").trim();
+        var area    = (d.custArea    || "").trim();
+        if (contact || phone) {
+          lines.push(contact + (contact && phone ? " · " : "") + phone);
+        }
+        if (area) lines.push(area);
+        return lines.join("\n");
+      })(),
       
       // ✅ Invoice number - THIS IS THE KEY FIELD
       number: invId,
