@@ -101,6 +101,9 @@ const G = {
 const fmt  = n => "PKR " + Math.round(n || 0).toLocaleString("en-PK");
 const pct  = (a, b) => b ? ((a / b) * 100).toFixed(1) + "%" : "—";
 const todayStr = () => new Date().toISOString().split("T")[0];
+// Normalizers for fuzzy matching store/customer/product names across systems.
+const normTxt = s => (s || "").toString().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const digitsOnly = s => (s || "").toString().replace(/\D+/g, "");
 
 // ── Primitive components ──────────────────────────────────────
 const Badge = ({ text }) => {
@@ -1001,7 +1004,7 @@ function CrmApp({ user, onLogout }) {
       const editing = modal.t==="editInvoice" ? modal.d : null;
       const prefill = modal.t==="newInvoice" ? modal.prefill : null;
       const InvForm=()=>{
-        const [f,setF]=useState({custId:editing?.custId||prefill?.custId||"",date:editing?.date||todayStr(),payTerms:editing?.payTerms||"COD",notes:prefill?.notes||"",items:(prefill?.items&&prefill.items.length)?prefill.items:[{pid:"",qty:1,rate:0}]});
+        const [f,setF]=useState({custId:editing?.custId||prefill?.custId||"",date:editing?.date||todayStr(),payTerms:editing?.payTerms||prefill?.payTerms||"COD",notes:prefill?.notes||"",items:(prefill?.items&&prefill.items.length)?prefill.items:[{pid:"",qty:1,rate:0}]});
         const [loading, setLoading] = useState(false);
         const [itemsLoading, setItemsLoading] = useState(!!editing);
         const total=f.items.reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
@@ -1389,21 +1392,44 @@ function CrmApp({ user, onLogout }) {
     // Open the New Invoice journey prefilled from a rider order: maps the rider's store to its
     // Sheets customer (via gas_customer_id) and its order items to Sheets products by name.
     const startInvoice = async (o) => {
-      const store = o.stores || sbData.stores.find(s=>s.id===o.store_id);
+      // Prefer the full store record — sbData.stores carries mobile/address/payment_terms,
+      // whereas the order-embedded o.stores only has id/name/area/category.
+      const store = sbData.stores.find(s=>s.id===o.store_id) || o.stores || {};
       const custId = (store?.gas_customer_id && customers.some(c=>c.id===store.gas_customer_id)) ? store.gas_customer_id : "";
       if(!custId) notify("⚠ This store isn't in Customers yet — use “Sync to Customers”, or pick the store in the invoice","err");
+      // Robust matcher: rider product names rarely match Sheets product names exactly, so
+      // normalize and fall back to a contains-match. Without this the line shows qty/rate but
+      // the product dropdown stays blank.
+      const prodList = products.map(p=>({p,n:normTxt(p.name)}));
+      const byNorm={}; prodList.forEach(x=>{ if(x.n) byNorm[x.n]=x.p; });
+      const matchProduct = (name)=>{
+        const n=normTxt(name); if(!n) return null;
+        if(byNorm[n]) return byNorm[n];
+        const hit = prodList.find(x=>x.n&&(x.n.includes(n)||n.includes(x.n)));
+        return hit?hit.p:null;
+      };
       let items=[];
       try {
         const rows = await sbPost("order_items",{order_id:o.id});
-        const byName = {}; products.forEach(p=>{ byName[(p.name||"").toLowerCase().trim()]=p; });
         items = (rows||[]).map(it=>{
-          const match = byName[(it.product_name||"").toLowerCase().trim()];
+          const match = matchProduct(it.product_name);
           const rate = Number(it.trade_price) || (it.quantity?Number(it.total)/Number(it.quantity):0);
-          return { pid: match?match.id:"", pname: it.product_name||"", qty: it.quantity||1, rate: Math.round(rate||0) };
+          return { pid: match?match.id:"", pname: it.product_name||(match?match.name:""), qty: it.quantity||1, rate: Math.round(rate||0) };
         });
       } catch(e) { notify("Could not load order items: "+e.message,"err"); }
       if(!items.length) items=[{pid:"",qty:1,rate:0}];
-      setModal({t:"newInvoice", prefill:{ custId, notes:`Rider order ${(o.id||"").slice(0,8)}${o.profiles?.full_name?" · "+o.profiles.full_name:""}`, items }});
+      // Carry the store's contact + payment terms into the invoice notes.
+      const ptMap={cash:"Cash / COD",bill_to_bill:"Bill to Bill",credit_25_days:"25 Days Credit"};
+      const ptLabel = ptMap[store?.payment_terms]||store?.payment_terms||"";
+      const payTermsMap={cash:"COD",bill_to_bill:"NET 7",credit_25_days:"NET 30"};
+      const noteParts=[];
+      if(store?.name) noteParts.push(`Store: ${store.name}`);
+      if(store?.mobile) noteParts.push(`📞 ${store.mobile}`);
+      const loc = store?.address||store?.area; if(loc) noteParts.push(loc);
+      if(ptLabel) noteParts.push(`Terms: ${ptLabel}`);
+      if(o.profiles?.full_name) noteParts.push(`Rider: ${o.profiles.full_name}`);
+      noteParts.push(`Order #${(o.id||"").slice(0,8)}`);
+      setModal({t:"newInvoice", prefill:{ custId, payTerms:payTermsMap[store?.payment_terms]||"COD", notes:noteParts.join(" · "), items }});
     };
     const cancel = async (o) => {
       if (!confirm(`Cancel order?`)) return;
@@ -1448,7 +1474,35 @@ function CrmApp({ user, onLogout }) {
     const [form, setForm] = useState({});
     const [busy, setBusy] = useState(false);
     const [q, setQ] = useState("");
-    const filtered = sbData.stores.filter(s=>{if(!q)return true;const v=q.toLowerCase();return(s.name||"").toLowerCase().includes(v)||(s.area||"").toLowerCase().includes(v)||(s.owner_name||"").toLowerCase().includes(v);});
+    const [hideDupes, setHideDupes] = useState(true);
+    // Two riders adding the same physical shop creates duplicate rows here. We collapse them in
+    // the CRM view + Customers sync WITHOUT deleting anything in Supabase (the rider app and its
+    // orders still depend on every row). Group key = name + mobile (fallback name + area).
+    const storeKey = (s)=>{ const n=normTxt(s.name), m=digitsOnly(s.mobile); return m ? n+"|"+m : n+"|"+normTxt(s.area); };
+    const dupInfo = useMemo(()=>{
+      const groups={};
+      sbData.stores.forEach(s=>{ const k=storeKey(s); (groups[k]=groups[k]||[]).push(s); });
+      const dupIds=new Set(), groupSize={};
+      Object.values(groups).forEach(arr=>{
+        if(arr.length<2) return;
+        // Representative: prefer one already synced to Sheets, then the earliest created.
+        const sorted=[...arr].sort((a,b)=>{
+          const ag=a.gas_customer_id?0:1, bg=b.gas_customer_id?0:1;
+          if(ag!==bg) return ag-bg;
+          return new Date(a.created_at||0)-new Date(b.created_at||0);
+        });
+        const rep=sorted[0];
+        groupSize[rep.id]=arr.length;
+        arr.forEach(s=>{ if(s.id!==rep.id) dupIds.add(s.id); });
+      });
+      return { dupIds, groupSize };
+    },[sbData.stores]);
+    const filtered = sbData.stores.filter(s=>{
+      if(hideDupes && dupInfo.dupIds.has(s.id)) return false;
+      if(!q) return true;
+      const v=q.toLowerCase();
+      return(s.name||"").toLowerCase().includes(v)||(s.area||"").toLowerCase().includes(v)||(s.owner_name||"").toLowerCase().includes(v);
+    });
     // Drop empty strings so nullable/enum columns (e.g. category) aren't sent as "" which fails constraints.
     const clean = (obj) => Object.fromEntries(Object.entries(obj).filter(([,v])=>v!==""&&v!==undefined&&v!==null));
     const save = async () => {
@@ -1474,26 +1528,39 @@ function CrmApp({ user, onLogout }) {
     // already-synced stores; writes the returned customer id back onto the store for idempotency).
     const [syncing, setSyncing] = useState(false);
     const syncToCustomers = async () => {
+      // Only sync de-duplicated representatives, and skip test/sample + already-synced stores.
       const candidates = sbData.stores.filter(s=>{
         const n=(s.name||"").toLowerCase();
         if(!s.name) return false;
         if(/test|sample/.test(n)) return false;
         if(s.gas_customer_id) return false;
+        if(dupInfo.dupIds.has(s.id)) return false;
         return true;
       });
-      if(!candidates.length){ notify("Nothing to sync — all stores are already synced or excluded","err"); return; }
-      if(!confirm(`Sync ${candidates.length} store(s) to the Customers list?\n(test/sample and already-synced stores are skipped)`)) return;
+      if(!candidates.length){ notify("Nothing to sync — all stores are already synced, duplicates, or excluded","err"); return; }
+      if(!confirm(`Sync ${candidates.length} store(s) to the Customers list?\n(test/sample, duplicate and already-synced stores are skipped; stores that already exist as a customer are linked, not duplicated)`)) return;
       setSyncing(true);
-      let ok=0, fail=0;
+      // Cross-check: index existing Sheets customers by name+phone (and name alone).
+      const custByKey={}, custByName={};
+      customers.forEach(c=>{ const n=normTxt(c.name); if(!n) return; custByName[n]=c; custByKey[n+"|"+digitsOnly(c.phone)]=c; });
+      let created=0, linked=0, fail=0;
       for(const s of candidates){
         try{
+          const n=normTxt(s.name), mobile=digitsOnly(s.mobile);
+          // Match an existing customer by name+phone, or by name when the store has no phone.
+          const existing = custByKey[n+"|"+mobile] || (!mobile ? custByName[n] : null);
+          if(existing){
+            try{ await sbPost("update_store",{id:s.id,gas_customer_id:existing.id}); }catch{/* non-fatal */}
+            linked++;
+            continue;
+          }
           const r = await gasPost("add_customer",{name:s.name,area:s.area||"",city:"",contact:s.owner_name||"",phone:s.mobile||"",notes:`supabase_id:${s.id}`});
           if(r?.id){ try{ await sbPost("update_store",{id:s.id,gas_customer_id:r.id}); }catch{/* non-fatal */} }
-          ok++;
+          created++;
         }catch(e){ fail++; }
       }
       setSyncing(false);
-      notify(`✅ Synced ${ok} store(s) to Customers${fail?` · ${fail} failed`:""}`);
+      notify(`✅ Customers sync — ${created} added, ${linked} linked to existing${fail?`, ${fail} failed`:""}`);
       await loadData(true); await loadSupabase(true);
     };
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading stores…</div>;
@@ -1502,13 +1569,14 @@ function CrmApp({ user, onLogout }) {
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search stores…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
           <Btn sm onClick={()=>{setForm({name:"",owner_name:"",mobile:"",address:"",area:"",category:""});setStoreModal("add");}}>+ Add Store</Btn>
+          {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
           <Btn sm v="secondary" disabled={syncing} onClick={syncToCustomers}>{syncing?"⏳ Syncing…":"⬆ Sync to Customers"}</Btn>
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
           <TblWrap compact heads={["Name","Owner","Mobile","Area","Category","GAS ID","Actions"]}
             rows={filtered.map(s=>[
-              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{s.name}</span>,
+              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{s.name}{dupInfo.groupSize[s.id]>1&&<span title="duplicate stores merged into this one" style={{marginLeft:6,fontSize:9,color:G.amber,fontWeight:800}}>×{dupInfo.groupSize[s.id]}</span>}{dupInfo.dupIds.has(s.id)&&<span style={{marginLeft:6,fontSize:9,color:G.red,fontWeight:800}}>dup</span>}</span>,
               <span style={{fontSize:11}}>{s.owner_name||"—"}</span>,
               <span style={{fontSize:11}}>{s.mobile||"—"}</span>,
               <span style={{fontSize:11}}>{s.area||"—"}</span>,
