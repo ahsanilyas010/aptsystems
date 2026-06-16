@@ -1,9 +1,12 @@
 // Vercel Serverless Function — /api/supabase
-// Proxies rider-data reads/writes to the apt-rider-connect app's /api/admin
+// Proxies rider-data reads/writes to the apt-rider-connect app's /rider-admin
 // endpoint, which holds the Supabase service role key server-side (Lovable
 // Cloud does not expose that key to other projects). Auth between the two
 // apps is a shared secret (ADMIN_SYNC_KEY) sent as a Bearer token.
 // Safe because the CRM frontend is already gated by Firebase Auth (allowlist).
+// NOTE: the upstream path must be /rider-admin, not /api/admin — Lovable Cloud
+// reserves the /api/* prefix for internal routing and will return the SPA's
+// HTML instead of invoking the server route.
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");

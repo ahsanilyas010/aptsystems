@@ -397,6 +397,23 @@ function CrmApp({ user, onLogout }) {
     setTimeout(()=>setToast(null), 3500);
   }, []);
 
+  // ── Global undo stack ──────────────────────────────────────
+  // pushUndo(label, run) registers a reversible action; `run` is called when
+  // the user clicks "Undo" on the resulting snackbar before it expires.
+  const [undoStack, setUndoStack] = useState([]);
+  const pushUndo = useCallback((label, run, ttl=8000) => {
+    const id = Math.random().toString(36).slice(2);
+    setUndoStack(s => [...s, {id, label, run}]);
+    setTimeout(() => setUndoStack(s => s.filter(e => e.id !== id)), ttl);
+  }, []);
+  const performUndo = useCallback(async (id) => {
+    const entry = undoStack.find(e => e.id === id);
+    if (!entry) return;
+    setUndoStack(s => s.filter(e => e.id !== id));
+    try { await entry.run(); notify(`↩️ Undone: ${entry.label}`); }
+    catch(e) { notify("❌ Undo failed: "+e.message, "err"); }
+  }, [undoStack, notify]);
+
   const closeModal = () => setModal(null);
 
   const loadData = useCallback(async (showSync=false) => {
@@ -461,22 +478,55 @@ function CrmApp({ user, onLogout }) {
     document.body.removeChild(a);
   };
 
+  // Generic CSV export: rows is an array of plain objects; column order follows
+  // the keys of the first row (or an explicit `cols` array of [key,label] pairs).
+  const exportCsv = (filename, rows, cols) => {
+    if (!rows || !rows.length) { notify("Nothing to export", "err"); return; }
+    const columns = cols || Object.keys(rows[0]).map(k=>[k,k]);
+    const esc = (v) => {
+      const s = v===null||v===undefined ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+    const lines = [columns.map(([,label])=>esc(label)).join(",")];
+    rows.forEach(r => lines.push(columns.map(([key])=>esc(r[key])).join(",")));
+    const blob = new Blob([lines.join("\n")], {type:"text/csv;charset=utf-8;"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // ── API actions ───────────────────────────────────────────
   const markPaid = async (invId) => {
+    const prevStatus = invoices.find(i=>i.id===invId)?.status;
     try {
       await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",invId})});
       notify(`✅ ${invId} marked as Paid`);
       await loadData(true);
+      if(prevStatus&&prevStatus!=="Paid"){
+        pushUndo(`${invId} marked as Paid`, async () => {
+          await gasPost("set_invoice_fields",{invId,status:prevStatus});
+          await loadData(true);
+        });
+      }
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
   const voidInvoice = async (invId) => {
-    if(!confirm(`Void ${invId}? This will zero the total and reverse AR. Cannot be undone.`)) return;
+    if(!confirm(`Void ${invId}? This will zero the total and reverse AR.`)) return;
+    const prev = invoices.find(i=>i.id===invId);
     try {
       await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",invId})});
       notify(`✅ ${invId} voided`);
       closeModal();
       await loadData(true);
+      if(prev){
+        pushUndo(`${invId} voided`, async () => {
+          await gasPost("set_invoice_fields",{invId,status:prev.status,total:prev.total});
+          await loadData(true);
+        });
+      }
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
@@ -719,6 +769,7 @@ function CrmApp({ user, onLogout }) {
           ))}
           <Btn sm onClick={()=>setModal({t:"newInvoice"})}>+ New Invoice</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 Payment</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
           {[{l:"Total Invoiced",v:fmt(totalRevenue),c:G.mid},{l:"Collected",v:fmt(totalReceived),c:G.light},{l:"Outstanding",v:fmt(totalAR),c:G.amber},{l:"Invoices",v:invoices.length,c:G.dark}].map(s=>(
@@ -751,7 +802,65 @@ function CrmApp({ user, onLogout }) {
 
   // ── CUSTOMERS ─────────────────────────────────────────────
   const Customers = () => {
-    const fil=customers.filter(c=>!search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase()));
+    const [hideDupes, setHideDupes] = useState(true);
+    // Two riders syncing the same shop (or repeated manual adds) can leave duplicate Sheets rows.
+    // We only collapse them in this view — nothing is deleted from the sheet, so existing invoices
+    // / AR balances tied to either row stay intact. Group key = name + phone (fallback name + area).
+    const custKey = (c)=>{ const n=normTxt(c.name), p=digitsOnly(c.phone); return p ? n+"|"+p : n+"|"+normTxt(c.area); };
+    const dupInfo = useMemo(()=>{
+      const byKey={};
+      customers.forEach(c=>{ const k=custKey(c); if(!normTxt(c.name)) return; (byKey[k]=byKey[k]||[]).push(c); });
+      const dupIds=new Set(), groupSize={}, groups=[];
+      Object.values(byKey).forEach(arr=>{
+        if(arr.length<2) return;
+        // Representative: prefer whichever row already has invoices/AR history, else the lowest id.
+        const sorted=[...arr].sort((a,b)=>{
+          const ai=invoices.filter(i=>i.custId===a.id).length, bi=invoices.filter(i=>i.custId===b.id).length;
+          if(ai!==bi) return bi-ai;
+          return String(a.id).localeCompare(String(b.id));
+        });
+        const rep=sorted[0];
+        groupSize[rep.id]=arr.length;
+        const mergeIds=arr.filter(c=>c.id!==rep.id).map(c=>c.id);
+        mergeIds.forEach(id=>dupIds.add(id));
+        groups.push({ keepId: rep.id, mergeIds });
+      });
+      return { dupIds, groupSize, groups };
+    },[customers, invoices]);
+    const [merging, setMerging] = useState(false);
+    const mergeDuplicates = async () => {
+      if(!dupInfo.groups.length) return;
+      if(!confirm(`Merge ${dupInfo.dupIds.size} duplicate customer row(s) into ${dupInfo.groups.length} record(s)?\n\nInvoices and payments on the duplicates will be moved to the kept record, and the duplicate Sheet rows will be removed.`)) return;
+      setMerging(true);
+      try {
+        const result = await gasPost("merge_customers",{groups:dupInfo.groups});
+        // Stores synced to a merged-away customer id need to point at the surviving one.
+        const target={};
+        dupInfo.groups.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
+        const storeRepoints=[];
+        for(const s of sbData.stores){
+          if(s.gas_customer_id && target[s.gas_customer_id]){
+            storeRepoints.push({id:s.id,from:s.gas_customer_id,to:target[s.gas_customer_id]});
+            try{ await sbPost("update_store",{id:s.id,gas_customer_id:target[s.gas_customer_id]}); }catch{/* non-fatal */}
+          }
+        }
+        notify(`✅ Merged ${dupInfo.dupIds.size} duplicate customer(s)`);
+        await loadData(true); await loadSupabase(true);
+        if(result?.snapshot?.groups?.length){
+          pushUndo(`Merged ${dupInfo.dupIds.size} duplicate customer(s)`, async () => {
+            await gasPost("undo_merge_customers", result.snapshot);
+            for(const r of storeRepoints){
+              try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
+            }
+            await loadData(true); await loadSupabase(true);
+          });
+        }
+      } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
+    };
+    const fil=customers.filter(c=>{
+      if(hideDupes && dupInfo.dupIds.has(c.id)) return false;
+      return !search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase());
+    });
     return (
       <div>
         <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
@@ -760,6 +869,9 @@ function CrmApp({ user, onLogout }) {
             <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:G.muted}}>🔍</span>
           </div>
           <Btn sm onClick={()=>setModal({t:"addCustomer"})}>+ Add Store</Btn>
+          {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
+          {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
+          <Btn sm v="secondary" onClick={()=>exportCsv("customers.csv",fil,[["id","ID"],["name","Name"],["area","Area"],["city","City"],["phone","Phone"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
           {fil.map(c=>{
@@ -768,7 +880,7 @@ function CrmApp({ user, onLogout }) {
             return (
               <div key={c.id} onClick={()=>setModal({t:"viewCustomer",d:c})} style={{background:G.card,borderRadius:11,padding:16,boxShadow:"0 2px 10px rgba(26,92,32,0.07)",borderTop:`3px solid ${G.mid}`,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                  <div><div style={{fontWeight:800,fontSize:13,color:G.ink,marginBottom:2}}>{c.name}</div><div style={{fontSize:10,color:G.muted}}>{c.area} · {c.city}</div></div>
+                  <div><div style={{fontWeight:800,fontSize:13,color:G.ink,marginBottom:2}}>{c.name}{dupInfo.groupSize[c.id]>1&&<span title="duplicate customer rows merged into this one" style={{marginLeft:6,fontSize:9,color:G.amber,fontWeight:800}}>×{dupInfo.groupSize[c.id]}</span>}</div><div style={{fontSize:10,color:G.muted}}>{c.area} · {c.city}</div></div>
                   <span style={{fontSize:10,fontWeight:700,color:G.muted,background:G.pale,padding:"2px 6px",borderRadius:6,alignSelf:"flex-start"}}>{c.id}</span>
                 </div>
                 <div style={{fontSize:10,color:G.muted,marginBottom:10}}>📞 {c.phone||"—"}</div>
@@ -783,6 +895,7 @@ function CrmApp({ user, onLogout }) {
               </div>
             );
           })}
+          {fil.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12,gridColumn:"1/-1"}}>No customers found</div>}
         </div>
       </div>
     );
@@ -797,6 +910,7 @@ function CrmApp({ user, onLogout }) {
       <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
         <Btn sm onClick={()=>setModal({t:"newPurchase"})}>+ New Purchase</Btn>
         <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 AP Payment</Btn>
+        <Btn sm v="secondary" onClick={()=>exportCsv("purchases.csv",purchases,[["id","PO ID"],["date","Date"],["vendor","Vendor"],["total","Total"],["paid","Paid"],["notes","Notes"]])}>⬇ Export</Btn>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:12}}>
         {[{l:"Total Purchases",v:fmt(totalPurchases),c:G.dark},{l:"AP Outstanding",v:fmt(ap.reduce((s,r)=>s+r.balance,0)),c:G.red},{l:"POs Raised",v:purchases.length,c:G.mid}].map(s=>(
@@ -827,8 +941,9 @@ function CrmApp({ user, onLogout }) {
     const total=expenses.reduce((s,e)=>s+e.amount,0);
     return (
       <div>
-        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
           <Btn sm onClick={()=>setModal({t:"addExpense"})}>+ Add Expense</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("expenses.csv",expenses,[["id","Exp ID"],["date","Date"],["category","Category"],["amount","Amount"],["notes","Notes"],["by","By"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:9,marginBottom:12}}>
           {cats.map(c=>{const ct=expenses.filter(e=>e.category===c).reduce((s,e)=>s+e.amount,0);return(
@@ -927,6 +1042,9 @@ function CrmApp({ user, onLogout }) {
     return(
       <div>
         {low.length>0&&<div style={{background:"#FFF8E1",borderRadius:9,padding:"10px 14px",marginBottom:12,border:`1.5px solid ${G.amber}`,fontSize:12,fontWeight:700,color:G.amber}}>⚠️ {low.length} SKUs at/below minimum stock</div>}
+        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+          <Btn sm v="secondary" onClick={()=>exportCsv("inventory.csv",inventory,[["pid","PID"],["pname","Product"],["category","Category"],["cost","Cost"],["purchased","In"],["sold","Sold"],["stock","Stock"],["minStock","Min"]])}>⬇ Export</Btn>
+        </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
           <TblWrap compact heads={["PID","Product","Cat","Cost","In","Sold","Stock","Min","Status"]}
             rows={inventory.map(p=>{const s=p.stock===0?"Out of Stock":p.stock<=p.minStock?"Low Stock":"Active";return[<span style={{fontWeight:700,fontSize:10,color:G.dark}}>{p.pid}</span>,<span style={{fontWeight:600,fontSize:11}}>{p.pname}</span>,<Badge text={p.category}/>,<span style={{fontSize:10,color:G.muted}}>PKR {p.cost?.toLocaleString()}</span>,<span style={{fontWeight:600}}>{p.purchased}</span>,<span style={{fontWeight:600,color:G.mid}}>{p.sold}</span>,<span style={{fontWeight:800,color:p.stock===0?G.red:p.stock<=p.minStock?G.amber:G.ink}}>{p.stock}</span>,<span style={{fontSize:10,color:G.muted}}>{p.minStock}</span>,<Badge text={s}/>];})}
@@ -955,7 +1073,10 @@ function CrmApp({ user, onLogout }) {
           </div>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <div style={{background:G.red,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>⚠ AR Aging</span></div>
+          <div style={{background:G.red,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:G.white,fontWeight:700,fontSize:12}}>⚠ AR Aging</span>
+            <Btn sm v="secondary" onClick={()=>exportCsv("ar_aging.csv",ar.filter(r=>r.balance>0),[["custName","Customer"],["city","City"],["billed","Billed"],["paid","Paid"],["balance","Balance"]])}>⬇ Export</Btn>
+          </div>
           <TblWrap compact heads={["Customer","Outstanding","Invoices","Action"]}
             rows={ar.filter(r=>r.balance>0).sort((a,b)=>b.balance-a.balance).map(r=>[<span style={{fontWeight:700,fontSize:11}}>{r.custName}</span>,<span style={{fontWeight:800,color:G.red,fontSize:11}}>{fmt(r.balance)}</span>,<span style={{fontSize:10,color:G.muted}}>{invoices.filter(i=>i.custId===r.custId&&i.status!=="Paid"&&i.status!=="VOIDED").length}</span>,<Btn sm v="danger" onClick={()=>{
               const c=custMap[r.custId];
@@ -1386,9 +1507,13 @@ function CrmApp({ user, onLogout }) {
     });
     const advance = async (o) => {
       const next = STATUS_NEXT[o.status]; if (!next) return;
+      const prevStatus = o.status;
       setBusy(o.id);
       try {
         await sbPost("update_order_status",{id:o.id,status:next}); notify(`✅ Order → ${next}`); await loadSupabase(true);
+        pushUndo(`Order #${(o.id||"").slice(0,8)} → ${next}`, async () => {
+          await sbPost("update_order_status",{id:o.id,status:prevStatus}); await loadSupabase(true);
+        });
         if (next==="Approved") await startInvoice({...o, status:next});
       }
       catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
@@ -1441,8 +1566,14 @@ function CrmApp({ user, onLogout }) {
     };
     const cancel = async (o) => {
       if (!confirm(`Cancel order?`)) return;
+      const prevStatus = o.status;
       setBusy(o.id+"_c");
-      try { await sbPost("update_order_status",{id:o.id,status:"Cancelled"}); notify("Order cancelled"); await loadSupabase(true); }
+      try {
+        await sbPost("update_order_status",{id:o.id,status:"Cancelled"}); notify("Order cancelled"); await loadSupabase(true);
+        pushUndo(`Order #${(o.id||"").slice(0,8)} cancelled`, async () => {
+          await sbPost("update_order_status",{id:o.id,status:prevStatus}); await loadSupabase(true);
+        });
+      }
       catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
     };
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading rider orders…</div>;
@@ -1453,6 +1584,7 @@ function CrmApp({ user, onLogout }) {
             <button key={s} onClick={()=>setStatusFilter(s)} style={{padding:"4px 13px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:statusFilter===s?G.dark:G.pale,color:statusFilter===s?G.white:G.dark,border:`1.5px solid ${statusFilter===s?G.dark:G.border}`}}>{s==="all"?"All":s}</button>
           ))}
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search order / store / rider…" style={{marginLeft:"auto",border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",minWidth:200}}/>
+          <Btn sm v="secondary" onClick={()=>exportCsv("rider-orders.csv",filtered.map(o=>({id:o.id,store:o.stores?.name,rider:o.profiles?.full_name,total:o.total_value||o.total||0,status:o.status,gas_invoice_id:o.gas_invoice_id})),[["id","Order"],["store","Store"],["rider","Rider"],["total","Total"],["status","Status"],["gas_invoice_id","GAS Invoice"]])}>⬇ Export</Btn>
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -1524,7 +1656,21 @@ function CrmApp({ user, onLogout }) {
     };
     const del = async (s) => {
       if (!confirm(`Delete ${s.name}?`)) return;
-      try { await sbPost("delete_store",{id:s.id}); notify("✅ Deleted"); await loadSupabase(true); }
+      try {
+        await sbPost("delete_store",{id:s.id});
+        notify("✅ Deleted");
+        await loadSupabase(true);
+        // Best-effort undo: re-creates the store (gets a new id — Supabase doesn't let us
+        // reuse the deleted one — but restores every field so nothing is actually lost).
+        pushUndo(`Deleted store "${s.name}"`, async () => {
+          await sbPost("add_store",{store:clean({
+            name:s.name, owner_name:s.owner_name, mobile:s.mobile, address:s.address,
+            area:s.area, category:s.category, latitude:s.latitude, longitude:s.longitude,
+            payment_terms:s.payment_terms, created_by:s.created_by, gas_customer_id:s.gas_customer_id
+          })});
+          await loadSupabase(true);
+        });
+      }
       catch(e) {
         const msg = /foreign key|orders_store_id_fkey/i.test(e.message)
           ? "Cannot delete — this store has orders linked to it. Remove or reassign its orders first."
@@ -1632,7 +1778,10 @@ function CrmApp({ user, onLogout }) {
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading riders…</div>;
     return (
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div style={{display:"flex",justifyContent:"flex-end"}}><Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn></div>
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+          <Btn sm v="secondary" onClick={()=>exportCsv("riders.csv",sbData.riders,[["full_name","Name"],["mobile","Mobile"],["cnic","CNIC"],["city","City"],["area","Area"],["bike_available","Bike Available"]])}>⬇ Export</Btn>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
+        </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
           <TblWrap compact heads={["Name","Mobile","CNIC","City","Area","Bike","Action"]}
             rows={sbData.riders.map(r=>[
@@ -1728,6 +1877,7 @@ function CrmApp({ user, onLogout }) {
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search products…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
           <Btn sm onClick={()=>{setForm({name:"",category:"",trade_price:0,current_stock:0,min_stock:0,active:true});setPModal("add");}}>+ Add Product</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("products.csv",filtered,[["name","Name"],["category","Category"],["trade_price","Trade Price"],["current_stock","Stock"],["min_stock","Min"],["active","Active"]])}>⬇ Export</Btn>
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -1835,11 +1985,11 @@ function CrmApp({ user, onLogout }) {
             <span style={{color:G.white,fontWeight:700,fontSize:12}}>Areas ({sbData.areas.length})</span>
             <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
           </div>
-          <TblWrap compact heads={["City","Name","Description"]}
+          <TblWrap compact heads={["City","Name","Riders Assigned"]}
             rows={sbData.areas.map(a=>[
               <span style={{fontWeight:600,color:G.dark,fontSize:11}}>{a.city}</span>,
               <span style={{fontSize:11}}>{a.name}</span>,
-              <span style={{fontSize:10,color:G.muted}}>{a.description||"—"}</span>
+              <span style={{fontSize:10,color:G.muted}}>{sbData.riderAreas.filter(ra=>ra.area_id===a.id).length}</span>
             ])}
           />
           {sbData.areas.length===0&&<div style={{padding:24,textAlign:"center",color:G.muted,fontSize:12}}>No areas yet</div>}
@@ -1901,6 +2051,9 @@ function CrmApp({ user, onLogout }) {
             <button key={d} onClick={()=>setDays(d)} style={{padding:"5px 14px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:days===d?G.dark:G.pale,color:days===d?G.white:G.dark,border:`1.5px solid ${days===d?G.dark:G.border}`}}>Last {d} days</button>
           ))}
           {repLoading&&<span style={{fontSize:11,color:G.muted}}>⏳ Loading…</span>}
+          <div style={{flex:1}}/>
+          <Btn sm v="secondary" onClick={()=>exportCsv(`rider_performance_${days}d.csv`,riderStats,[["name","Rider"],["count","Orders"],["revenue","Revenue"],["incentive","Incentive"]])}>⬇ Export Riders</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv(`top_products_${days}d.csv`,productStats,[["name","Product"],["qty","Qty"],["revenue","Revenue"]])}>⬇ Export Products</Btn>
         </div>
         {total&&(
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12}}>
@@ -1992,12 +2145,13 @@ function CrmApp({ user, onLogout }) {
     dashboard:<Dashboard/>,customers:<Customers/>,invoices:<Invoices/>,
     payments:(
       <div>
-        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
           <Btn sm onClick={()=>setModal({t:"recordPayment"})}>+ Record Payment</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("payments.csv",payments,[["id","Pay ID"],["date","Date"],["type","Type"],["partyName","Party"],["refId","Invoice"],["amount","Amount"],["notes","Notes"]])}>⬇ Export</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Pay ID","Date","Type","Party","Invoice","Amount","Method","Notes"]}
-            rows={payments.map(p=>[<span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.id}</span>,<span style={{fontSize:10,color:G.muted}}>{p.date}</span>,<Badge text={p.type}/>,<span style={{fontWeight:600,fontSize:11}}>{p.partyName||p.partyId}</span>,<span style={{fontSize:10,color:G.muted}}>{p.refId||"—"}</span>,<span style={{fontWeight:800,color:p.type==="Received"?G.mid:G.red,fontSize:11}}>{fmt(p.amount)}</span>,<span style={{fontSize:10,color:G.muted}}>{p.method||"—"}</span>,<span style={{fontSize:10,color:G.muted}}>{p.notes||"—"}</span>])}
+          <TblWrap compact heads={["Pay ID","Date","Type","Party","Invoice","Amount","Notes"]}
+            rows={payments.map(p=>[<span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.id}</span>,<span style={{fontSize:10,color:G.muted}}>{p.date}</span>,<Badge text={p.type}/>,<span style={{fontWeight:600,fontSize:11}}>{p.partyName||p.partyId}</span>,<span style={{fontSize:10,color:G.muted}}>{p.refId||"—"}</span>,<span style={{fontWeight:800,color:p.type==="Received"?G.mid:G.red,fontSize:11}}>{fmt(p.amount)}</span>,<span style={{fontSize:10,color:G.muted}}>{p.notes||"—"}</span>])}
           />
         </div>
       </div>
@@ -2066,6 +2220,17 @@ function CrmApp({ user, onLogout }) {
         </div>
 
         {toast&&<div style={{position:"fixed",top:62,right:18,background:toast.type==="err"?G.red:G.mid,color:G.white,padding:"10px 16px",borderRadius:9,fontWeight:700,fontSize:12,zIndex:9999,boxShadow:"0 8px 28px rgba(0,0,0,0.22)"}}>{toast.msg}</div>}
+
+        {undoStack.length>0&&(
+          <div style={{position:"fixed",bottom:18,left:"50%",transform:"translateX(-50%)",display:"flex",flexDirection:"column",gap:8,zIndex:9999}}>
+            {undoStack.map(entry=>(
+              <div key={entry.id} style={{background:G.dark,color:G.white,padding:"9px 10px 9px 16px",borderRadius:9,fontSize:12,fontWeight:600,display:"flex",alignItems:"center",gap:14,boxShadow:"0 8px 28px rgba(0,0,0,0.28)",minWidth:260}}>
+                <span style={{flex:1}}>{entry.label}</span>
+                <button onClick={()=>performUndo(entry.id)} style={{background:"rgba(255,255,255,0.16)",border:"none",borderRadius:7,padding:"6px 14px",fontSize:11,fontWeight:800,color:G.white,cursor:"pointer"}}>↩ Undo</button>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div style={{flex:1,overflow:"auto",padding:18}}>{PAGES[tab]}</div>
       </div>

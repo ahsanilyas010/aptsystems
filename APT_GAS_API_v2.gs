@@ -437,7 +437,7 @@ function doPost(e) {
         if (!d || !d.amount) return _apiErr("Missing amount");
         
         d.paidBy = body.user || d.by || "api";
-        var result = saveExpense({
+        var result = saveExpense(ss, {
           expId: _getNextId(ss.getSheetByName(CFG.EXP), "EXP"),
           date: d.date || _today(),
           cat: d.category || "Misc",
@@ -457,7 +457,7 @@ function doPost(e) {
         var d = body.data;
         if (!d || !d.amount) return _apiErr("Missing amount");
         
-        var result = savePayment({
+        var result = savePayment(ss, {
           payId: _getNextId(ss.getSheetByName(CFG.PAY), "PAY"),
           date: d.date || _today(),
           type: d.type || "Received",
@@ -493,7 +493,7 @@ function doPost(e) {
           total: parseFloat(d.total)
         }];
         
-        var result = savePurchase({
+        var result = savePurchase(ss, {
           purId: _getNextId(ss.getSheetByName(CFG.PUR_H), "PUR"),
           date: d.date || _today(),
           venId: d.vendorId,
@@ -590,6 +590,29 @@ function doPost(e) {
           }
         }
         return _apiErr("Customer not found: " + custId);
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  MERGE DUPLICATE CUSTOMERS
+      //  body.data = { groups: [ { keepId, mergeIds: [...] }, ... ] }
+      //  Re-points every invoice + payment from each mergeId onto keepId,
+      //  removes the duplicate Customers/AR rows, then recalculates AR.
+      // ══════════════════════════════════════════════════════
+      case "merge_customers": {
+        var d = body.data;
+        if (!d || !d.groups || !d.groups.length) return _apiErr("Missing groups");
+        var result = _mergeCustomers(ss, d.groups);
+        return _apiOk(result);
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  UNDO MERGE CUSTOMERS (reverses the snapshot returned above)
+      // ══════════════════════════════════════════════════════
+      case "undo_merge_customers": {
+        var d = body.data;
+        if (!d || !d.groups) return _apiErr("Missing snapshot");
+        var result = _undoMergeCustomers(ss, d);
+        return _apiOk(result);
       }
 
       // ══════════════════════════════════════════════════════
@@ -776,6 +799,34 @@ function doPost(e) {
       }
 
       // ══════════════════════════════════════════════════════
+      //  SET INVOICE FIELDS — generic status/total setter used to
+      //  power undo for "mark_paid" and "void_invoice".
+      // ══════════════════════════════════════════════════════
+      case "set_invoice_fields": {
+        var d = body.data;
+        if (!d || !d.invId) return _apiErr("Missing invId");
+
+        var ws = ss.getSheetByName(CFG.INV_H);
+        if (!ws) return _apiErr("Invoice Headers sheet not found");
+
+        var data = ws.getDataRange().getValues();
+        var found = false, fCustId = "";
+        for (var i = 3; i < data.length; i++) {
+          if (data[i][0] && data[i][0].toString().trim().toUpperCase() === d.invId.toString().trim().toUpperCase()) {
+            if (d.total !== undefined) ws.getRange(i + 1, 5).setValue(d.total);
+            if (d.status !== undefined) ws.getRange(i + 1, 6).setValue(d.status);
+            fCustId = data[i][2] ? data[i][2].toString().trim() : "";
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) return _apiErr(d.invId + " not found");
+        if (fCustId) _recalcAR(ss, fCustId);
+        return _apiOk({ message: d.invId + " updated" });
+      }
+
+      // ══════════════════════════════════════════════════════
       //  GENERATE PDF
       // ══════════════════════════════════════════════════════
       case "generate_pdf": {
@@ -866,7 +917,7 @@ function doPost(e) {
         if (!invId) return _apiErr("Missing invId");
 
         var voidCustId = _findInvoiceCustId(ss, invId);
-        var result = voidInvoice(invId);
+        var result = voidInvoice(ss, invId);
         if (voidCustId) _recalcAR(ss, voidCustId);
         return _apiOk({ message: result });
       }
@@ -1085,6 +1136,281 @@ function _recalcAR(ss, custId) {
   } catch(e) {
     Logger.log("recalcAR error: " + e.message);
   }
+}
+
+// Merge duplicate Customer rows: re-point every invoice (INV_H col C) and customer
+// payment (PAY col D) from each mergeId onto keepId, then remove the now-empty
+// duplicate rows from Customers and AR so only the kept record remains.
+// Captures a snapshot of everything it changes so the merge can be reversed later
+// via _undoMergeCustomers.
+function _mergeCustomers(ss, groups) {
+  var custWs = ss.getSheetByName(CFG.CUST);
+  var arWs   = ss.getSheetByName(CFG.AR);
+  var invWs  = ss.getSheetByName(CFG.INV_H);
+  var payWs  = ss.getSheetByName(CFG.PAY);
+  var merged = 0, errors = [], snapshotGroups = [];
+
+  groups.forEach(function(g) {
+    try {
+      var keepId = (g.keepId || "").toString().trim();
+      var mergeIds = (g.mergeIds || []).map(function(x){ return x.toString().trim(); }).filter(function(x){ return x && x !== keepId; });
+      if (!keepId || !mergeIds.length) return;
+      var mergeSet = {};
+      mergeIds.forEach(function(id){ mergeSet[id] = true; });
+
+      // Snapshot the original Customer rows (full fields) before anything changes.
+      var origById = {};
+      if (custWs && custWs.getLastRow() > 3) {
+        var snapData = custWs.getRange(4, 1, custWs.getLastRow() - 3, 8).getValues();
+        snapData.forEach(function(r) {
+          var rid = r[0] ? r[0].toString().trim() : "";
+          if (mergeSet[rid]) {
+            origById[rid] = {
+              id: rid, name: r[1] || "", city: r[2] || "", area: r[3] || "",
+              contact: r[4] || "", phone: r[5] || "", openBal: parseFloat(r[6]) || 0, notes: r[7] || "",
+              invoiceIds: [], paymentIds: []
+            };
+          }
+        });
+      }
+
+      // Re-point invoices (column C = custId) — record which invoice ids moved.
+      if (invWs && invWs.getLastRow() > 3) {
+        var invIds = invWs.getRange(4, 1, invWs.getLastRow() - 3, 1).getValues();
+        var invData = invWs.getRange(4, 3, invWs.getLastRow() - 3, 1).getValues();
+        for (var i = 0; i < invData.length; i++) {
+          var v = invData[i][0] ? invData[i][0].toString().trim() : "";
+          if (mergeSet[v]) {
+            invWs.getRange(4 + i, 3).setValue(keepId);
+            if (origById[v]) origById[v].invoiceIds.push(invIds[i][0] ? invIds[i][0].toString().trim() : "");
+          }
+        }
+      }
+
+      // Re-point customer payments (column D = partyId) — record which payment ids moved.
+      if (payWs && payWs.getLastRow() > 3) {
+        var payIds = payWs.getRange(4, 1, payWs.getLastRow() - 3, 1).getValues();
+        var payData = payWs.getRange(4, 4, payWs.getLastRow() - 3, 1).getValues();
+        for (var j = 0; j < payData.length; j++) {
+          var pv = payData[j][0] ? payData[j][0].toString().trim() : "";
+          if (mergeSet[pv]) {
+            payWs.getRange(4 + j, 4).setValue(keepId);
+            if (origById[pv]) origById[pv].paymentIds.push(payIds[j][0] ? payIds[j][0].toString().trim() : "");
+          }
+        }
+      }
+
+      // Remove the duplicate AR ledger rows (bottom-up so row indices stay valid).
+      if (arWs && arWs.getLastRow() > 3) {
+        var arData = arWs.getRange(4, 1, arWs.getLastRow() - 3, 1).getValues();
+        for (var k = arData.length - 1; k >= 0; k--) {
+          var av = arData[k][0] ? arData[k][0].toString().trim() : "";
+          if (mergeSet[av]) arWs.deleteRow(4 + k);
+        }
+      }
+
+      // Remove the duplicate Customers rows (bottom-up so row indices stay valid).
+      if (custWs && custWs.getLastRow() > 3) {
+        var custData = custWs.getRange(4, 1, custWs.getLastRow() - 3, 1).getValues();
+        for (var m = custData.length - 1; m >= 0; m--) {
+          var cv = custData[m][0] ? custData[m][0].toString().trim() : "";
+          if (mergeSet[cv]) { custWs.deleteRow(4 + m); merged++; }
+        }
+      }
+
+      _ensureCustomerInAR(ss, keepId);
+      _recalcAR(ss, keepId);
+
+      snapshotGroups.push({ keepId: keepId, removed: mergeIds.map(function(id){ return origById[id]; }).filter(Boolean) });
+    } catch (e) {
+      errors.push((g.keepId || "?") + ": " + e.message);
+    }
+  });
+
+  return { merged: merged, errors: errors, snapshot: { groups: snapshotGroups } };
+}
+
+// Reverses _mergeCustomers using the snapshot it returned: re-inserts each removed
+// customer's original row, re-points its specific invoice/payment ids back from
+// keepId onto its own id, then recalculates AR for everyone involved.
+function _undoMergeCustomers(ss, snapshot) {
+  var custWs = ss.getSheetByName(CFG.CUST);
+  var invWs  = ss.getSheetByName(CFG.INV_H);
+  var payWs  = ss.getSheetByName(CFG.PAY);
+  var restored = 0, errors = [];
+
+  (snapshot.groups || []).forEach(function(g) {
+    (g.removed || []).forEach(function(r) {
+      try {
+        if (custWs) {
+          var row = _apiGetLastDataRow(custWs, 1) + 1;
+          if (row < 4) row = 4;
+          custWs.getRange(row, 1, 1, 8).setValues([[
+            r.id, r.name || "", r.city || "", r.area || "",
+            r.contact || "", r.phone || "", r.openBal || 0, r.notes || ""
+          ]]);
+        }
+
+        if (invWs && invWs.getLastRow() > 3 && (r.invoiceIds || []).length) {
+          var idSet = {};
+          r.invoiceIds.forEach(function(id){ idSet[id] = true; });
+          var invIdCol = invWs.getRange(4, 1, invWs.getLastRow() - 3, 1).getValues();
+          for (var i = 0; i < invIdCol.length; i++) {
+            var v = invIdCol[i][0] ? invIdCol[i][0].toString().trim() : "";
+            if (idSet[v]) invWs.getRange(4 + i, 3).setValue(r.id);
+          }
+        }
+
+        if (payWs && payWs.getLastRow() > 3 && (r.paymentIds || []).length) {
+          var pidSet = {};
+          r.paymentIds.forEach(function(id){ pidSet[id] = true; });
+          var payIdCol = payWs.getRange(4, 1, payWs.getLastRow() - 3, 1).getValues();
+          for (var j = 0; j < payIdCol.length; j++) {
+            var pv = payIdCol[j][0] ? payIdCol[j][0].toString().trim() : "";
+            if (pidSet[pv]) payWs.getRange(4 + j, 4).setValue(r.id);
+          }
+        }
+
+        _ensureCustomerInAR(ss, r.id);
+        _recalcAR(ss, r.id);
+        restored++;
+      } catch (e) {
+        errors.push(r.id + ": " + e.message);
+      }
+    });
+    _recalcAR(ss, g.keepId);
+  });
+
+  return { restored: restored, errors: errors };
+}
+
+// Look up a display name for a payment "party" id — tries Customers first, then Vendors.
+function _lookupPartyName(ss, partyId) {
+  if (!partyId) return "";
+  partyId = partyId.toString().trim();
+
+  var custWs = ss.getSheetByName(CFG.CUST);
+  if (custWs && custWs.getLastRow() >= 4) {
+    var cData = custWs.getRange(4, 1, custWs.getLastRow() - 3, 2).getValues();
+    for (var i = 0; i < cData.length; i++) {
+      if (cData[i][0] && cData[i][0].toString().trim() === partyId) {
+        return cData[i][1] ? cData[i][1].toString().trim() : partyId;
+      }
+    }
+  }
+
+  var venWs = ss.getSheetByName(CFG.VEN);
+  if (venWs && venWs.getLastRow() >= 4) {
+    var vData = venWs.getRange(4, 1, venWs.getLastRow() - 3, 2).getValues();
+    for (var j = 0; j < vData.length; j++) {
+      if (vData[j][0] && vData[j][0].toString().trim() === partyId) {
+        return vData[j][1] ? vData[j][1].toString().trim() : partyId;
+      }
+    }
+  }
+
+  return partyId;
+}
+
+// Append a row to the Payments sheet (col1=payId,col2=date,col3=type,
+// col4=partyId,col5=partyName,col6=refId,col7=amount,col8=notes).
+function savePayment(ss, obj) {
+  var ws = ss.getSheetByName(CFG.PAY);
+  if (!ws) throw new Error("Payments sheet not found");
+
+  var row = _apiGetLastDataRow(ws, 1) + 1;
+  if (row < 4) row = 4;
+
+  ws.getRange(row, 1, 1, 8).setValues([[
+    obj.payId,
+    obj.date || _today(),
+    obj.type || "Received",
+    obj.partyId || "",
+    _lookupPartyName(ss, obj.partyId),
+    obj.refId || "",
+    obj.amount || 0,
+    obj.notes || ""
+  ]]);
+
+  return "Payment " + obj.payId + " saved";
+}
+
+// Append a row to the Expenses sheet (col1=expId,col2=date,col3=category,
+// col4=desc/notes,col5=amount,col6=paidBy,col7=notes).
+function saveExpense(ss, obj) {
+  var ws = ss.getSheetByName(CFG.EXP);
+  if (!ws) throw new Error("Expenses sheet not found");
+
+  var row = _apiGetLastDataRow(ws, 1) + 1;
+  if (row < 4) row = 4;
+
+  ws.getRange(row, 1, 1, 7).setValues([[
+    obj.expId,
+    obj.date || _today(),
+    obj.cat || "Misc",
+    obj.desc || "",
+    obj.amount || 0,
+    obj.paidBy || "api",
+    obj.notes || ""
+  ]]);
+
+  return "Expense " + obj.expId + " saved";
+}
+
+// Append a row to the Purchase Headers sheet (col1=purId,col2=date,
+// col3=vendorId,col4=vendorName,col5=total,col6=paid,col7=notes).
+function savePurchase(ss, obj) {
+  var ws = ss.getSheetByName(CFG.PUR_H);
+  if (!ws) throw new Error("Purchase Headers sheet not found");
+
+  var row = _apiGetLastDataRow(ws, 1) + 1;
+  if (row < 4) row = 4;
+
+  var total = (obj.items || []).reduce(function(s, it) {
+    return s + (parseFloat(it.total) || (parseFloat(it.qty) || 0) * (parseFloat(it.cost) || 0));
+  }, 0);
+
+  var venWs = ss.getSheetByName(CFG.VEN);
+  var venName = obj.venId || "";
+  if (venWs && venWs.getLastRow() >= 4) {
+    var vData = venWs.getRange(4, 1, venWs.getLastRow() - 3, 2).getValues();
+    for (var i = 0; i < vData.length; i++) {
+      if (vData[i][0] && vData[i][0].toString().trim() === obj.venId) {
+        venName = vData[i][1] ? vData[i][1].toString().trim() : obj.venId;
+        break;
+      }
+    }
+  }
+
+  ws.getRange(row, 1, 1, 7).setValues([[
+    obj.purId,
+    obj.date || _today(),
+    obj.venId || "",
+    venName,
+    total,
+    0,
+    obj.notes || ""
+  ]]);
+
+  return "Purchase " + obj.purId + " saved";
+}
+
+// Void an invoice in place: zero its total and mark it Voided so AR recalculation
+// excludes it (mirrors the "Voided" status check already used by _recalcAR).
+function voidInvoice(ss, invId) {
+  var ws = ss.getSheetByName(CFG.INV_H);
+  if (!ws) throw new Error("Invoice Headers sheet not found");
+
+  var data = ws.getDataRange().getValues();
+  for (var i = 3; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+      ws.getRange(i + 1, 5).setValue(0);
+      ws.getRange(i + 1, 6).setValue("Voided");
+      return "Invoice " + invId + " voided";
+    }
+  }
+
+  throw new Error(invId + " not found");
 }
 
 function _getNextCustomerId(ss) {
