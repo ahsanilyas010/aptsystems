@@ -501,8 +501,11 @@ function CrmApp({ user, onLogout }) {
     const custName = cust ? cust.name : "";
     const enrichedItems = formData.items.map(item => {
       const pr = prodMap[item.pid];
+      // Drop synthetic/unknown ids (e.g. "x:" rider products) so the sheet stores a clean
+      // pid, but keep the product name so the invoice still shows what was ordered.
       return {
         ...item,
+        pid: pr ? item.pid : "",
         pname: pr ? pr.name : (item.pname || "")
       };
     });
@@ -534,7 +537,7 @@ function CrmApp({ user, onLogout }) {
       const custName = cust ? cust.name : "";
       const enrichedItems = formData.items.map(item => {
         const pr = prodMap[item.pid];
-        return { ...item, pname: pr ? pr.name : (item.pname || "") };
+        return { ...item, pid: pr ? item.pid : "", pname: pr ? pr.name : (item.pname || "") };
       });
       const result = await gasPost("edit_invoice", {
         ...formData,
@@ -1076,6 +1079,7 @@ function CrmApp({ user, onLogout }) {
                 <Sel value={item.pid} onChange={e=>setLine(idx,"pid",e.target.value)}>
                   <option value="">— Product —</option>
                   {products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                  {item.pid&&!prodMap[item.pid]&&<option value={item.pid}>{item.pname||"Rider product"} (not in catalog)</option>}
                 </Sel>
                 <Inp type="number" min="1" value={item.qty} onChange={e=>setLine(idx,"qty",e.target.value)} placeholder="Qty"/>
                 <Inp type="number" value={item.rate} onChange={e=>setLine(idx,"rate",e.target.value)} placeholder="Rate"/>
@@ -1414,7 +1418,11 @@ function CrmApp({ user, onLogout }) {
         items = (rows||[]).map(it=>{
           const match = matchProduct(it.product_name);
           const rate = Number(it.trade_price) || (it.quantity?Number(it.total)/Number(it.quantity):0);
-          return { pid: match?match.id:"", pname: it.product_name||(match?match.name:""), qty: it.quantity||1, rate: Math.round(rate||0) };
+          const name = it.product_name||(match?match.name:"");
+          // If a rider product isn't in the Sheets catalog, keep it visible + selected via a
+          // synthetic "x:" id (blanked on save, pname preserved) instead of a blank dropdown.
+          const pid = match ? match.id : (name ? "x:"+(it.product_id||normTxt(name)) : "");
+          return { pid, pname: name, qty: it.quantity||1, rate: Math.round(rate||0) };
         });
       } catch(e) { notify("Could not load order items: "+e.message,"err"); }
       if(!items.length) items=[{pid:"",qty:1,rate:0}];
