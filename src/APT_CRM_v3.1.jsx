@@ -76,6 +76,19 @@ async function gasPost(action, data, extra = {}) {
   return json.data;
 }
 
+async function sbPost(action, params = {}) {
+  const res = await fetch("/api/supabase", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...params }),
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || "Supabase error");
+  return json.data !== undefined ? json.data : [];
+}
+
+const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config"]);
+
 // ── Brand Colors ──────────────────────────────────────────────
 const G = {
   dark:"#1A5C20", mid:"#2E7D32", light:"#4CAF50", pale:"#E8F5E9",
@@ -358,6 +371,23 @@ function CrmApp({ user, onLogout }) {
   const [lastSync, setLastSync] = useState(null);
   // PDF url cache: invId → url
   const [pdfCache, setPdfCache] = useState({});
+  // ── Rider Hub (Supabase data) ──────────────────────────────
+  const [sbData, setSbData] = useState({orders:[],stores:[],riders:[],locations:[],products:[],areas:[],assignments:[],riderAreas:[]});
+  const [sbLoading, setSbLoading] = useState(false);
+  const [sbSyncing, setSbSyncing] = useState(false);
+
+  const loadSupabase = useCallback(async (silent = false) => {
+    if (!silent) setSbLoading(true);
+    setSbSyncing(true);
+    try {
+      const [orders, stores, riders, locs, products, areas, assignments, riderAreas] = await Promise.all([
+        sbPost("orders"), sbPost("stores"), sbPost("riders"), sbPost("locations"),
+        sbPost("products"), sbPost("areas"), sbPost("store_assignments"), sbPost("rider_areas"),
+      ]);
+      setSbData({ orders:orders||[], stores:stores||[], riders:riders||[], locations:locs||[], products:products||[], areas:areas||[], assignments:assignments||[], riderAreas:riderAreas||[] });
+    } catch(e) { /* notify set in effect below — capture lazily */ console.error("Supabase load:", e); }
+    finally { setSbLoading(false); setSbSyncing(false); }
+  }, []);
 
   const notify = useCallback((msg, type="ok") => {
     setToast({msg,type});
@@ -378,6 +408,7 @@ function CrmApp({ user, onLogout }) {
   }, [notify]);
 
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { if (RIDER_HUB_TABS.has(tab)) loadSupabase(true); }, [tab, loadSupabase]);
 
   // ── Maps ──────────────────────────────────────────────────
   const customers  = data?.customers  || [];
@@ -563,6 +594,7 @@ function CrmApp({ user, onLogout }) {
   if (loading) return <LoadingScreen msg="Loading APT ERP from Google Sheet…"/>;
 
   // ── NAV ───────────────────────────────────────────────────
+  const pendingRiderOrders = sbData.orders.filter(o => o.status === "Pending").length;
   const NAV_GROUPS = [
     {group:"Operations",items:[
       {id:"dashboard", label:"Dashboard"},
@@ -580,6 +612,17 @@ function CrmApp({ user, onLogout }) {
       {id:"arap",      label:"AR / AP"},
       {id:"inventory", label:"Inventory"},
       {id:"reports",   label:"Reports"},
+    ]},
+    {group:"Rider Hub",items:[
+      {id:"rider-orders",   label:"Rider Orders",  badge:pendingRiderOrders||null},
+      {id:"rider-stores",   label:"Rider Stores"},
+      {id:"riders",         label:"Riders"},
+      {id:"locations",      label:"Live Locations"},
+      {id:"rider-products", label:"Products"},
+      {id:"store-assign",   label:"Store Assign"},
+      {id:"areas",          label:"Areas"},
+      {id:"rider-reports",  label:"Rider Reports"},
+      {id:"rider-config",   label:"Rider Config"},
     ]},
   ];
 
@@ -1320,6 +1363,503 @@ function CrmApp({ user, onLogout }) {
     return null;
   };
 
+  // ── RIDER HUB TABS ────────────────────────────────────────
+  const STATUS_NEXT = {Pending:"Approved",Approved:"Packed",Packed:"Dispatched",Dispatched:"Delivered"};
+  const STATUS_CLR  = {Pending:G.amber,Approved:G.blue,Packed:G.purple,Dispatched:"#00897B",Delivered:G.mid,Cancelled:G.red,Rejected:G.red};
+
+  const RiderOrdersTab = () => {
+    const [statusFilter, setStatusFilter] = useState("all");
+    const [q, setQ] = useState("");
+    const [busy, setBusy] = useState(null);
+    const filtered = sbData.orders.filter(o => {
+      if (statusFilter !== "all" && o.status !== statusFilter) return false;
+      if (q) { const s = q.toLowerCase(); return (o.id||"").toLowerCase().includes(s)||(o.stores?.name||"").toLowerCase().includes(s)||(o.profiles?.full_name||"").toLowerCase().includes(s); }
+      return true;
+    });
+    const advance = async (o) => {
+      const next = STATUS_NEXT[o.status]; if (!next) return;
+      setBusy(o.id);
+      try { await sbPost("update_order_status",{id:o.id,status:next}); notify(`✅ Order → ${next}`); await loadSupabase(true); }
+      catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
+    };
+    const cancel = async (o) => {
+      if (!confirm(`Cancel order?`)) return;
+      setBusy(o.id+"_c");
+      try { await sbPost("update_order_status",{id:o.id,status:"Cancelled"}); notify("Order cancelled"); await loadSupabase(true); }
+      catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
+    };
+    if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading rider orders…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+          {["all","Pending","Approved","Packed","Dispatched","Delivered","Cancelled"].map(s=>(
+            <button key={s} onClick={()=>setStatusFilter(s)} style={{padding:"4px 13px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:statusFilter===s?G.dark:G.pale,color:statusFilter===s?G.white:G.dark,border:`1.5px solid ${statusFilter===s?G.dark:G.border}`}}>{s==="all"?"All":s}</button>
+          ))}
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search order / store / rider…" style={{marginLeft:"auto",border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",minWidth:200}}/>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
+        </div>
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <TblWrap compact heads={["Order","Store","Rider","Total","Status","GAS","Actions"]}
+            rows={filtered.map(o=>[
+              <span style={{fontWeight:700,color:G.dark,fontSize:10,fontFamily:"monospace"}}>{(o.id||"").slice(0,8)}</span>,
+              <div><div style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</div><div style={{fontSize:9,color:G.muted}}>{o.stores?.area||""}</div></div>,
+              <span style={{fontSize:11}}>{o.profiles?.full_name||"—"}</span>,
+              <span style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</span>,
+              <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700}}>{o.status}</span>,
+              o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
+              <div style={{display:"flex",gap:4}}>
+                {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
+                {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+              </div>
+            ])}
+          />
+          {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
+        </div>
+      </div>
+    );
+  };
+
+  const RiderStoresTab = () => {
+    const [storeModal, setStoreModal] = useState(null);
+    const [form, setForm] = useState({});
+    const [busy, setBusy] = useState(false);
+    const [q, setQ] = useState("");
+    const filtered = sbData.stores.filter(s=>{if(!q)return true;const v=q.toLowerCase();return(s.name||"").toLowerCase().includes(v)||(s.area||"").toLowerCase().includes(v)||(s.owner_name||"").toLowerCase().includes(v);});
+    const save = async () => {
+      if (!form.name) return;
+      setBusy(true);
+      try {
+        if (storeModal==="add") { await sbPost("add_store",{store:form}); notify("✅ Store added"); }
+        else { const {id,...f}=form; await sbPost("update_store",{id,name:f.name,owner_name:f.owner_name,mobile:f.mobile,address:f.address,area:f.area,city:f.city,category:f.category}); notify("✅ Store updated"); }
+        setStoreModal(null); await loadSupabase(true);
+      } catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(false); }
+    };
+    const del = async (s) => {
+      if (!confirm(`Delete ${s.name}?`)) return;
+      try { await sbPost("delete_store",{id:s.id}); notify("✅ Deleted"); await loadSupabase(true); }
+      catch(e) { notify("❌ "+e.message,"err"); }
+    };
+    if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading stores…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search stores…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
+          <Btn sm onClick={()=>{setForm({name:"",owner_name:"",mobile:"",address:"",area:"",city:"",category:""});setStoreModal("add");}}>+ Add Store</Btn>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
+        </div>
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <TblWrap compact heads={["Name","Owner","Mobile","Area","City","Category","GAS ID","Actions"]}
+            rows={filtered.map(s=>[
+              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{s.name}</span>,
+              <span style={{fontSize:11}}>{s.owner_name||"—"}</span>,
+              <span style={{fontSize:11}}>{s.mobile||"—"}</span>,
+              <span style={{fontSize:11}}>{s.area||"—"}</span>,
+              <span style={{fontSize:11}}>{s.city||"—"}</span>,
+              <span style={{fontSize:10,color:G.muted}}>{s.category||"—"}</span>,
+              s.gas_customer_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {s.gas_customer_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
+              <div style={{display:"flex",gap:4}}>
+                <Btn sm v="secondary" onClick={()=>{setForm({...s});setStoreModal("edit");}}>✏</Btn>
+                <Btn sm v="danger" onClick={()=>del(s)}>✕</Btn>
+              </div>
+            ])}
+          />
+          {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No stores found</div>}
+        </div>
+        {storeModal&&(
+          <Modal title={storeModal==="add"?"Add Rider Store":"Edit Rider Store"} onClose={()=>setStoreModal(null)}>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <Inp label="Store Name *" value={form.name||""} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/>
+                <Inp label="Owner Name" value={form.owner_name||""} onChange={e=>setForm(f=>({...f,owner_name:e.target.value}))}/>
+                <Inp label="Mobile" value={form.mobile||""} onChange={e=>setForm(f=>({...f,mobile:e.target.value}))}/>
+                <Inp label="Area" value={form.area||""} onChange={e=>setForm(f=>({...f,area:e.target.value}))}/>
+                <Inp label="City" value={form.city||""} onChange={e=>setForm(f=>({...f,city:e.target.value}))}/>
+                <Inp label="Category" value={form.category||""} onChange={e=>setForm(f=>({...f,category:e.target.value}))}/>
+              </div>
+              <Inp label="Address" value={form.address||""} onChange={e=>setForm(f=>({...f,address:e.target.value}))}/>
+              <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                <Btn v="secondary" onClick={()=>setStoreModal(null)}>Cancel</Btn>
+                <Btn disabled={busy} onClick={save}>{busy?"Saving…":"Save"}</Btn>
+              </div>
+            </div>
+          </Modal>
+        )}
+      </div>
+    );
+  };
+
+  const RidersTab = () => {
+    const [editingId, setEditingId] = useState(null);
+    const [form, setForm] = useState({});
+    const [busy, setBusy] = useState(false);
+    const save = async () => {
+      setBusy(true);
+      try { await sbPost("update_rider",{id:editingId,full_name:form.full_name,mobile:form.mobile,cnic:form.cnic,city:form.city,area:form.area,bike_available:form.bike_available}); notify("✅ Rider updated"); setEditingId(null); await loadSupabase(true); }
+      catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(false); }
+    };
+    if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading riders…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",justifyContent:"flex-end"}}><Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn></div>
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <TblWrap compact heads={["Name","Mobile","CNIC","City","Area","Bike","Action"]}
+            rows={sbData.riders.map(r=>[
+              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{r.full_name||"—"}</span>,
+              <span style={{fontSize:11}}>{r.mobile||"—"}</span>,
+              <span style={{fontSize:10,color:G.muted,fontFamily:"monospace"}}>{r.cnic||"—"}</span>,
+              <span style={{fontSize:11}}>{r.city||"—"}</span>,
+              <span style={{fontSize:11}}>{r.area||"—"}</span>,
+              <span style={{fontSize:10,padding:"2px 8px",borderRadius:20,background:r.bike_available?"#E8F5E9":G.pink,color:r.bike_available?G.mid:G.red,fontWeight:700}}>{r.bike_available?"Yes":"No"}</span>,
+              <Btn sm v="secondary" onClick={()=>{setEditingId(r.id);setForm({...r});}}>✏ Edit</Btn>
+            ])}
+          />
+          {sbData.riders.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No riders found</div>}
+        </div>
+        {editingId&&(
+          <Modal title="Edit Rider" onClose={()=>setEditingId(null)}>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <Inp label="Full Name" value={form.full_name||""} onChange={e=>setForm(f=>({...f,full_name:e.target.value}))}/>
+                <Inp label="Mobile" value={form.mobile||""} onChange={e=>setForm(f=>({...f,mobile:e.target.value}))}/>
+                <Inp label="CNIC" value={form.cnic||""} onChange={e=>setForm(f=>({...f,cnic:e.target.value}))}/>
+                <Inp label="City" value={form.city||""} onChange={e=>setForm(f=>({...f,city:e.target.value}))}/>
+                <Inp label="Area" value={form.area||""} onChange={e=>setForm(f=>({...f,area:e.target.value}))}/>
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,fontWeight:600,color:G.ink,cursor:"pointer"}}>
+                <input type="checkbox" checked={!!form.bike_available} onChange={e=>setForm(f=>({...f,bike_available:e.target.checked}))}/> Bike Available
+              </label>
+              <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                <Btn v="secondary" onClick={()=>setEditingId(null)}>Cancel</Btn>
+                <Btn disabled={busy} onClick={save}>{busy?"Saving…":"Save"}</Btn>
+              </div>
+            </div>
+          </Modal>
+        )}
+      </div>
+    );
+  };
+
+  const LocationsTab = () => {
+    const [tick, setTick] = useState(0);
+    useEffect(()=>{const id=setInterval(()=>setTick(t=>t+1),30000);return()=>clearInterval(id);},[]);
+    useEffect(()=>{if(tick>0)loadSupabase(true);},[tick]);
+    const riderMap = Object.fromEntries(sbData.riders.map(r=>[r.id,r]));
+    const timeAgo = (ts) => { const s=Math.floor((Date.now()-new Date(ts).getTime())/1000); if(s<60)return s+"s ago"; const m=Math.floor(s/60); if(m<60)return m+"m ago"; return Math.floor(m/60)+"h ago"; };
+    if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading locations…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:11,color:G.muted,fontWeight:600}}>Auto-refreshes every 30 seconds</span>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh Now</Btn>
+        </div>
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <TblWrap compact heads={["Rider","Last Seen","Accuracy","Location"]}
+            rows={sbData.locations.map(loc=>{
+              const r=riderMap[loc.rider_id];
+              return [
+                <div><div style={{fontWeight:700,color:G.dark,fontSize:11}}>{r?.full_name||loc.rider_id?.slice(0,8)||"—"}</div><div style={{fontSize:9,color:G.muted}}>{r?.mobile||""}</div></div>,
+                <span style={{fontSize:11,color:G.muted}}>{loc.updated_at?timeAgo(loc.updated_at):"—"}</span>,
+                <span style={{fontSize:11,color:G.muted}}>{loc.accuracy?`±${Math.round(loc.accuracy)}m`:"—"}</span>,
+                <a href={`https://www.google.com/maps?q=${loc.latitude},${loc.longitude}`} target="_blank" rel="noreferrer" style={{fontSize:11,color:G.blue,fontWeight:600,textDecoration:"none"}}>📍 {loc.latitude?.toFixed(4)}, {loc.longitude?.toFixed(4)}</a>
+              ];
+            })}
+          />
+          {sbData.locations.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No location data available</div>}
+        </div>
+      </div>
+    );
+  };
+
+  const RiderProductsTab = () => {
+    const [pModal, setPModal] = useState(null);
+    const [form, setForm] = useState({});
+    const [busy, setBusy] = useState(false);
+    const [q, setQ] = useState("");
+    const filtered = sbData.products.filter(p=>{if(!q)return true;const v=q.toLowerCase();return(p.name||"").toLowerCase().includes(v)||(p.category||"").toLowerCase().includes(v);});
+    const save = async () => {
+      setBusy(true);
+      try {
+        const prod={...form,trade_price:Number(form.trade_price||0),sale_price:Number(form.sale_price||0),current_stock:Number(form.current_stock||0),min_stock:Number(form.min_stock||0)};
+        if(pModal==="add"){await sbPost("insert_product",{product:prod});notify("✅ Product added");}
+        else{const{id,...f}=prod;await sbPost("update_product",{id:form.id,...f});notify("✅ Product updated");}
+        setPModal(null); await loadSupabase(true);
+      } catch(e){notify("❌ "+e.message,"err");} finally{setBusy(false);}
+    };
+    const toggleActive = async (p) => {
+      try{await sbPost("update_product",{id:p.id,active:!p.active});notify(`✅ ${p.name} ${!p.active?"activated":"deactivated"}`);await loadSupabase(true);}
+      catch(e){notify("❌ "+e.message,"err");}
+    };
+    if(sbLoading)return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading products…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search products…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
+          <Btn sm onClick={()=>{setForm({name:"",category:"",trade_price:0,sale_price:0,unit:"",current_stock:0,min_stock:0,active:true});setPModal("add");}}>+ Add Product</Btn>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
+        </div>
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <TblWrap compact heads={["Name","Category","Trade","Sale","Stock","Min","Unit","Active","Action"]}
+            rows={filtered.map(p=>[
+              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.name}</span>,
+              <span style={{fontSize:10,color:G.muted}}>{p.category||"—"}</span>,
+              <span style={{fontSize:11}}>{fmt(p.trade_price||0)}</span>,
+              <span style={{fontSize:11}}>{fmt(p.sale_price||0)}</span>,
+              <span style={{fontSize:11,color:(p.current_stock||0)<=(p.min_stock||0)?G.red:G.ink,fontWeight:(p.current_stock||0)<=(p.min_stock||0)?700:400}}>{p.current_stock||0}</span>,
+              <span style={{fontSize:11,color:G.muted}}>{p.min_stock||0}</span>,
+              <span style={{fontSize:10,color:G.muted}}>{p.unit||"—"}</span>,
+              <button onClick={()=>toggleActive(p)} style={{background:p.active?"#E8F5E9":G.pink,color:p.active?G.mid:G.red,border:"none",borderRadius:20,padding:"2px 9px",fontSize:10,fontWeight:700,cursor:"pointer"}}>{p.active?"Active":"Inactive"}</button>,
+              <Btn sm v="secondary" onClick={()=>{setForm({...p});setPModal("edit");}}>✏</Btn>
+            ])}
+          />
+          {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No products found</div>}
+        </div>
+        {pModal&&(
+          <Modal title={pModal==="add"?"Add Product":"Edit Product"} onClose={()=>setPModal(null)}>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <Inp label="Name *" value={form.name||""} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/>
+                <Inp label="Category" value={form.category||""} onChange={e=>setForm(f=>({...f,category:e.target.value}))}/>
+                <Inp label="Trade Price" type="number" value={form.trade_price||0} onChange={e=>setForm(f=>({...f,trade_price:e.target.value}))}/>
+                <Inp label="Sale Price" type="number" value={form.sale_price||0} onChange={e=>setForm(f=>({...f,sale_price:e.target.value}))}/>
+                <Inp label="Current Stock" type="number" value={form.current_stock||0} onChange={e=>setForm(f=>({...f,current_stock:e.target.value}))}/>
+                <Inp label="Min Stock" type="number" value={form.min_stock||0} onChange={e=>setForm(f=>({...f,min_stock:e.target.value}))}/>
+                <Inp label="Unit" value={form.unit||""} onChange={e=>setForm(f=>({...f,unit:e.target.value}))}/>
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,fontWeight:600,color:G.ink,cursor:"pointer"}}>
+                <input type="checkbox" checked={!!form.active} onChange={e=>setForm(f=>({...f,active:e.target.checked}))}/> Active (visible to riders)
+              </label>
+              <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                <Btn v="secondary" onClick={()=>setPModal(null)}>Cancel</Btn>
+                <Btn disabled={busy} onClick={save}>{busy?"Saving…":"Save"}</Btn>
+              </div>
+            </div>
+          </Modal>
+        )}
+      </div>
+    );
+  };
+
+  const StoreAssignTab = () => {
+    const [selRider, setSelRider] = useState("");
+    const [busy, setBusy] = useState(null);
+    const assigned = new Set(sbData.assignments.filter(a=>a.rider_id===selRider).map(a=>a.store_id));
+    const toggle = async (storeId, on) => {
+      setBusy(storeId);
+      try{await sbPost("toggle_store_assignment",{rider_id:selRider,store_id:storeId,on});await loadSupabase(true);}
+      catch(e){notify("❌ "+e.message,"err");} finally{setBusy(null);}
+    };
+    if(sbLoading)return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <select value={selRider} onChange={e=>setSelRider(e.target.value)} style={{flex:1,maxWidth:300,border:`1.5px solid ${G.border}`,borderRadius:8,padding:"7px 11px",fontSize:13,color:G.ink,background:G.bg,outline:"none"}}>
+            <option value="">— Select a Rider —</option>
+            {sbData.riders.map(r=><option key={r.id} value={r.id}>{r.full_name} ({r.mobile||"no mobile"})</option>)}
+          </select>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
+        </div>
+        {selRider?(
+          <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+            <TblWrap compact heads={["Store","Area","City","Assigned"]}
+              rows={sbData.stores.map(s=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{s.name}</span>,
+                <span style={{fontSize:11,color:G.muted}}>{s.area||"—"}</span>,
+                <span style={{fontSize:11,color:G.muted}}>{s.city||"—"}</span>,
+                <button disabled={busy===s.id} onClick={()=>toggle(s.id,!assigned.has(s.id))} style={{background:assigned.has(s.id)?"#E8F5E9":G.pale,color:assigned.has(s.id)?G.mid:G.muted,border:`1.5px solid ${assigned.has(s.id)?G.mid:G.border}`,borderRadius:8,padding:"3px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{busy===s.id?"…":assigned.has(s.id)?"✓ Assigned":"Assign"}</button>
+              ])}
+            />
+          </div>
+        ):<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12,background:G.card,borderRadius:12}}>Select a rider to manage their store assignments</div>}
+      </div>
+    );
+  };
+
+  const AreasTab = () => {
+    const [addForm, setAddForm] = useState({city:"",name:"",description:""});
+    const [busy, setBusy] = useState(false);
+    const [selRider, setSelRider] = useState("");
+    const [areaBusy, setAreaBusy] = useState(null);
+    const assignedAreas = new Set(sbData.riderAreas.filter(a=>a.rider_id===selRider).map(a=>a.area_id));
+    const addArea = async () => {
+      if(!addForm.city||!addForm.name)return;
+      setBusy(true);
+      try{await sbPost("add_area",{area:{city:addForm.city,name:addForm.name,description:addForm.description}});notify("✅ Area added");setAddForm({city:"",name:"",description:""});await loadSupabase(true);}
+      catch(e){notify("❌ "+e.message,"err");} finally{setBusy(false);}
+    };
+    const toggleArea = async (areaId, on) => {
+      setAreaBusy(areaId);
+      try{await sbPost("toggle_area_assignment",{rider_id:selRider,area_id:areaId,on});await loadSupabase(true);}
+      catch(e){notify("❌ "+e.message,"err");} finally{setAreaBusy(null);}
+    };
+    if(sbLoading)return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading areas…</div>;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div style={{background:G.card,borderRadius:12,padding:16,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{fontWeight:700,fontSize:12,color:G.dark,marginBottom:10}}>Add Area</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr auto",gap:8,alignItems:"end"}}>
+            <Inp label="City *" value={addForm.city} onChange={e=>setAddForm(f=>({...f,city:e.target.value}))}/>
+            <Inp label="Area Name *" value={addForm.name} onChange={e=>setAddForm(f=>({...f,name:e.target.value}))}/>
+            <Inp label="Description" value={addForm.description} onChange={e=>setAddForm(f=>({...f,description:e.target.value}))}/>
+            <Btn disabled={busy||!addForm.city||!addForm.name} onClick={addArea}>{busy?"Adding…":"+ Add"}</Btn>
+          </div>
+        </div>
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{background:G.dark,padding:"9px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:G.white,fontWeight:700,fontSize:12}}>Areas ({sbData.areas.length})</span>
+            <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
+          </div>
+          <TblWrap compact heads={["City","Name","Description"]}
+            rows={sbData.areas.map(a=>[
+              <span style={{fontWeight:600,color:G.dark,fontSize:11}}>{a.city}</span>,
+              <span style={{fontSize:11}}>{a.name}</span>,
+              <span style={{fontSize:10,color:G.muted}}>{a.description||"—"}</span>
+            ])}
+          />
+          {sbData.areas.length===0&&<div style={{padding:24,textAlign:"center",color:G.muted,fontSize:12}}>No areas yet</div>}
+        </div>
+        <div style={{background:G.card,borderRadius:12,padding:16,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{fontWeight:700,fontSize:12,color:G.dark,marginBottom:10}}>Rider Area Assignments</div>
+          <select value={selRider} onChange={e=>setSelRider(e.target.value)} style={{maxWidth:280,border:`1.5px solid ${G.border}`,borderRadius:8,padding:"7px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",marginBottom:12,display:"block"}}>
+            <option value="">— Select a Rider —</option>
+            {sbData.riders.map(r=><option key={r.id} value={r.id}>{r.full_name}</option>)}
+          </select>
+          {selRider&&(
+            <TblWrap compact heads={["City","Area","Assigned"]}
+              rows={sbData.areas.map(a=>[
+                <span style={{fontSize:11,color:G.muted}}>{a.city}</span>,
+                <span style={{fontWeight:600,fontSize:11}}>{a.name}</span>,
+                <button disabled={areaBusy===a.id} onClick={()=>toggleArea(a.id,!assignedAreas.has(a.id))} style={{background:assignedAreas.has(a.id)?"#E8F5E9":G.pale,color:assignedAreas.has(a.id)?G.mid:G.muted,border:`1.5px solid ${assignedAreas.has(a.id)?G.mid:G.border}`,borderRadius:8,padding:"3px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{areaBusy===a.id?"…":assignedAreas.has(a.id)?"✓ Assigned":"Assign"}</button>
+              ])}
+            />
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const RiderReportsTab = () => {
+    const [days, setDays] = useState(30);
+    const [repData, setRepData] = useState(null);
+    const [repLoading, setRepLoading] = useState(false);
+    useEffect(()=>{
+      let on=true;
+      setRepLoading(true);
+      Promise.all([sbPost("report_orders",{days}),sbPost("report_items",{days})])
+        .then(([orders,items])=>{if(on)setRepData({orders:orders||[],items:items||[]});})
+        .catch(e=>notify("❌ "+e.message,"err"))
+        .finally(()=>{if(on)setRepLoading(false);});
+      return()=>{on=false;};
+    },[days]);
+    const riderMap = Object.fromEntries(sbData.riders.map(r=>[r.id,r.full_name||r.id?.slice(0,8)||"?"]));
+    const riderStats = repData ? (() => {
+      const m={};
+      repData.orders.forEach(o=>{const n=riderMap[o.rider_id]||"Unknown";if(!m[n])m[n]={name:n,count:0,revenue:0,incentive:0};m[n].count++;m[n].revenue+=Number(o.total_value||0);m[n].incentive+=Number(o.incentive||0);});
+      return Object.values(m).sort((a,b)=>b.count-a.count);
+    })() : [];
+    const productStats = repData ? (() => {
+      const m={};
+      repData.items.forEach(i=>{const n=i.product_name||i.product_id||"?";if(!m[n])m[n]={name:n,qty:0,revenue:0};m[n].qty+=Number(i.quantity||0);m[n].revenue+=Number(i.total||0);});
+      return Object.values(m).sort((a,b)=>b.qty-a.qty).slice(0,20);
+    })() : [];
+    const total = repData ? {
+      orders:repData.orders.length,
+      revenue:repData.orders.reduce((s,o)=>s+Number(o.total_value||0),0),
+      incentive:repData.orders.reduce((s,o)=>s+Number(o.incentive||0),0),
+      delivered:repData.orders.filter(o=>o.status==="Delivered").length,
+    } : null;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {[7,30,90].map(d=>(
+            <button key={d} onClick={()=>setDays(d)} style={{padding:"5px 14px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:days===d?G.dark:G.pale,color:days===d?G.white:G.dark,border:`1.5px solid ${days===d?G.dark:G.border}`}}>Last {d} days</button>
+          ))}
+          {repLoading&&<span style={{fontSize:11,color:G.muted}}>⏳ Loading…</span>}
+        </div>
+        {total&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12}}>
+            <Kpi label="Total Orders" value={total.orders} sub={`${total.delivered} delivered`} color={G.blue}/>
+            <Kpi label="Total Revenue" value={fmt(total.revenue)} color={G.mid} trend="up"/>
+            <Kpi label="Total Incentive" value={fmt(total.incentive)} color={G.amber}/>
+            <Kpi label="Delivery Rate" value={total.orders?pct(total.delivered,total.orders):"—"} color={G.purple}/>
+          </div>
+        )}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+          <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+            <div style={{background:G.dark,padding:"9px 14px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>By Rider</span></div>
+            <TblWrap compact heads={["Rider","Orders","Revenue","Incentive"]}
+              rows={riderStats.map(r=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{r.name}</span>,
+                <span style={{fontSize:11}}>{r.count}</span>,
+                <span style={{fontSize:11,fontWeight:600}}>{fmt(r.revenue)}</span>,
+                <span style={{fontSize:11,color:G.amber}}>{fmt(r.incentive)}</span>
+              ])}
+            />
+            {riderStats.length===0&&<div style={{padding:24,textAlign:"center",color:G.muted,fontSize:12}}>No data</div>}
+          </div>
+          <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+            <div style={{background:G.dark,padding:"9px 14px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>Top Products</span></div>
+            <TblWrap compact heads={["Product","Qty","Revenue"]}
+              rows={productStats.map(p=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.name}</span>,
+                <span style={{fontSize:11}}>{p.qty}</span>,
+                <span style={{fontSize:11,fontWeight:600}}>{fmt(p.revenue)}</span>
+              ])}
+            />
+            {productStats.length===0&&<div style={{padding:24,textAlign:"center",color:G.muted,fontSize:12}}>No data</div>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const RiderConfigTab = () => {
+    const [settings, setSettings] = useState([]);
+    const [busy, setBusy] = useState(null);
+    const [pushCount, setPushCount] = useState(null);
+    useEffect(()=>{
+      sbPost("app_settings").then(d=>setSettings(d||[])).catch(()=>{});
+      sbPost("push_subscriptions_count").then(n=>setPushCount(n)).catch(()=>{});
+    },[]);
+    const getVal = (key) => settings.find(s=>s.key===key)?.value??"";
+    const saveSetting = async (key, value) => {
+      setBusy(key);
+      try{await sbPost("upsert_setting",{key,value});setSettings(prev=>{const i=prev.findIndex(s=>s.key===key);return i>=0?prev.map((s,j)=>j===i?{...s,value}:s):[...prev,{key,value}];});notify("✅ Setting saved");}
+      catch(e){notify("❌ "+e.message,"err");} finally{setBusy(null);}
+    };
+    const SettingRow = ({k,label,type="text"}) => {
+      const [val,setVal] = useState(getVal(k));
+      useEffect(()=>setVal(getVal(k)),[k,settings.length]);
+      return <div style={{display:"flex",gap:10,alignItems:"flex-end",marginBottom:10}}>
+        <Inp label={label} value={val} type={type} onChange={e=>setVal(e.target.value)} style={{flex:1}}/>
+        <Btn sm disabled={busy===k} onClick={()=>saveSetting(k,val)}>{busy===k?"Saving…":"Save"}</Btn>
+      </div>;
+    };
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{fontWeight:700,fontSize:13,color:G.dark,marginBottom:14}}>Incentive Settings</div>
+          <SettingRow k="incentive_per_order" label="Incentive per Order (PKR)" type="number"/>
+          <SettingRow k="monthly_target_orders" label="Monthly Target (Orders)" type="number"/>
+          <SettingRow k="bonus_amount" label="Bonus Amount (PKR)" type="number"/>
+          <SettingRow k="bonus_threshold_orders" label="Bonus Threshold (Orders)" type="number"/>
+        </div>
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{fontWeight:700,fontSize:13,color:G.dark,marginBottom:14}}>Google Sheets Sync</div>
+          <SettingRow k="gas_sync_enabled" label="Sheets Sync Enabled (true/false)"/>
+          <SettingRow k="gas_webhook_url" label="GAS Webhook URL (override)"/>
+        </div>
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <div style={{fontWeight:700,fontSize:13,color:G.dark}}>Push Notifications</div>
+            {pushCount!==null&&<span style={{fontSize:11,color:G.muted,fontWeight:600}}>{pushCount} subscribers</span>}
+          </div>
+          <SettingRow k="push_title_default" label="Default Push Title"/>
+          <SettingRow k="push_body_default" label="Default Push Body"/>
+        </div>
+      </div>
+    );
+  };
+
   // ── PAGES ─────────────────────────────────────────────────
   const PAGES={
     dashboard:<Dashboard/>,customers:<Customers/>,invoices:<Invoices/>,
@@ -1337,6 +1877,9 @@ function CrmApp({ user, onLogout }) {
     ),
     purchases:<Purchases/>,vendors:<Vendors/>,expenses:<Expenses/>,
     pnl:<PnL/>,arap:<ARAp/>,inventory:<Inventory/>,reports:<Reports/>,
+    "rider-orders":<RiderOrdersTab/>,"rider-stores":<RiderStoresTab/>,
+    riders:<RidersTab/>,locations:<LocationsTab/>,"rider-products":<RiderProductsTab/>,
+    "store-assign":<StoreAssignTab/>,areas:<AreasTab/>,"rider-reports":<RiderReportsTab/>,"rider-config":<RiderConfigTab/>,
   };
 
   return (
@@ -1388,8 +1931,10 @@ function CrmApp({ user, onLogout }) {
         <div style={{background:G.white,borderBottom:`1px solid ${G.border}`,padding:"0 22px",height:52,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,boxShadow:"0 1px 4px rgba(26,92,32,0.06)"}}>
           <h1 style={{margin:0,fontSize:17,fontWeight:800,color:G.ink}}>{NAV_GROUPS.flatMap(g=>g.items).find(n=>n.id===tab)?.label}</h1>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            {syncing&&<span style={{fontSize:10,color:G.muted,fontWeight:600}}>⏳ Syncing…</span>}
-            <button onClick={()=>loadData(true)} style={{background:G.pale,border:`1px solid ${G.mid}`,borderRadius:7,padding:"4px 11px",fontSize:10,fontWeight:700,color:G.dark,cursor:"pointer"}}>↻ Sync</button>
+            {(syncing||sbSyncing)&&<span style={{fontSize:10,color:G.muted,fontWeight:600}}>⏳ Syncing…</span>}
+            {RIDER_HUB_TABS.has(tab)
+              ?<button onClick={()=>loadSupabase()} style={{background:"#E3F2FD",border:`1px solid ${G.blue}`,borderRadius:7,padding:"4px 11px",fontSize:10,fontWeight:700,color:G.blue,cursor:"pointer"}}>↻ Rider Sync</button>
+              :<button onClick={()=>loadData(true)} style={{background:G.pale,border:`1px solid ${G.mid}`,borderRadius:7,padding:"4px 11px",fontSize:10,fontWeight:700,color:G.dark,cursor:"pointer"}}>↻ Sync</button>}
           </div>
         </div>
 

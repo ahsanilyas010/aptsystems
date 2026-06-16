@@ -207,18 +207,144 @@ function doGet(e) {
 // ============================================================
 //  doPost — WRITE OPERATIONS
 // ============================================================
+// ── Webhook handler for mirrorToSheets payloads (no API key required) ───────
+function _handleMirrorWebhook(type, payload) {
+  var ss = _getSs();
+  if (!ss) return _apiJson({ ok: false, reason: "spreadsheet_not_found" });
+
+  if (type === "visit") {
+    return _apiJson({ ok: true, message: "visit_ack" });
+  }
+
+  if (type === "store") {
+    return _syncStoreFromWebhook(ss, payload);
+  }
+
+  if (type === "order") {
+    return _syncOrderFromWebhook(ss, payload);
+  }
+
+  return _apiJson({ ok: false, reason: "unknown_type" });
+}
+
+function _syncStoreFromWebhook(ss, payload) {
+  if (!payload || !payload.name) return _apiJson({ ok: false, reason: "missing_name" });
+
+  var ws = ss.getSheetByName(CFG.CUST);
+  var rows = ws.getDataRange().getValues();
+
+  // Check for existing customer with this supabase_id to avoid duplicates
+  var supabaseRef = "supabase_id:" + (payload.id || "");
+  for (var i = 3; i < rows.length; i++) {
+    if (rows[i][0] && String(rows[i][7]).indexOf(supabaseRef) !== -1) {
+      return _apiJson({ ok: true, customer_id: String(rows[i][0]), message: "already_exists" });
+    }
+  }
+
+  var newId = _getNextCustomerId(ss);
+  var row = _apiGetLastDataRow(ws, 1) + 1;
+  if (row < 4) row = 4;
+
+  ws.getRange(row, 1).setValue(newId);
+  ws.getRange(row, 2).setValue(payload.name || "Unknown Store");
+  ws.getRange(row, 3).setValue(payload.city || payload.area || "ISB");
+  ws.getRange(row, 4).setValue(payload.area || "");
+  ws.getRange(row, 5).setValue(payload.owner_name || "");
+  ws.getRange(row, 6).setValue(payload.mobile || "");
+  ws.getRange(row, 7).setValue(0);
+  ws.getRange(row, 8).setValue("supabase_id:" + (payload.id || ""));
+
+  _ensureCustomerInAR(ss, newId);
+
+  return _apiJson({ ok: true, customer_id: newId, message: "store synced as customer" });
+}
+
+function _syncOrderFromWebhook(ss, payload) {
+  if (!payload) return _apiJson({ ok: false, reason: "missing_payload" });
+
+  // Resolve or create customer
+  var custId = payload.gas_customer_id || null;
+
+  if (!custId && payload.store_id) {
+    // Try to find by supabase_id in notes
+    var custWs = ss.getSheetByName(CFG.CUST);
+    var custRows = custWs.getDataRange().getValues();
+    var supabaseRef = "supabase_id:" + payload.store_id;
+    for (var i = 3; i < custRows.length; i++) {
+      if (custRows[i][0] && String(custRows[i][7]).indexOf(supabaseRef) !== -1) {
+        custId = String(custRows[i][0]);
+        break;
+      }
+    }
+  }
+
+  if (!custId && payload.store_name) {
+    // Create customer
+    var syncResult = _syncStoreFromWebhook(ss, {
+      id: payload.store_id,
+      name: payload.store_name,
+      area: payload.area,
+      owner_name: payload.owner_name,
+      mobile: payload.mobile
+    });
+    // Parse customer_id from JSON result
+    try {
+      var syncData = JSON.parse(syncResult.getContent());
+      custId = syncData.customer_id || null;
+    } catch(ex) {}
+  }
+
+  if (!custId) return _apiJson({ ok: false, reason: "cannot_resolve_customer" });
+
+  // Map webhook items to GAS format
+  var items = (payload.items || []).map(function(it) {
+    return {
+      pid:   it.product_id || "",
+      pname: it.product_name || "",
+      qty:   parseFloat(it.quantity) || 0,
+      rate:  parseFloat(it.trade_price) || 0
+    };
+  });
+  if (!items.length) return _apiJson({ ok: false, reason: "no_items" });
+
+  var invWs = ss.getSheetByName(CFG.INV_H);
+  var invId = _getNextId(invWs, "INV");
+  var date = payload.created_at ? String(payload.created_at).split("T")[0] : new Date().toISOString().split("T")[0];
+  var total = parseFloat(payload.total_value) || items.reduce(function(s, i) { return s + i.qty * i.rate; }, 0);
+
+  var d = {
+    invId:     invId,
+    custId:    custId,
+    custName:  _resolveCustomerName(ss, custId, {}),
+    items:     items,
+    notes:     "[Rider App] " + (payload.notes || ""),
+    createdBy: "rider:" + (payload.rider_id || ""),
+    payTerms:  "COD",
+    date:      date
+  };
+
+  _writeInvoiceToSheet(ss, invId, d, total);
+
+  return _apiJson({ ok: true, invoice_id: invId, message: "order synced as invoice" });
+}
+
 function doPost(e) {
   if (!e || !e.postData || !e.postData.contents) {
     return _apiErr("Missing POST body", 400);
   }
-  
+
   var body = {};
   try {
     body = JSON.parse(e.postData.contents);
   } catch(ex) {
     return _apiErr("Invalid JSON: " + ex.message, 400);
   }
-  
+
+  // ── mirrorToSheets webhook: { type, payload, ts } — no API key required ──────
+  if (body.type && body.payload) {
+    return _handleMirrorWebhook(body.type, body.payload);
+  }
+
   if (!_apiAuth({postData: {contents: JSON.stringify(body)}})) {
     return _apiErr("Unauthorized", 401);
   }
@@ -382,27 +508,42 @@ function doPost(e) {
       //  ADD CUSTOMER
       // ══════════════════════════════════════════════════════
       case "add_customer": {
-        var d = body.data;
+        // Accept both body.data (CRM frontend) and body.customer (pushOrderToGAS)
+        var d = body.data || body.customer || {};
         if (!d || !d.name) return _apiErr("Missing name");
-        
+
         var ws = ss.getSheetByName(CFG.CUST);
+
+        // Check for duplicate by supabase store_id in notes
+        if (d.store_id) {
+          var existRows = ws.getDataRange().getValues();
+          var ref = "supabase_id:" + d.store_id;
+          for (var ei = 3; ei < existRows.length; ei++) {
+            if (existRows[ei][0] && String(existRows[ei][7]).indexOf(ref) !== -1) {
+              var existId = String(existRows[ei][0]);
+              return _apiOk({ id: existId, customer_id: existId, message: "Customer already exists: " + existId });
+            }
+          }
+        }
+
         var newId = _getNextCustomerId(ss);
         var row = _apiGetLastDataRow(ws, 1) + 1;
         if (row < 4) row = 4;
-        
+
         ws.getRange(row, 1).setValue(newId);
         ws.getRange(row, 2).setValue(d.name);
-        ws.getRange(row, 3).setValue(d.city || "ISB");
+        ws.getRange(row, 3).setValue(d.city || d.area || "ISB");
         ws.getRange(row, 4).setValue(d.area || "");
-        ws.getRange(row, 5).setValue(d.contact || "");
-        ws.getRange(row, 6).setValue(d.phone || "");
+        ws.getRange(row, 5).setValue(d.contact || d.owner_name || "");
+        ws.getRange(row, 6).setValue(d.phone || d.mobile || "");
         ws.getRange(row, 7).setValue(parseFloat(d.openBal) || 0);
-        ws.getRange(row, 8).setValue(d.notes || "");
-        
+        ws.getRange(row, 8).setValue(d.notes || (d.store_id ? "supabase_id:" + d.store_id : ""));
+
         _ensureCustomerInAR(ss, newId);
 
         return _apiOk({
           id: newId,
+          customer_id: newId,
           message: "Customer " + newId + " added: " + d.name
         });
       }
@@ -651,31 +792,51 @@ function doPost(e) {
       //  RIDER ORDER (from Rider App)
       // ══════════════════════════════════════════════════════
       case "rider_order": {
-        var d = body.data;
-        if (!d || !d.custId || !d.items || !d.items.length) {
-          return _apiErr("Missing custId or items");
+        // Accept body.data (CRM/legacy) OR body.order (pushOrderToGAS server fn)
+        var raw = body.data || body.order || {};
+
+        // Normalize: body.order uses customer_id + items[{quantity,trade_price,product_id,product_name}]
+        //            body.data uses custId + items[{qty,rate,pid,pname}]
+        var custId = raw.custId || raw.customer_id || null;
+        var rawItems = raw.items || [];
+        var normalItems = rawItems.map(function(it) {
+          return {
+            pid:   it.pid   || it.product_id  || "",
+            pname: it.pname || it.product_name || "",
+            qty:   parseFloat(it.qty  || it.quantity   || 0),
+            rate:  parseFloat(it.rate || it.trade_price || 0)
+          };
+        });
+
+        if (!custId || !normalItems.length) {
+          return _apiErr("Missing custId/customer_id or items");
         }
-        
+
         // Generate invoice ID
         var invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
-        d.invId = invId;
 
         // Resolve customer name + area/purchaser details
-        var custName = _resolveCustomerName(ss, d.custId, d);
-        d.custName = custName;
-        d.customerName = custName;
-        d.customer = custName;
-        var custRecord  = _lookupCustomer(ss, d.custId);
-        d.custArea    = custRecord ? custRecord.area    : "";
-        d.custContact = custRecord ? custRecord.contact : "";
-        d.custPhone   = custRecord ? custRecord.phone   : "";
+        var custName = _resolveCustomerName(ss, custId, raw);
+        var custRecord  = _lookupCustomer(ss, custId);
 
-        d.createdBy = body.riderId || "rider";
-        d.payTerms = d.payTerms || "COD";
-        d.notes = "[Rider App] " + (d.notes || "");
+        var d = {
+          invId:      invId,
+          custId:     custId,
+          custName:   custName,
+          customerName: custName,
+          customer:   custName,
+          custArea:   custRecord ? custRecord.area    : "",
+          custContact:custRecord ? custRecord.contact : "",
+          custPhone:  custRecord ? custRecord.phone   : "",
+          createdBy:  body.riderId || raw.rider_id || "rider",
+          payTerms:   raw.payTerms || "COD",
+          notes:      "[Rider App] " + (raw.notes || ""),
+          date:       raw.date || (raw.created_at ? String(raw.created_at).split("T")[0] : null) || "",
+          items:      normalItems
+        };
 
-        var total = d.items.reduce(function(s, i) {
-          return s + ((parseFloat(i.qty) || 0) * (parseFloat(i.rate) || 0));
+        var total = normalItems.reduce(function(s, i) {
+          return s + (i.qty * i.rate);
         }, 0);
 
         var result = _writeInvoiceToSheet(ss, invId, d, total);
@@ -686,11 +847,14 @@ function doPost(e) {
         } catch(ex) {
           Logger.log("Rider order PDF error: " + ex.message);
         }
-        
+
         return _apiOk({
           message: result,
           id: invId,
-          pdfUrl: pdfUrl
+          invoice_id: invId,
+          invoiceId: invId,
+          pdfUrl: pdfUrl,
+          pdf_url: pdfUrl
         });
       }
 
