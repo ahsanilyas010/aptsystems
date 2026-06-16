@@ -1425,36 +1425,42 @@ function CrmApp({ user, onLogout }) {
     const [busy, setBusy] = useState(false);
     const [q, setQ] = useState("");
     const filtered = sbData.stores.filter(s=>{if(!q)return true;const v=q.toLowerCase();return(s.name||"").toLowerCase().includes(v)||(s.area||"").toLowerCase().includes(v)||(s.owner_name||"").toLowerCase().includes(v);});
+    // Drop empty strings so nullable/enum columns (e.g. category) aren't sent as "" which fails constraints.
+    const clean = (obj) => Object.fromEntries(Object.entries(obj).filter(([,v])=>v!==""&&v!==undefined&&v!==null));
     const save = async () => {
       if (!form.name) return;
       setBusy(true);
       try {
-        if (storeModal==="add") { await sbPost("add_store",{store:form}); notify("✅ Store added"); }
-        else { const {id,...f}=form; await sbPost("update_store",{id,name:f.name,owner_name:f.owner_name,mobile:f.mobile,address:f.address,area:f.area,city:f.city,category:f.category}); notify("✅ Store updated"); }
+        if (storeModal==="add") { const {id,...rest}=form; await sbPost("add_store",{store:clean(rest)}); notify("✅ Store added"); }
+        else { const {id}=form; await sbPost("update_store",clean({id,name:form.name,owner_name:form.owner_name,mobile:form.mobile,address:form.address,area:form.area,category:form.category})); notify("✅ Store updated"); }
         setStoreModal(null); await loadSupabase(true);
       } catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(false); }
     };
     const del = async (s) => {
       if (!confirm(`Delete ${s.name}?`)) return;
       try { await sbPost("delete_store",{id:s.id}); notify("✅ Deleted"); await loadSupabase(true); }
-      catch(e) { notify("❌ "+e.message,"err"); }
+      catch(e) {
+        const msg = /foreign key|orders_store_id_fkey/i.test(e.message)
+          ? "Cannot delete — this store has orders linked to it. Remove or reassign its orders first."
+          : e.message;
+        notify("❌ "+msg,"err");
+      }
     };
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading stores…</div>;
     return (
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search stores…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
-          <Btn sm onClick={()=>{setForm({name:"",owner_name:"",mobile:"",address:"",area:"",city:"",category:""});setStoreModal("add");}}>+ Add Store</Btn>
+          <Btn sm onClick={()=>{setForm({name:"",owner_name:"",mobile:"",address:"",area:"",category:""});setStoreModal("add");}}>+ Add Store</Btn>
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Name","Owner","Mobile","Area","City","Category","GAS ID","Actions"]}
+          <TblWrap compact heads={["Name","Owner","Mobile","Area","Category","GAS ID","Actions"]}
             rows={filtered.map(s=>[
               <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{s.name}</span>,
               <span style={{fontSize:11}}>{s.owner_name||"—"}</span>,
               <span style={{fontSize:11}}>{s.mobile||"—"}</span>,
               <span style={{fontSize:11}}>{s.area||"—"}</span>,
-              <span style={{fontSize:11}}>{s.city||"—"}</span>,
               <span style={{fontSize:10,color:G.muted}}>{s.category||"—"}</span>,
               s.gas_customer_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {s.gas_customer_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
               <div style={{display:"flex",gap:4}}>
@@ -1473,7 +1479,6 @@ function CrmApp({ user, onLogout }) {
                 <Inp label="Owner Name" value={form.owner_name||""} onChange={e=>setForm(f=>({...f,owner_name:e.target.value}))}/>
                 <Inp label="Mobile" value={form.mobile||""} onChange={e=>setForm(f=>({...f,mobile:e.target.value}))}/>
                 <Inp label="Area" value={form.area||""} onChange={e=>setForm(f=>({...f,area:e.target.value}))}/>
-                <Inp label="City" value={form.city||""} onChange={e=>setForm(f=>({...f,city:e.target.value}))}/>
                 <Inp label="Category" value={form.category||""} onChange={e=>setForm(f=>({...f,category:e.target.value}))}/>
               </div>
               <Inp label="Address" value={form.address||""} onChange={e=>setForm(f=>({...f,address:e.target.value}))}/>
@@ -1660,11 +1665,10 @@ function CrmApp({ user, onLogout }) {
         </div>
         {selRider?(
           <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-            <TblWrap compact heads={["Store","Area","City","Assigned"]}
+            <TblWrap compact heads={["Store","Area","Assigned"]}
               rows={sbData.stores.map(s=>[
                 <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{s.name}</span>,
                 <span style={{fontSize:11,color:G.muted}}>{s.area||"—"}</span>,
-                <span style={{fontSize:11,color:G.muted}}>{s.city||"—"}</span>,
                 <button disabled={busy===s.id} onClick={()=>toggle(s.id,!assigned.has(s.id))} style={{background:assigned.has(s.id)?"#E8F5E9":G.pale,color:assigned.has(s.id)?G.mid:G.muted,border:`1.5px solid ${assigned.has(s.id)?G.mid:G.border}`,borderRadius:8,padding:"3px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>{busy===s.id?"…":assigned.has(s.id)?"✓ Assigned":"Assign"}</button>
               ])}
             />
