@@ -999,8 +999,9 @@ function CrmApp({ user, onLogout }) {
     // ── New / Edit Invoice ────────────────────────────────────
     if(modal.t==="newInvoice"||modal.t==="editInvoice"){
       const editing = modal.t==="editInvoice" ? modal.d : null;
+      const prefill = modal.t==="newInvoice" ? modal.prefill : null;
       const InvForm=()=>{
-        const [f,setF]=useState({custId:editing?.custId||"",date:editing?.date||todayStr(),payTerms:editing?.payTerms||"COD",notes:"",items:[{pid:"",qty:1,rate:0}]});
+        const [f,setF]=useState({custId:editing?.custId||prefill?.custId||"",date:editing?.date||todayStr(),payTerms:editing?.payTerms||"COD",notes:prefill?.notes||"",items:(prefill?.items&&prefill.items.length)?prefill.items:[{pid:"",qty:1,rate:0}]});
         const [loading, setLoading] = useState(false);
         const [itemsLoading, setItemsLoading] = useState(!!editing);
         const total=f.items.reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
@@ -1379,8 +1380,30 @@ function CrmApp({ user, onLogout }) {
     const advance = async (o) => {
       const next = STATUS_NEXT[o.status]; if (!next) return;
       setBusy(o.id);
-      try { await sbPost("update_order_status",{id:o.id,status:next}); notify(`✅ Order → ${next}`); await loadSupabase(true); }
+      try {
+        await sbPost("update_order_status",{id:o.id,status:next}); notify(`✅ Order → ${next}`); await loadSupabase(true);
+        if (next==="Approved") await startInvoice({...o, status:next});
+      }
       catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
+    };
+    // Open the New Invoice journey prefilled from a rider order: maps the rider's store to its
+    // Sheets customer (via gas_customer_id) and its order items to Sheets products by name.
+    const startInvoice = async (o) => {
+      const store = o.stores || sbData.stores.find(s=>s.id===o.store_id);
+      const custId = (store?.gas_customer_id && customers.some(c=>c.id===store.gas_customer_id)) ? store.gas_customer_id : "";
+      if(!custId) notify("⚠ This store isn't in Customers yet — use “Sync to Customers”, or pick the store in the invoice","err");
+      let items=[];
+      try {
+        const rows = await sbPost("order_items",{order_id:o.id});
+        const byName = {}; products.forEach(p=>{ byName[(p.name||"").toLowerCase().trim()]=p; });
+        items = (rows||[]).map(it=>{
+          const match = byName[(it.product_name||"").toLowerCase().trim()];
+          const rate = Number(it.trade_price) || (it.quantity?Number(it.total)/Number(it.quantity):0);
+          return { pid: match?match.id:"", pname: it.product_name||"", qty: it.quantity||1, rate: Math.round(rate||0) };
+        });
+      } catch(e) { notify("Could not load order items: "+e.message,"err"); }
+      if(!items.length) items=[{pid:"",qty:1,rate:0}];
+      setModal({t:"newInvoice", prefill:{ custId, notes:`Rider order ${(o.id||"").slice(0,8)}${o.profiles?.full_name?" · "+o.profiles.full_name:""}`, items }});
     };
     const cancel = async (o) => {
       if (!confirm(`Cancel order?`)) return;
@@ -1409,6 +1432,7 @@ function CrmApp({ user, onLogout }) {
               o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
               <div style={{display:"flex",gap:4}}>
                 {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
+                {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾</Btn>}
                 {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
               </div>
             ])}
@@ -1446,12 +1470,39 @@ function CrmApp({ user, onLogout }) {
         notify("❌ "+msg,"err");
       }
     };
+    // Bulk-push rider stores into the Google Sheets Customers list (skips test/sample and
+    // already-synced stores; writes the returned customer id back onto the store for idempotency).
+    const [syncing, setSyncing] = useState(false);
+    const syncToCustomers = async () => {
+      const candidates = sbData.stores.filter(s=>{
+        const n=(s.name||"").toLowerCase();
+        if(!s.name) return false;
+        if(/test|sample/.test(n)) return false;
+        if(s.gas_customer_id) return false;
+        return true;
+      });
+      if(!candidates.length){ notify("Nothing to sync — all stores are already synced or excluded","err"); return; }
+      if(!confirm(`Sync ${candidates.length} store(s) to the Customers list?\n(test/sample and already-synced stores are skipped)`)) return;
+      setSyncing(true);
+      let ok=0, fail=0;
+      for(const s of candidates){
+        try{
+          const r = await gasPost("add_customer",{name:s.name,area:s.area||"",city:"",contact:s.owner_name||"",phone:s.mobile||"",notes:`supabase_id:${s.id}`});
+          if(r?.id){ try{ await sbPost("update_store",{id:s.id,gas_customer_id:r.id}); }catch{/* non-fatal */} }
+          ok++;
+        }catch(e){ fail++; }
+      }
+      setSyncing(false);
+      notify(`✅ Synced ${ok} store(s) to Customers${fail?` · ${fail} failed`:""}`);
+      await loadData(true); await loadSupabase(true);
+    };
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading stores…</div>;
     return (
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search stores…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
           <Btn sm onClick={()=>{setForm({name:"",owner_name:"",mobile:"",address:"",area:"",category:""});setStoreModal("add");}}>+ Add Store</Btn>
+          <Btn sm v="secondary" disabled={syncing} onClick={syncToCustomers}>{syncing?"⏳ Syncing…":"⬆ Sync to Customers"}</Btn>
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -1584,9 +1635,10 @@ function CrmApp({ user, onLogout }) {
     const save = async () => {
       setBusy(true);
       try {
-        const prod={...form,trade_price:Number(form.trade_price||0),sale_price:Number(form.sale_price||0),current_stock:Number(form.current_stock||0),min_stock:Number(form.min_stock||0)};
+        // Whitelist real product columns (the products table has no sale_price or unit column).
+        const prod={name:form.name,category:form.category,trade_price:Number(form.trade_price||0),current_stock:Number(form.current_stock||0),min_stock:Number(form.min_stock||0),active:!!form.active};
         if(pModal==="add"){await sbPost("insert_product",{product:prod});notify("✅ Product added");}
-        else{const{id,...f}=prod;await sbPost("update_product",{id:form.id,...f});notify("✅ Product updated");}
+        else{await sbPost("update_product",{id:form.id,...prod});notify("✅ Product updated");}
         setPModal(null); await loadSupabase(true);
       } catch(e){notify("❌ "+e.message,"err");} finally{setBusy(false);}
     };
@@ -1599,19 +1651,17 @@ function CrmApp({ user, onLogout }) {
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search products…" style={{border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",flex:1}}/>
-          <Btn sm onClick={()=>{setForm({name:"",category:"",trade_price:0,sale_price:0,unit:"",current_stock:0,min_stock:0,active:true});setPModal("add");}}>+ Add Product</Btn>
+          <Btn sm onClick={()=>{setForm({name:"",category:"",trade_price:0,current_stock:0,min_stock:0,active:true});setPModal("add");}}>+ Add Product</Btn>
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Name","Category","Trade","Sale","Stock","Min","Unit","Active","Action"]}
+          <TblWrap compact heads={["Name","Category","Trade","Stock","Min","Active","Action"]}
             rows={filtered.map(p=>[
               <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.name}</span>,
               <span style={{fontSize:10,color:G.muted}}>{p.category||"—"}</span>,
               <span style={{fontSize:11}}>{fmt(p.trade_price||0)}</span>,
-              <span style={{fontSize:11}}>{fmt(p.sale_price||0)}</span>,
               <span style={{fontSize:11,color:(p.current_stock||0)<=(p.min_stock||0)?G.red:G.ink,fontWeight:(p.current_stock||0)<=(p.min_stock||0)?700:400}}>{p.current_stock||0}</span>,
               <span style={{fontSize:11,color:G.muted}}>{p.min_stock||0}</span>,
-              <span style={{fontSize:10,color:G.muted}}>{p.unit||"—"}</span>,
               <button onClick={()=>toggleActive(p)} style={{background:p.active?"#E8F5E9":G.pink,color:p.active?G.mid:G.red,border:"none",borderRadius:20,padding:"2px 9px",fontSize:10,fontWeight:700,cursor:"pointer"}}>{p.active?"Active":"Inactive"}</button>,
               <Btn sm v="secondary" onClick={()=>{setForm({...p});setPModal("edit");}}>✏</Btn>
             ])}
@@ -1625,10 +1675,8 @@ function CrmApp({ user, onLogout }) {
                 <Inp label="Name *" value={form.name||""} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/>
                 <Inp label="Category" value={form.category||""} onChange={e=>setForm(f=>({...f,category:e.target.value}))}/>
                 <Inp label="Trade Price" type="number" value={form.trade_price||0} onChange={e=>setForm(f=>({...f,trade_price:e.target.value}))}/>
-                <Inp label="Sale Price" type="number" value={form.sale_price||0} onChange={e=>setForm(f=>({...f,sale_price:e.target.value}))}/>
                 <Inp label="Current Stock" type="number" value={form.current_stock||0} onChange={e=>setForm(f=>({...f,current_stock:e.target.value}))}/>
                 <Inp label="Min Stock" type="number" value={form.min_stock||0} onChange={e=>setForm(f=>({...f,min_stock:e.target.value}))}/>
-                <Inp label="Unit" value={form.unit||""} onChange={e=>setForm(f=>({...f,unit:e.target.value}))}/>
               </div>
               <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,fontWeight:600,color:G.ink,cursor:"pointer"}}>
                 <input type="checkbox" checked={!!form.active} onChange={e=>setForm(f=>({...f,active:e.target.checked}))}/> Active (visible to riders)
@@ -1679,7 +1727,7 @@ function CrmApp({ user, onLogout }) {
   };
 
   const AreasTab = () => {
-    const [addForm, setAddForm] = useState({city:"",name:"",description:""});
+    const [addForm, setAddForm] = useState({city:"",name:""});
     const [busy, setBusy] = useState(false);
     const [selRider, setSelRider] = useState("");
     const [areaBusy, setAreaBusy] = useState(null);
@@ -1687,7 +1735,7 @@ function CrmApp({ user, onLogout }) {
     const addArea = async () => {
       if(!addForm.city||!addForm.name)return;
       setBusy(true);
-      try{await sbPost("add_area",{area:{city:addForm.city,name:addForm.name,description:addForm.description}});notify("✅ Area added");setAddForm({city:"",name:"",description:""});await loadSupabase(true);}
+      try{await sbPost("add_area",{area:{city:addForm.city,name:addForm.name}});notify("✅ Area added");setAddForm({city:"",name:""});await loadSupabase(true);}
       catch(e){notify("❌ "+e.message,"err");} finally{setBusy(false);}
     };
     const toggleArea = async (areaId, on) => {
@@ -1700,10 +1748,9 @@ function CrmApp({ user, onLogout }) {
       <div style={{display:"flex",flexDirection:"column",gap:16}}>
         <div style={{background:G.card,borderRadius:12,padding:16,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
           <div style={{fontWeight:700,fontSize:12,color:G.dark,marginBottom:10}}>Add Area</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr auto",gap:8,alignItems:"end"}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"end"}}>
             <Inp label="City *" value={addForm.city} onChange={e=>setAddForm(f=>({...f,city:e.target.value}))}/>
             <Inp label="Area Name *" value={addForm.name} onChange={e=>setAddForm(f=>({...f,name:e.target.value}))}/>
-            <Inp label="Description" value={addForm.description} onChange={e=>setAddForm(f=>({...f,description:e.target.value}))}/>
             <Btn disabled={busy||!addForm.city||!addForm.name} onClick={addArea}>{busy?"Adding…":"+ Add"}</Btn>
           </div>
         </div>
