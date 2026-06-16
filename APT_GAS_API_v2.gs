@@ -593,6 +593,19 @@ function doPost(e) {
       }
 
       // ══════════════════════════════════════════════════════
+      //  MERGE DUPLICATE CUSTOMERS
+      //  body.data = { groups: [ { keepId, mergeIds: [...] }, ... ] }
+      //  Re-points every invoice + payment from each mergeId onto keepId,
+      //  removes the duplicate Customers/AR rows, then recalculates AR.
+      // ══════════════════════════════════════════════════════
+      case "merge_customers": {
+        var d = body.data;
+        if (!d || !d.groups || !d.groups.length) return _apiErr("Missing groups");
+        var result = _mergeCustomers(ss, d.groups);
+        return _apiOk(result);
+      }
+
+      // ══════════════════════════════════════════════════════
       //  ADD VENDOR
       // ══════════════════════════════════════════════════════
       case "save_vendor": {
@@ -1085,6 +1098,70 @@ function _recalcAR(ss, custId) {
   } catch(e) {
     Logger.log("recalcAR error: " + e.message);
   }
+}
+
+// Merge duplicate Customer rows: re-point every invoice (INV_H col C) and customer
+// payment (PAY col D) from each mergeId onto keepId, then remove the now-empty
+// duplicate rows from Customers and AR so only the kept record remains.
+function _mergeCustomers(ss, groups) {
+  var custWs = ss.getSheetByName(CFG.CUST);
+  var arWs   = ss.getSheetByName(CFG.AR);
+  var invWs  = ss.getSheetByName(CFG.INV_H);
+  var payWs  = ss.getSheetByName(CFG.PAY);
+  var merged = 0, errors = [];
+
+  groups.forEach(function(g) {
+    try {
+      var keepId = (g.keepId || "").toString().trim();
+      var mergeIds = (g.mergeIds || []).map(function(x){ return x.toString().trim(); }).filter(function(x){ return x && x !== keepId; });
+      if (!keepId || !mergeIds.length) return;
+      var mergeSet = {};
+      mergeIds.forEach(function(id){ mergeSet[id] = true; });
+
+      // Re-point invoices (column C = custId).
+      if (invWs && invWs.getLastRow() > 3) {
+        var invData = invWs.getRange(4, 3, invWs.getLastRow() - 3, 1).getValues();
+        for (var i = 0; i < invData.length; i++) {
+          var v = invData[i][0] ? invData[i][0].toString().trim() : "";
+          if (mergeSet[v]) invWs.getRange(4 + i, 3).setValue(keepId);
+        }
+      }
+
+      // Re-point customer payments (column D = partyId).
+      if (payWs && payWs.getLastRow() > 3) {
+        var payData = payWs.getRange(4, 4, payWs.getLastRow() - 3, 1).getValues();
+        for (var j = 0; j < payData.length; j++) {
+          var pv = payData[j][0] ? payData[j][0].toString().trim() : "";
+          if (mergeSet[pv]) payWs.getRange(4 + j, 4).setValue(keepId);
+        }
+      }
+
+      // Remove the duplicate AR ledger rows (bottom-up so row indices stay valid).
+      if (arWs && arWs.getLastRow() > 3) {
+        var arData = arWs.getRange(4, 1, arWs.getLastRow() - 3, 1).getValues();
+        for (var k = arData.length - 1; k >= 0; k--) {
+          var av = arData[k][0] ? arData[k][0].toString().trim() : "";
+          if (mergeSet[av]) arWs.deleteRow(4 + k);
+        }
+      }
+
+      // Remove the duplicate Customers rows (bottom-up so row indices stay valid).
+      if (custWs && custWs.getLastRow() > 3) {
+        var custData = custWs.getRange(4, 1, custWs.getLastRow() - 3, 1).getValues();
+        for (var m = custData.length - 1; m >= 0; m--) {
+          var cv = custData[m][0] ? custData[m][0].toString().trim() : "";
+          if (mergeSet[cv]) { custWs.deleteRow(4 + m); merged++; }
+        }
+      }
+
+      _ensureCustomerInAR(ss, keepId);
+      _recalcAR(ss, keepId);
+    } catch (e) {
+      errors.push((g.keepId || "?") + ": " + e.message);
+    }
+  });
+
+  return { merged: merged, errors: errors };
 }
 
 function _getNextCustomerId(ss) {

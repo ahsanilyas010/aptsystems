@@ -751,7 +751,54 @@ function CrmApp({ user, onLogout }) {
 
   // ── CUSTOMERS ─────────────────────────────────────────────
   const Customers = () => {
-    const fil=customers.filter(c=>!search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase()));
+    const [hideDupes, setHideDupes] = useState(true);
+    // Two riders syncing the same shop (or repeated manual adds) can leave duplicate Sheets rows.
+    // We only collapse them in this view — nothing is deleted from the sheet, so existing invoices
+    // / AR balances tied to either row stay intact. Group key = name + phone (fallback name + area).
+    const custKey = (c)=>{ const n=normTxt(c.name), p=digitsOnly(c.phone); return p ? n+"|"+p : n+"|"+normTxt(c.area); };
+    const dupInfo = useMemo(()=>{
+      const byKey={};
+      customers.forEach(c=>{ const k=custKey(c); if(!normTxt(c.name)) return; (byKey[k]=byKey[k]||[]).push(c); });
+      const dupIds=new Set(), groupSize={}, groups=[];
+      Object.values(byKey).forEach(arr=>{
+        if(arr.length<2) return;
+        // Representative: prefer whichever row already has invoices/AR history, else the lowest id.
+        const sorted=[...arr].sort((a,b)=>{
+          const ai=invoices.filter(i=>i.custId===a.id).length, bi=invoices.filter(i=>i.custId===b.id).length;
+          if(ai!==bi) return bi-ai;
+          return String(a.id).localeCompare(String(b.id));
+        });
+        const rep=sorted[0];
+        groupSize[rep.id]=arr.length;
+        const mergeIds=arr.filter(c=>c.id!==rep.id).map(c=>c.id);
+        mergeIds.forEach(id=>dupIds.add(id));
+        groups.push({ keepId: rep.id, mergeIds });
+      });
+      return { dupIds, groupSize, groups };
+    },[customers, invoices]);
+    const [merging, setMerging] = useState(false);
+    const mergeDuplicates = async () => {
+      if(!dupInfo.groups.length) return;
+      if(!confirm(`Merge ${dupInfo.dupIds.size} duplicate customer row(s) into ${dupInfo.groups.length} record(s)?\n\nInvoices and payments on the duplicates will be moved to the kept record, and the duplicate Sheet rows will be removed. This cannot be undone.`)) return;
+      setMerging(true);
+      try {
+        await gasPost("merge_customers",{groups:dupInfo.groups});
+        // Stores synced to a merged-away customer id need to point at the surviving one.
+        const target={};
+        dupInfo.groups.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
+        for(const s of sbData.stores){
+          if(s.gas_customer_id && target[s.gas_customer_id]){
+            try{ await sbPost("update_store",{id:s.id,gas_customer_id:target[s.gas_customer_id]}); }catch{/* non-fatal */}
+          }
+        }
+        notify(`✅ Merged ${dupInfo.dupIds.size} duplicate customer(s)`);
+        await loadData(true); await loadSupabase(true);
+      } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
+    };
+    const fil=customers.filter(c=>{
+      if(hideDupes && dupInfo.dupIds.has(c.id)) return false;
+      return !search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase());
+    });
     return (
       <div>
         <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
@@ -760,6 +807,8 @@ function CrmApp({ user, onLogout }) {
             <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:G.muted}}>🔍</span>
           </div>
           <Btn sm onClick={()=>setModal({t:"addCustomer"})}>+ Add Store</Btn>
+          {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
+          {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
           {fil.map(c=>{
@@ -768,7 +817,7 @@ function CrmApp({ user, onLogout }) {
             return (
               <div key={c.id} onClick={()=>setModal({t:"viewCustomer",d:c})} style={{background:G.card,borderRadius:11,padding:16,boxShadow:"0 2px 10px rgba(26,92,32,0.07)",borderTop:`3px solid ${G.mid}`,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                  <div><div style={{fontWeight:800,fontSize:13,color:G.ink,marginBottom:2}}>{c.name}</div><div style={{fontSize:10,color:G.muted}}>{c.area} · {c.city}</div></div>
+                  <div><div style={{fontWeight:800,fontSize:13,color:G.ink,marginBottom:2}}>{c.name}{dupInfo.groupSize[c.id]>1&&<span title="duplicate customer rows merged into this one" style={{marginLeft:6,fontSize:9,color:G.amber,fontWeight:800}}>×{dupInfo.groupSize[c.id]}</span>}</div><div style={{fontSize:10,color:G.muted}}>{c.area} · {c.city}</div></div>
                   <span style={{fontSize:10,fontWeight:700,color:G.muted,background:G.pale,padding:"2px 6px",borderRadius:6,alignSelf:"flex-start"}}>{c.id}</span>
                 </div>
                 <div style={{fontSize:10,color:G.muted,marginBottom:10}}>📞 {c.phone||"—"}</div>
@@ -783,6 +832,7 @@ function CrmApp({ user, onLogout }) {
               </div>
             );
           })}
+          {fil.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12,gridColumn:"1/-1"}}>No customers found</div>}
         </div>
       </div>
     );
