@@ -909,7 +909,7 @@ function CrmApp({ user, onLogout }) {
     <div>
       <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
         <Btn sm onClick={()=>setModal({t:"newPurchase"})}>+ New Purchase</Btn>
-        <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 AP Payment</Btn>
+        <Btn sm v="secondary" onClick={()=>setModal({t:"vendorPayment"})}>💳 AP Payment</Btn>
         <Btn sm v="secondary" onClick={()=>exportCsv("purchases.csv",purchases,[["id","PO ID"],["date","Date"],["vendor","Vendor"],["total","Total"],["paid","Paid"],["notes","Notes"]])}>⬇ Export</Btn>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:12}}>
@@ -1020,17 +1020,61 @@ function CrmApp({ user, onLogout }) {
           </div>
         ))}
       </div>
+
+      {/* Outstanding invoices — the primary thing the user needs to see in AR */}
+      {unpaidInv.length>0&&(
+        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{background:G.amber,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:G.white,fontWeight:700,fontSize:12}}>📋 Outstanding Invoices ({unpaidInv.length})</span>
+            <Btn sm onClick={()=>setModal({t:"recordPayment"})} style={{background:"rgba(255,255,255,0.2)",color:G.white,border:"none"}}>💳 Collect Payment</Btn>
+          </div>
+          <TblWrap compact heads={["Invoice","Date","Customer","Total","Status","Action"]}
+            rows={unpaidInv.map(inv=>[
+              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
+              <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
+              <span style={{fontWeight:600,fontSize:11}}>{inv.custName}</span>,
+              <span style={{fontWeight:800,color:G.red,fontSize:11}}>{fmt(inv.total)}</span>,
+              <Badge text={inv.status}/>,
+              <Btn sm v="success" onClick={()=>setModal({t:"recordPayment",d:{custId:inv.custId,invId:inv.id}})}>Collect</Btn>,
+            ])}
+          />
+        </div>
+      )}
+      {unpaidInv.length===0&&totalAR===0&&<div style={{background:G.pale,borderRadius:9,padding:"12px 16px",fontSize:12,color:G.mid,fontWeight:600}}>✅ All invoices collected — AR is clear</div>}
+
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <div style={{background:G.mid,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>AR Ledger</span></div>
+          <div style={{background:G.mid,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:G.white,fontWeight:700,fontSize:12}}>AR Ledger (by Customer)</span>
+            <Btn sm onClick={()=>setModal({t:"recordPayment"})} style={{background:"rgba(255,255,255,0.15)",color:G.white,border:"none",fontSize:10}}>💳 Collect</Btn>
+          </div>
           <TblWrap compact heads={["Customer","Billed","Paid","Balance","Status"]}
-            rows={ar.map(r=>[<div><div style={{fontWeight:700,fontSize:11}}>{r.custName}</div><div style={{fontSize:9,color:G.muted}}>{r.custId}</div></div>,<span style={{fontSize:11,fontWeight:600}}>{fmt(r.totalBilled)}</span>,<span style={{color:G.mid,fontWeight:600,fontSize:11}}>{fmt(r.totalPaid)}</span>,<span style={{fontWeight:800,color:r.balance>0?G.red:G.mid,fontSize:11}}>{fmt(r.balance)}</span>,<Badge text={r.status||"Active"}/>])}
+            rows={ar.filter(r=>r.totalBilled>0).map(r=>[
+              <div><div style={{fontWeight:700,fontSize:11}}>{r.custName}</div><div style={{fontSize:9,color:G.muted}}>{r.custId}</div></div>,
+              <span style={{fontSize:11,fontWeight:600}}>{fmt(r.totalBilled)}</span>,
+              <span style={{color:G.mid,fontWeight:600,fontSize:11}}>{fmt(r.totalPaid)}</span>,
+              <span style={{fontWeight:800,color:r.balance>0?G.red:G.mid,fontSize:11}}>{fmt(r.balance)}</span>,
+              r.balance>0
+                ?<Btn sm v="success" onClick={()=>setModal({t:"recordPayment",d:{custId:r.custId}})}>Collect</Btn>
+                :<Badge text="Settled"/>,
+            ])}
           />
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <div style={{background:G.purple,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>AP Ledger</span></div>
-          <TblWrap compact heads={["Vendor","Ordered","Paid","Outstanding"]}
-            rows={ap.map(r=>[<div><div style={{fontWeight:700,fontSize:11}}>{r.vendorName}</div><div style={{fontSize:9,color:G.muted}}>{r.vendorId}</div></div>,<span style={{fontWeight:600,fontSize:11}}>{fmt(r.totalOrdered)}</span>,<span style={{color:G.mid,fontWeight:600,fontSize:11}}>{fmt(r.totalPaid)}</span>,<span style={{fontWeight:800,color:r.balance>0?G.red:G.mid,fontSize:11}}>{fmt(r.balance)}</span>])}
+          <div style={{background:G.purple,padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:G.white,fontWeight:700,fontSize:12}}>AP Ledger (by Vendor)</span>
+            <Btn sm onClick={()=>setModal({t:"vendorPayment"})} style={{background:"rgba(255,255,255,0.15)",color:G.white,border:"none",fontSize:10}}>💳 Pay</Btn>
+          </div>
+          <TblWrap compact heads={["Vendor","Ordered","Paid","Outstanding","Action"]}
+            rows={ap.filter(r=>r.totalOrdered>0).map(r=>[
+              <div><div style={{fontWeight:700,fontSize:11}}>{r.vendorName}</div><div style={{fontSize:9,color:G.muted}}>{r.vendorId}</div></div>,
+              <span style={{fontWeight:600,fontSize:11}}>{fmt(r.totalOrdered)}</span>,
+              <span style={{color:G.mid,fontWeight:600,fontSize:11}}>{fmt(r.totalPaid)}</span>,
+              <span style={{fontWeight:800,color:r.balance>0?G.red:G.mid,fontSize:11}}>{fmt(r.balance)}</span>,
+              r.balance>0
+                ?<Btn sm v="danger" onClick={()=>setModal({t:"vendorPayment",d:{vendorId:r.vendorId}})}>Pay</Btn>
+                :<Badge text="Settled"/>,
+            ])}
           />
         </div>
       </div>
@@ -1265,26 +1309,34 @@ function CrmApp({ user, onLogout }) {
       );
     }
 
-    // ── Record Payment ────────────────────────────────────────
+    // ── Record Payment (AR — customer receipts only) ──────────
     if(modal.t==="recordPayment"){
       const PayForm=()=>{
         const init=modal.d||{};
         const [f,setF]=useState({date:todayStr(),type:"Received",custId:init.custId||"",invId:init.invId||"",amount:"",method:"Cash",notes:""});
+        const outstanding = ar.find(r=>r.custId===f.custId)?.balance || 0;
+        const remaining   = Math.max(0, outstanding - parseFloat(f.amount||0));
+        const overpaid    = parseFloat(f.amount||0) > outstanding && outstanding > 0;
         return(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              <Sel label="Type" value={f.type} onChange={e=>setF(p=>({...p,type:e.target.value}))}>
-                <option value="Received">Received from Customer</option>
-                <option value="Paid">Made to Vendor</option>
-              </Sel>
               <Inp label="Date" type="date" value={f.date} onChange={e=>setF(p=>({...p,date:e.target.value}))}/>
-              <Sel label="Customer" value={f.custId} onChange={e=>setF(p=>({...p,custId:e.target.value,invId:""}))}>
+              <Sel label="Customer" value={f.custId} onChange={e=>{
+                const cid=e.target.value;
+                const bal=ar.find(r=>r.custId===cid)?.balance||0;
+                setF(p=>({...p,custId:cid,invId:"",amount:bal>0?String(Math.round(bal)):""}));
+              }}>
                 <option value="">— Select Customer —</option>
-                {customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                {customers.map(c=><option key={c.id} value={c.id}>{c.name}{ar.find(r=>r.custId===c.id)?.balance>0?" ⚠":"" }</option>)}
               </Sel>
-              <Sel label="Against Invoice" value={f.invId} onChange={e=>setF(p=>({...p,invId:e.target.value}))}>
+              {f.custId&&<div style={{gridColumn:"1/-1",background:outstanding>0?G.pink:G.pale,borderRadius:8,padding:"8px 12px",fontSize:11}}>
+                <span style={{fontWeight:700,color:outstanding>0?G.red:G.mid}}>Outstanding: {fmt(outstanding)}</span>
+                {f.amount&&outstanding>0&&<span style={{marginLeft:14,color:remaining>0?G.amber:G.mid,fontWeight:600}}> → After payment: {fmt(remaining)}</span>}
+                {overpaid&&<span style={{marginLeft:10,color:G.red,fontWeight:700}}>⚠ Overpayment of {fmt(parseFloat(f.amount||0)-outstanding)}</span>}
+              </div>}
+              <Sel label="Against Invoice (optional)" value={f.invId} onChange={e=>setF(p=>({...p,invId:e.target.value}))}>
                 <option value="">— No specific invoice —</option>
-                {invoices.filter(i=>i.custId===f.custId&&i.status!=="Paid").map(i=><option key={i.id} value={i.id}>{i.id} — {fmt(i.total)}</option>)}
+                {invoices.filter(i=>i.custId===f.custId&&i.status!=="Paid").map(i=><option key={i.id} value={i.id}>{i.id} — {fmt(i.total)} ({i.status})</option>)}
               </Sel>
               <Inp label="Amount (PKR)" type="number" value={f.amount} onChange={e=>setF(p=>({...p,amount:e.target.value}))} placeholder="0"/>
               <Sel label="Method" value={f.method} onChange={e=>setF(p=>({...p,method:e.target.value}))}>
@@ -1294,12 +1346,53 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>savePayment(f)}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>savePayment({...f,type:"Received"})}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="💳 Record Payment → Google Sheet" onClose={closeModal}><PayForm/></Modal>;
+      return <Modal title="💳 Collect Payment (AR) → Google Sheet" onClose={closeModal}><PayForm/></Modal>;
+    }
+
+    // ── Vendor Payment (AP — vendor payments only) ────────────
+    if(modal.t==="vendorPayment"){
+      const VenPayForm=()=>{
+        const init=modal.d||{};
+        const [f,setF]=useState({date:todayStr(),vendorId:init.vendorId||"",amount:"",method:"Cash",notes:""});
+        const outstanding = ap.find(r=>r.vendorId===f.vendorId)?.balance || 0;
+        const remaining   = Math.max(0, outstanding - parseFloat(f.amount||0));
+        const overpaid    = parseFloat(f.amount||0) > outstanding && outstanding > 0;
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Inp label="Date" type="date" value={f.date} onChange={e=>setF(p=>({...p,date:e.target.value}))}/>
+              <Sel label="Vendor" value={f.vendorId} onChange={e=>{
+                const vid=e.target.value;
+                const bal=ap.find(r=>r.vendorId===vid)?.balance||0;
+                setF(p=>({...p,vendorId:vid,amount:bal>0?String(Math.round(bal)):""}));
+              }}>
+                <option value="">— Select Vendor —</option>
+                {vendors.map(v=><option key={v.id} value={v.id}>{v.name}{ap.find(r=>r.vendorId===v.id)?.balance>0?" ⚠":""}</option>)}
+              </Sel>
+              {f.vendorId&&<div style={{gridColumn:"1/-1",background:outstanding>0?G.pink:G.pale,borderRadius:8,padding:"8px 12px",fontSize:11}}>
+                <span style={{fontWeight:700,color:outstanding>0?G.red:G.mid}}>AP Outstanding: {fmt(outstanding)}</span>
+                {f.amount&&outstanding>0&&<span style={{marginLeft:14,color:remaining>0?G.amber:G.mid,fontWeight:600}}> → After payment: {fmt(remaining)}</span>}
+                {overpaid&&<span style={{marginLeft:10,color:G.red,fontWeight:700}}>⚠ Overpayment of {fmt(parseFloat(f.amount||0)-outstanding)}</span>}
+              </div>}
+              <Inp label="Amount (PKR)" type="number" value={f.amount} onChange={e=>setF(p=>({...p,amount:e.target.value}))} placeholder="0"/>
+              <Sel label="Method" value={f.method} onChange={e=>setF(p=>({...p,method:e.target.value}))}>
+                {["Cash","Bank Transfer","EasyPaisa","JazzCash","Cheque"].map(m=><option key={m}>{m}</option>)}
+              </Sel>
+            </div>
+            <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn v="success" onClick={()=>savePayment({...f,type:"Paid",vendorId:f.vendorId})}>💾 Save to Sheet</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title="💳 Vendor Payment (AP) → Google Sheet" onClose={closeModal}><VenPayForm/></Modal>;
     }
 
     // ── Add Expense ───────────────────────────────────────────
