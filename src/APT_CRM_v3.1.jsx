@@ -28,6 +28,7 @@ const googleProvider = new GoogleAuthProvider();
 const ALLOWED_EMAILS = [
   "ahsanilyas35@gmail.com",
   "tahafayyazlp@gmail.com",
+  "mamoonaasim01@gmail.com",
 ];
 
 // Robust fetch helper that handles HTML/non-JSON responses gracefully
