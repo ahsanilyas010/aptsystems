@@ -1422,16 +1422,47 @@ function _getNextCustomerId(ss) {
 
   var data = ws.getRange(4, 1, ws.getLastRow() - 3, 1).getValues();
   var max = 0;
+  var rowCount = 0;
 
   data.forEach(function(r) {
-    var v = r[0] ? r[0].toString().trim() : "";
-    if (v.match(/^C-\d+$/i)) {
-      var n = parseInt(v.replace(/^C-/i, "")) || 0;
+    var raw = r[0];
+    if (raw === null || raw === undefined || raw === "") return;
+    rowCount++;
+    var v = raw.toString().trim();
+
+    // Strategy 1: C-001, C-089, C-0001 — same approach as _getNextId
+    if (v.toUpperCase().startsWith("C-")) {
+      var n = parseInt(v.split("-").pop()) || 0;
+      if (n > max) max = n;
+      return;
+    }
+    // Strategy 2: pure numeric IDs stored as numbers (Sheets custom format)
+    if (/^\d+$/.test(v)) {
+      var n = parseInt(v) || 0;
       if (n > max) max = n;
     }
   });
 
+  // Fallback: if no C-style IDs found at all, base on row count
+  if (max === 0 && rowCount > 0) max = rowCount;
+
+  Logger.log("_getNextCustomerId: rowCount=" + rowCount + " max=" + max + " → C-" + String(max + 1).padStart(4, "0"));
   return "C-" + String(max + 1).padStart(4, "0");
+}
+
+// Run this function in Apps Script editor to verify customer ID generation
+function testNextCustomerId() {
+  var ss = _getSs();
+  var nextId = _getNextCustomerId(ss);
+  Logger.log("Next Customer ID will be: " + nextId);
+  // Also log first 5 raw values from col A to diagnose format issues
+  var ws = ss.getSheetByName(CFG.CUST);
+  if (ws && ws.getLastRow() >= 4) {
+    var sample = ws.getRange(4, 1, Math.min(5, ws.getLastRow() - 3), 1).getValues();
+    sample.forEach(function(r, i) {
+      Logger.log("Row " + (4 + i) + " col A: [" + typeof r[0] + "] " + JSON.stringify(r[0]));
+    });
+  }
 }
 
 // ══════════════════════════════════════════════════════════
