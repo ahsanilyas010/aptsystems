@@ -31,6 +31,24 @@ const ALLOWED_EMAILS = [
   "mamoonaasim01@gmail.com",
 ];
 
+const KNOWN_DUPLICATE_GROUPS = [
+  { keepId: "C-004", mergeIds: ["C-072"] },
+  { keepId: "C-039", mergeIds: ["C-073"] },
+  { keepId: "C-069", mergeIds: ["C-074"] },
+  { keepId: "C-062", mergeIds: ["C-075"] },
+  { keepId: "C-005", mergeIds: ["C-076"] },
+  { keepId: "C-008", mergeIds: ["C-079"] },
+  { keepId: "C-009", mergeIds: ["C-081"] },
+  { keepId: "C-010", mergeIds: ["C-082"] },
+  { keepId: "C-011", mergeIds: ["C-083"] },
+  { keepId: "C-046", mergeIds: ["C-084"] },
+  { keepId: "C-047", mergeIds: ["C-085"] },
+  { keepId: "C-020", mergeIds: ["C-086"] },
+  { keepId: "C-031", mergeIds: ["C-087"] },
+  { keepId: "C-053", mergeIds: ["C-088"] },
+  { keepId: "C-068", mergeIds: ["C-089"] },
+];
+
 // Robust fetch helper that handles HTML/non-JSON responses gracefully
 async function safeGasFetch(url, options) {
   const res = await fetch(url, options);
@@ -858,6 +876,33 @@ function CrmApp({ user, onLogout }) {
         }
       } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
     };
+    const removeKnownDuplicates = async () => {
+      if(!confirm(`Remove 15 known duplicate customer rows?\n\nInvoices/payments on duplicates will be re-pointed to the kept records and the duplicate Sheet rows deleted. This action can be undone.`)) return;
+      setMerging(true);
+      try {
+        const result = await gasPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
+        const target={};
+        KNOWN_DUPLICATE_GROUPS.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
+        const storeRepoints=[];
+        for(const s of sbData.stores){
+          if(s.gas_customer_id && target[s.gas_customer_id]){
+            storeRepoints.push({id:s.id,from:s.gas_customer_id,to:target[s.gas_customer_id]});
+            try{ await sbPost("update_store",{id:s.id,gas_customer_id:target[s.gas_customer_id]}); }catch{/* non-fatal */}
+          }
+        }
+        notify(`✅ Removed 15 duplicate customer rows`);
+        await loadData(true); await loadSupabase(true);
+        if(result?.snapshot?.groups?.length){
+          pushUndo(`Removed 15 duplicate customers`, async () => {
+            await gasPost("undo_merge_customers", result.snapshot);
+            for(const r of storeRepoints){
+              try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
+            }
+            await loadData(true); await loadSupabase(true);
+          });
+        }
+      } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
+    };
     const fil=customers.filter(c=>{
       if(hideDupes && dupInfo.dupIds.has(c.id)) return false;
       return !search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase());
@@ -872,6 +917,7 @@ function CrmApp({ user, onLogout }) {
           <Btn sm onClick={()=>setModal({t:"addCustomer"})}>+ Add Store</Btn>
           {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
           {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
+          {user?.email==="ahsanilyas35@gmail.com"&&<Btn sm v="danger" disabled={merging} onClick={removeKnownDuplicates}>{merging?"⏳ Removing…":"🗑 Remove 15 Known Duplicates"}</Btn>}
           <Btn sm v="secondary" onClick={()=>exportCsv("customers.csv",fil,[["id","ID"],["name","Name"],["area","Area"],["city","City"],["phone","Phone"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
