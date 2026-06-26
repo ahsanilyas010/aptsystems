@@ -120,6 +120,17 @@ const G = {
 const fmt  = n => "PKR " + Math.round(n || 0).toLocaleString("en-PK");
 const pct  = (a, b) => b ? ((a / b) * 100).toFixed(1) + "%" : "—";
 const todayStr = () => new Date().toISOString().split("T")[0];
+// Invoice aging: days outstanding since invoice date. Prefers the GAS-computed
+// ageDays field but falls back to computing locally from the date string.
+const ageDaysOf = inv => {
+  if (inv && inv.ageDays != null) return inv.ageDays;
+  if (!inv || !inv.date) return null;
+  const d = new Date(String(inv.date).substring(0, 10));
+  if (isNaN(d.getTime())) return null;
+  const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
+  return diff < 0 ? 0 : diff;
+};
+const ageColor = a => a == null ? G.muted : a > 60 ? G.red : a > 30 ? G.amber : G.light;
 // Normalizers for fuzzy matching store/customer/product names across systems.
 const normTxt = s => (s || "").toString().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const digitsOnly = s => (s || "").toString().replace(/\D+/g, "");
@@ -788,7 +799,7 @@ function CrmApp({ user, onLogout }) {
           ))}
           <Btn sm onClick={()=>setModal({t:"newInvoice"})}>+ New Invoice</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 Payment</Btn>
-          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"]])}>⬇ Export</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
           {[{l:"Total Invoiced",v:fmt(totalRevenue),c:G.mid},{l:"Collected",v:fmt(totalReceived),c:G.light},{l:"Outstanding",v:fmt(totalAR),c:G.amber},{l:"Invoices",v:invoices.length,c:G.dark}].map(s=>(
@@ -798,8 +809,27 @@ function CrmApp({ user, onLogout }) {
             </div>
           ))}
         </div>
+        {(()=>{
+          const open=invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial");
+          if(!open.length) return null;
+          const buckets=[{l:"Current (0–30d)",c:G.light,v:0},{l:"31–60 days",c:G.amber,v:0},{l:"61–90 days",c:G.red,v:0},{l:"90+ days",c:G.dark,v:0}];
+          open.forEach(i=>{const a=ageDaysOf(i)||0; if(a<=30)buckets[0].v+=i.total; else if(a<=60)buckets[1].v+=i.total; else if(a<=90)buckets[2].v+=i.total; else buckets[3].v+=i.total;});
+          return(
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:G.muted,fontWeight:800,textTransform:"uppercase",marginBottom:6,letterSpacing:0.5}}>Outstanding by Age</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+                {buckets.map(b=>(
+                  <div key={b.l} style={{background:G.card,borderRadius:9,padding:"10px 14px",boxShadow:"0 1px 8px rgba(26,92,32,0.07)",borderLeft:`4px solid ${b.c}`}}>
+                    <div style={{fontSize:9,color:G.muted,fontWeight:700,textTransform:"uppercase",marginBottom:4}}>{b.l}</div>
+                    <div style={{fontSize:15,fontWeight:800,color:b.c}}>{fmt(b.v)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Invoice","Date","Customer","Total","Status","Terms","PDF","Actions"]}
+          <TblWrap compact heads={["Invoice","Date","Customer","Total","Status","Terms","Age","PDF","Actions"]}
             rows={fil.map(inv=>[
               <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
               <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
@@ -807,6 +837,9 @@ function CrmApp({ user, onLogout }) {
               <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
               <Badge text={inv.status}/>,
               <span style={{fontSize:10,color:G.muted}}>{inv.payTerms}</span>,
+              (inv.status==="Paid"||inv.status==="VOIDED"||ageDaysOf(inv)==null)
+                ?<span style={{fontSize:10,color:G.muted}}>—</span>
+                :<span style={{fontSize:10,fontWeight:800,color:ageColor(ageDaysOf(inv))}}>{ageDaysOf(inv)}d</span>,
               <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
               <div style={{display:"flex",gap:4}}>
                 <Btn sm v="ghost" onClick={()=>setModal({t:"viewInvoice",d:inv})}>View</Btn>
@@ -1324,7 +1357,7 @@ function CrmApp({ user, onLogout }) {
       return(
         <Modal title={`Invoice — ${inv.id}`} onClose={closeModal} wide>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
-            {[{l:"Invoice #",v:inv.id},{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
+            {[{l:"Invoice #",v:inv.id},{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Age",v:(inv.status==="Paid"||inv.status==="VOIDED"||ageDaysOf(inv)==null)?"—":`${ageDaysOf(inv)} days`},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
               <div key={r.l} style={{background:G.pale,borderRadius:7,padding:"8px 11px"}}>
                 <div style={{fontSize:8,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:2}}>{r.l}</div>
                 <div style={{fontSize:12,fontWeight:600,color:G.ink}}>{r.v}</div>

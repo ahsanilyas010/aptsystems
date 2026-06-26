@@ -980,6 +980,25 @@ function _fmtDate(val) {
   return val.toString().substring(0, 10);
 }
 
+// Whole days elapsed from the given date to today (invoice aging).
+// Accepts a Date object or a string. Returns null if unparseable,
+// 0 for today or any future date (never negative).
+function _daysSince(val) {
+  if (val === null || val === undefined || val === "") return null;
+  var d;
+  if (val instanceof Date) {
+    d = val;
+  } else {
+    d = new Date(val.toString().substring(0, 10));
+  }
+  if (!d || isNaN(d.getTime())) return null;
+  var now = new Date();
+  var d0 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  var t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var diff = Math.floor((t0.getTime() - d0.getTime()) / 86400000);
+  return diff < 0 ? 0 : diff;
+}
+
 function _apiGetLastDataRow(ws, col) {
   col = col || 1;
   var total = ws.getLastRow();
@@ -1785,7 +1804,7 @@ function _readInvoices(ss, limit) {
   if (!ws || ws.getLastRow() < 4) return [];
   
   var hm = _headerMap(ws, ["invoice", "date", "customer", "total", "status", "terms", "createdby"]);
-  var c = {
+  var mapped = {
     id:        _col(hm, ["invoiceid", "invid", "invoice", "id"], 0),
     date:      _col(hm, ["date"], 1),
     custId:    _col(hm, ["customerid", "custid"], 2),
@@ -1795,26 +1814,43 @@ function _readInvoices(ss, limit) {
     payTerms:  _col(hm, ["payterms", "paymentterms", "terms"], 6),
     createdBy: _col(hm, ["createdby", "creator", "by"], 7)
   };
+  // Canonical layout used as a fallback when header detection misfires.
+  var fixed = { id: 0, date: 1, custId: 2, custName: 3, total: 4, status: 5, payTerms: 6, createdBy: 7 };
 
   var lastRow = ws.getLastRow();
   var startRow = Math.max(4, lastRow - (limit || 300) + 1);
   var numRows = lastRow - startRow + 1;
   var data = ws.getRange(startRow, 1, numRows, ws.getLastColumn()).getValues();
-  var out = [];
 
-  data.forEach(function(r) {
-    if (!r[c.id]) return;
-    out.push({
-      id: r[c.id].toString().trim(),
-      date: _fmtDate(r[c.date]),
-      custId: r[c.custId] ? r[c.custId].toString().trim() : "",
-      custName: r[c.custName] ? r[c.custName].toString().trim() : "",
-      total: parseFloat(r[c.total]) || 0,
-      status: r[c.status] ? r[c.status].toString().trim() : "Unpaid",
-      payTerms: r[c.payTerms] ? r[c.payTerms].toString().trim() : "COD",
-      createdBy: r[c.createdBy] ? r[c.createdBy].toString().trim() : ""
+  function build(c) {
+    var rows = [];
+    data.forEach(function(r) {
+      if (r[c.id] === null || r[c.id] === undefined || r[c.id].toString().trim() === "") return;
+      rows.push({
+        id: r[c.id].toString().trim(),
+        date: _fmtDate(r[c.date]),
+        custId: r[c.custId] ? r[c.custId].toString().trim() : "",
+        custName: r[c.custName] ? r[c.custName].toString().trim() : "",
+        total: parseFloat(r[c.total]) || 0,
+        status: r[c.status] ? r[c.status].toString().trim() : "Unpaid",
+        payTerms: r[c.payTerms] ? r[c.payTerms].toString().trim() : "COD",
+        createdBy: r[c.createdBy] ? r[c.createdBy].toString().trim() : "",
+        ageDays: _daysSince(r[c.date])
+      });
     });
-  });
+    return rows;
+  }
+
+  var out = build(mapped);
+  // FIX: if header-mapped columns produced no invoices but the sheet clearly
+  // has data rows, the header scan picked the wrong id column and silently
+  // skipped every row. Retry with the canonical fixed layout so invoices load.
+  if (out.length === 0) {
+    var anyData = data.some(function(r) {
+      return r.join("").toString().trim() !== "";
+    });
+    if (anyData) out = build(fixed);
+  }
 
   out.reverse();
   return out;
