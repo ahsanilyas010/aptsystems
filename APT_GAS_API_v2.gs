@@ -1642,28 +1642,18 @@ function _readProducts(ss) {
 function _readInvoices(ss, limit) {
   ss = _getSs(ss);
   if (!ss) return [];
-
+  
   var ws = ss.getSheetByName(CFG.INV_H);
   if (!ws || ws.getLastRow() < 4) return [];
-
+  
   var lastRow = ws.getLastRow();
   var startRow = Math.max(4, lastRow - (limit || 300) + 1);
   var numRows = lastRow - startRow + 1;
   var data = ws.getRange(startRow, 1, numRows, 8).getValues();
   var out = [];
-  var now = new Date();
-
+  
   data.forEach(function(r) {
     if (!r[0]) return;
-
-    // Compute age in days since invoice date
-    var rawDate = r[1];
-    var invDate = rawDate instanceof Date ? rawDate : (rawDate ? new Date(rawDate) : null);
-    var ageDays = 0;
-    if (invDate && !isNaN(invDate.getTime())) {
-      ageDays = Math.max(0, Math.floor((now.getTime() - invDate.getTime()) / (24 * 60 * 60 * 1000)));
-    }
-
     out.push({
       id: r[0].toString().trim(),
       date: _fmtDate(r[1]),
@@ -1672,11 +1662,10 @@ function _readInvoices(ss, limit) {
       total: parseFloat(r[4]) || 0,
       status: r[5] ? r[5].toString().trim() : "Unpaid",
       payTerms: r[6] ? r[6].toString().trim() : "COD",
-      createdBy: r[7] ? r[7].toString().trim() : "",
-      ageDays: ageDays
+      createdBy: r[7] ? r[7].toString().trim() : ""
     });
   });
-
+  
   out.reverse();
   return out;
 }
