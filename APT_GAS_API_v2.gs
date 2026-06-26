@@ -719,6 +719,9 @@ function doPost(e) {
         invH.getRange(rowIdx, 5).setValue(total);
         invH.getRange(rowIdx, 7).setValue(d.payTerms || "COD");
 
+        // Capture the pre-edit line items so we can reverse their stock effect.
+        var oldItems = _readInvoiceItems(ss, invId);
+
         // Replace line items
         var invI = ss.getSheetByName(CFG.INV_I);
         if (invI) {
@@ -738,6 +741,10 @@ function doPost(e) {
           });
           invI.getRange(iRow, 1, itemRows.length, 7).setValues(itemRows);
         }
+
+        // Reverse the old line items' stock effect, then apply the new ones.
+        _applyInventoryDelta(ss, oldItems, -1);
+        _applyInventoryDelta(ss, d.items, 1);
 
         // Refresh status against recorded payments + AR balances
         _updateInvoiceStatus(ss, invId, 0);
@@ -772,6 +779,18 @@ function doPost(e) {
           id: invId,
           pdfUrl: pdfUrl
         });
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  ADJUST STOCK — manual goods receipt / correction
+      //  body.data = { pid, delta, reason }
+      // ══════════════════════════════════════════════════════
+      case "adjust_stock": {
+        var d = body.data;
+        if (!d || !d.pid) return _apiErr("Missing product id");
+        if (d.delta === undefined || d.delta === null || isNaN(parseFloat(d.delta))) return _apiErr("Missing/invalid delta");
+        var res = _adjustStock(ss, d.pid, parseFloat(d.delta));
+        return _apiOk(res);
       }
 
       // ══════════════════════════════════════════════════════
@@ -1105,6 +1124,7 @@ function _writeInvoiceToSheet(ss, invId, d, total) {
 
   _ensureCustomerInAR(ss, d.custId);
   _recalcAR(ss, d.custId);
+  _applyInventoryDelta(ss, d.items, 1);
   return "Invoice " + invId + " saved";
 }
 
@@ -1423,8 +1443,13 @@ function voidInvoice(ss, invId) {
   var data = ws.getDataRange().getValues();
   for (var i = 3; i < data.length; i++) {
     if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+      var alreadyVoid = (data[i][5] || "").toString().trim().toLowerCase() === "voided";
       ws.getRange(i + 1, 5).setValue(0);
       ws.getRange(i + 1, 6).setValue("Voided");
+      // Return the voided invoice's units to stock (only once).
+      if (!alreadyVoid) {
+        _applyInventoryDelta(ss, _readInvoiceItems(ss, invId), -1);
+      }
       return "Invoice " + invId + " voided";
     }
   }
@@ -2121,6 +2146,78 @@ function _readInventory(ss) {
   return out;
 }
 
+// Apply a stock movement for a set of invoice line items against Inventory_List.
+//   dir = +1 → a sale: sold += qty, stock -= qty
+//   dir = -1 → reverse a sale (void / delete / edit): sold -= qty, stock += qty
+// Header-aware; products not present in Inventory_List are logged and skipped
+// so an invoice operation is never blocked by a missing inventory row.
+function _applyInventoryDelta(ss, items, dir) {
+  ss = _getSs(ss);
+  if (!ss || !items || !items.length) return;
+  var ws = ss.getSheetByName(CFG.INV_L);
+  if (!ws || ws.getLastRow() < 4) return;
+
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var cPid  = _col(hm, ["productid", "prodid", "pid", "id"], 0);
+  var cSold = _col(hm, ["sold", "totalsold"], 5);
+  var cStk  = _col(hm, ["currentstock", "stock", "instock", "balance"], 8);
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var index = {};
+  for (var i = 0; i < data.length; i++) {
+    var id = data[i][cPid];
+    if (id !== null && id !== undefined && id.toString().trim() !== "") {
+      index[id.toString().trim().toUpperCase()] = i;
+    }
+  }
+
+  items.forEach(function(it) {
+    var pid = (it.pid || it.product_id || "").toString().trim().toUpperCase();
+    var qty = parseFloat(it.qty != null ? it.qty : it.quantity) || 0;
+    if (!pid || !qty) return;
+    var r = index[pid];
+    if (r === undefined) { Logger.log("_applyInventoryDelta: product not in Inventory_List: " + pid); return; }
+    var rowNum = r + 4;
+    var sold  = parseFloat(data[r][cSold]) || 0;
+    var stock = parseFloat(data[r][cStk]) || 0;
+    ws.getRange(rowNum, cSold + 1).setValue(sold + dir * qty);
+    ws.getRange(rowNum, cStk + 1).setValue(stock - dir * qty);
+  });
+}
+
+// Manual stock adjustment (goods receipt / correction) since CRM purchases
+// don't carry line items. delta > 0 adds stock (and to 'purchased'); delta < 0
+// removes. Returns the new stock level.
+function _adjustStock(ss, pid, delta) {
+  ss = _getSs(ss);
+  if (!ss) throw new Error("Spreadsheet not found");
+  var ws = ss.getSheetByName(CFG.INV_L);
+  if (!ws || ws.getLastRow() < 4) throw new Error("Inventory sheet not found");
+  pid = (pid || "").toString().trim();
+  delta = parseFloat(delta) || 0;
+  if (!pid) throw new Error("Product id required");
+
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var cPid  = _col(hm, ["productid", "prodid", "pid", "id"], 0);
+  var cPur  = _col(hm, ["purchased", "totalpurchased", "bought"], 4);
+  var cStk  = _col(hm, ["currentstock", "stock", "instock", "balance"], 8);
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][cPid] && data[i][cPid].toString().trim().toUpperCase() === pid.toUpperCase()) {
+      var rowNum = i + 4;
+      var stock = (parseFloat(data[i][cStk]) || 0) + delta;
+      ws.getRange(rowNum, cStk + 1).setValue(stock);
+      if (delta > 0) {
+        var purchased = (parseFloat(data[i][cPur]) || 0) + delta;
+        ws.getRange(rowNum, cPur + 1).setValue(purchased);
+      }
+      return { pid: pid, stock: stock };
+    }
+  }
+  throw new Error("Product not found in Inventory_List: " + pid);
+}
+
 function _readDashboard(ss) {
   ss = _getSs(ss);
   if (!ss) {
@@ -2530,11 +2627,28 @@ function _deleteInvoice(ss, invId) {
   ss = _getSs(ss);
   if (!ss) return "Error: Spreadsheet not found";
   
+  // Return units to stock before the rows are gone — but only if the invoice
+  // wasn't already Voided (voiding already reversed it).
+  var wasVoided = false;
+  var sheetHchk = ss.getSheetByName(CFG.INV_H);
+  if (sheetHchk) {
+    var chk = sheetHchk.getDataRange().getValues();
+    for (var ci = 3; ci < chk.length; ci++) {
+      if (chk[ci][0] && chk[ci][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
+        wasVoided = (chk[ci][5] || "").toString().trim().toLowerCase() === "voided";
+        break;
+      }
+    }
+  }
+  if (!wasVoided) {
+    _applyInventoryDelta(ss, _readInvoiceItems(ss, invId), -1);
+  }
+
   var sheetH = ss.getSheetByName(CFG.INV_H);
   if (sheetH) {
     var dataH = sheetH.getDataRange().getValues();
     for (var i = dataH.length - 1; i >= 3; i--) {
-      if (dataH[i][0] && 
+      if (dataH[i][0] &&
           dataH[i][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
         sheetH.deleteRow(i + 1);
       }

@@ -660,6 +660,15 @@ function CrmApp({ user, onLogout }) {
     catch(e) { notify("❌ "+e.message,"err"); }
   };
 
+  const adjustStock = async (d) => {
+    try {
+      const r = await gasPost("adjust_stock",{pid:d.pid,delta:d.delta,reason:d.reason||""});
+      notify(`✅ ${d.pid} stock → ${r.stock}`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
   const savePayment = async (d) => {
     try { await gasPost("save_payment",d); notify("✅ Payment recorded"); closeModal(); await loadData(true); }
     catch(e) { notify("❌ "+e.message,"err"); }
@@ -724,6 +733,10 @@ function CrmApp({ user, onLogout }) {
         </div>
         <Btn sm v="secondary" onClick={()=>loadData(true)}>{syncing?"⏳ Syncing…":"↻ Sync"}</Btn>
       </div>
+      {lowStock.length>0&&<div onClick={()=>setTab("inventory")} style={{background:"#FFF8E1",borderRadius:9,padding:"10px 14px",border:`1.5px solid ${G.amber}`,fontSize:12,fontWeight:700,color:G.amber,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>⚠️ {lowStock.length} product{lowStock.length>1?"s":""} at/below minimum stock — {lowStock.filter(p=>p.stock===0).length} out of stock</span>
+        <span style={{fontSize:11,textDecoration:"underline"}}>View inventory →</span>
+      </div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
         <Kpi label="Total Invoiced"  value={fmt(totalRevenue)}  sub={`${invoices.length} invoices`}    color={G.mid}    trend="up"/>
         <Kpi label="Total Received"  value={fmt(totalReceived)} sub="Cash collected"                   color={G.light}  trend="up"/>
@@ -1172,8 +1185,8 @@ function CrmApp({ user, onLogout }) {
           <Btn sm v="secondary" onClick={()=>exportCsv("inventory.csv",inventory,[["pid","PID"],["pname","Product"],["category","Category"],["cost","Cost"],["purchased","In"],["sold","Sold"],["stock","Stock"],["minStock","Min"]])}>⬇ Export</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["PID","Product","Cat","Cost","In","Sold","Stock","Min","Status"]}
-            rows={inventory.map(p=>{const s=p.stock===0?"Out of Stock":p.stock<=p.minStock?"Low Stock":"Active";return[<span style={{fontWeight:700,fontSize:10,color:G.dark}}>{p.pid}</span>,<span style={{fontWeight:600,fontSize:11}}>{p.pname}</span>,<Badge text={p.category}/>,<span style={{fontSize:10,color:G.muted}}>PKR {p.cost?.toLocaleString()}</span>,<span style={{fontWeight:600}}>{p.purchased}</span>,<span style={{fontWeight:600,color:G.mid}}>{p.sold}</span>,<span style={{fontWeight:800,color:p.stock===0?G.red:p.stock<=p.minStock?G.amber:G.ink}}>{p.stock}</span>,<span style={{fontSize:10,color:G.muted}}>{p.minStock}</span>,<Badge text={s}/>];})}
+          <TblWrap compact heads={["PID","Product","Cat","Cost","In","Sold","Stock","Min","Status","Adjust"]}
+            rows={inventory.map(p=>{const s=p.stock===0?"Out of Stock":p.stock<=p.minStock?"Low Stock":"Active";return[<span style={{fontWeight:700,fontSize:10,color:G.dark}}>{p.pid}</span>,<span style={{fontWeight:600,fontSize:11}}>{p.pname}</span>,<Badge text={p.category}/>,<span style={{fontSize:10,color:G.muted}}>PKR {p.cost?.toLocaleString()}</span>,<span style={{fontWeight:600}}>{p.purchased}</span>,<span style={{fontWeight:600,color:G.mid}}>{p.sold}</span>,<span style={{fontWeight:800,color:p.stock===0?G.red:p.stock<=p.minStock?G.amber:G.ink}}>{p.stock}</span>,<span style={{fontSize:10,color:G.muted}}>{p.minStock}</span>,<Badge text={s}/>,<Btn sm v="ghost" onClick={()=>setModal({t:"adjustStock",d:p})}>± Adjust</Btn>];})}
           />
         </div>
       </div>
@@ -1499,6 +1512,39 @@ function CrmApp({ user, onLogout }) {
         );
       };
       return <Modal title="💸 Add Expense → Google Sheet" onClose={closeModal}><ExpForm/></Modal>;
+    }
+
+    // ── Adjust Stock (goods receipt / correction) ─────────────
+    if(modal.t==="adjustStock"){
+      const p=modal.d;
+      const AdjForm=()=>{
+        const [mode,setMode]=useState("add");
+        const [qty,setQty]=useState("");
+        const [reason,setReason]=useState("");
+        const delta=mode==="add"?Math.abs(+qty||0):-Math.abs(+qty||0);
+        const newStock=(p.stock||0)+delta;
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:G.pale,borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600,color:G.dark}}>
+              {p.pname} <span style={{color:G.muted}}>({p.pid})</span> · Current stock: <b>{p.stock}</b>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Sel label="Action" value={mode} onChange={e=>setMode(e.target.value)}>
+                <option value="add">Receive / Add (+)</option>
+                <option value="remove">Remove / Correct (−)</option>
+              </Sel>
+              <Inp label="Quantity" type="number" value={qty} onChange={e=>setQty(e.target.value)} placeholder="0"/>
+            </div>
+            <Inp label="Reason (optional)" value={reason} onChange={e=>setReason(e.target.value)} placeholder="e.g. Goods received, stock count fix"/>
+            <div style={{fontSize:12,color:newStock<0?G.red:G.mid,fontWeight:700}}>New stock: {newStock}{newStock<0?" — cannot go below 0":""}</div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn onClick={()=>{if(!validNum(qty)||+qty<=0){notify("Enter a valid quantity","err");return;}if(newStock<0){notify("Stock cannot go below 0","err");return;}adjustStock({pid:p.pid,delta,reason});}}>💾 Apply</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`📦 Adjust Stock — ${p.pid}`} onClose={closeModal}><AdjForm/></Modal>;
     }
 
     // ── New Purchase ──────────────────────────────────────────
