@@ -61,7 +61,8 @@ async function safeGasFetch(url, options) {
 }
 
 async function gasGet(action, params = {}) {
-  const url = new URL(GAS_URL);
+  // Support both absolute URLs (https://...) and relative paths (/api/gas)
+  const url = new URL(GAS_URL, window.location.origin);
   url.searchParams.set("action", action);
   url.searchParams.set("key", API_KEY);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
@@ -103,6 +104,19 @@ const Badge = ({ text }) => {
   };
   const s = m[text]||{bg:G.pale,c:G.dark};
   return <span style={{background:s.bg,color:s.c,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700,whiteSpace:"nowrap"}}>{text}</span>;
+};
+
+// AgeBadge: shows days since invoice was issued with color coding
+const AgeBadge = ({ ageDays, status }) => {
+  if (ageDays === undefined || ageDays === null) return <span style={{color:G.muted,fontSize:10}}>—</span>;
+  const isPaid = status === "Paid" || status === "VOIDED";
+  if (isPaid) return <span style={{background:"#F5F5F5",color:"#9E9E9E",padding:"2px 8px",borderRadius:20,fontSize:10,fontWeight:700}}>{ageDays}d</span>;
+  let bg, c;
+  if (ageDays <= 7)       { bg="#E8F5E9"; c=G.mid; }
+  else if (ageDays <= 30) { bg="#FFF8E1"; c=G.amber; }
+  else if (ageDays <= 60) { bg="#FFF3E0"; c="#E65100"; }
+  else                    { bg=G.pink;    c=G.red; }
+  return <span style={{background:bg,color:c,padding:"2px 8px",borderRadius:20,fontSize:10,fontWeight:700,whiteSpace:"nowrap"}}>{ageDays}d</span>;
 };
 
 const Inp = ({label,style:st,...p}) => (
@@ -484,6 +498,32 @@ const result = await gasPost("save_invoice", {
     catch(e) { notify("❌ "+e.message,"err"); }
   };
 
+  const editCustomer = async (d) => {
+    try { await gasPost("edit_customer",d); notify("✅ Customer updated"); closeModal(); await loadData(true); }
+    catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  const editVendor = async (d) => {
+    try { await gasPost("edit_vendor",d); notify("✅ Vendor updated"); closeModal(); await loadData(true); }
+    catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  const editInvoice = async (formData) => {
+    try {
+      const cust = customers.find(c => c.id === formData.custId);
+      const custName = cust ? cust.name : "";
+      const enrichedItems = formData.items.map(item => {
+        const pr = prodMap[item.pid];
+        return { ...item, pname: pr ? pr.name : (item.pname || "") };
+      });
+      const result = await gasPost("edit_invoice", { ...formData, custName, items: enrichedItems });
+      if (result.pdfUrl) { cachePdf(formData.invId, result.pdfUrl); triggerPdfDownload(result.pdfUrl); }
+      notify(`✅ ${formData.invId} updated`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); throw e; }
+  };
+
   if (loading) return <LoadingScreen msg="Loading APT ERP from Google Sheet…"/>;
 
   // ── NAV ───────────────────────────────────────────────────
@@ -561,11 +601,15 @@ const result = await gasPost("save_invoice", {
       </div>
       {unpaidInv.length>0&&(
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <div style={{background:"#B71C1C",padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:13}}>⚠ Outstanding AR — {fmt(totalAR)}</span></div>
-          <TblWrap compact heads={["Invoice","Customer","Total","Status","PDF","Action"]}
+          <div style={{background:"#B71C1C",padding:"11px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:G.white,fontWeight:700,fontSize:13}}>⚠ Outstanding AR — {fmt(totalAR)}</span>
+            <span style={{color:"rgba(255,255,255,0.7)",fontSize:10}}>Oldest: {Math.max(...unpaidInv.map(i=>i.ageDays||0))} days</span>
+          </div>
+          <TblWrap compact heads={["Invoice","Customer","Age","Total","Status","PDF","Action"]}
             rows={unpaidInv.slice(0,8).map(inv=>[
               <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
               <span style={{fontSize:11,fontWeight:600}}>{inv.custName}</span>,
+              <AgeBadge ageDays={inv.ageDays} status={inv.status}/>,
               <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
               <Badge text={inv.status}/>,
               <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
@@ -581,6 +625,16 @@ const result = await gasPost("save_invoice", {
   const Invoices = () => {
     const [sf,setSf] = useState("All");
     const fil = invoices.filter(i=>(sf==="All"||i.status===sf)&&(!search||i.id?.includes(search.toUpperCase())||i.custName?.toLowerCase().includes(search.toLowerCase())));
+
+    // Aging summary for unpaid/partial
+    const unpaidFil = invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial");
+    const agingBuckets = [
+      {l:"0–7 days",c:G.mid,   inv:unpaidFil.filter(i=>(i.ageDays||0)<=7)},
+      {l:"8–30 days",c:G.amber, inv:unpaidFil.filter(i=>(i.ageDays||0)>7&&(i.ageDays||0)<=30)},
+      {l:"31–60 days",c:"#E65100",inv:unpaidFil.filter(i=>(i.ageDays||0)>30&&(i.ageDays||0)<=60)},
+      {l:"60+ days",  c:G.red,  inv:unpaidFil.filter(i=>(i.ageDays||0)>60)},
+    ];
+
     return (
       <div>
         <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
@@ -595,30 +649,55 @@ const result = await gasPost("save_invoice", {
           <Btn sm onClick={()=>setModal({t:"newInvoice"})}>+ New Invoice</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 Payment</Btn>
         </div>
+
+        {/* KPI strip */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
-          {[{l:"Total Invoiced",v:fmt(totalRevenue),c:G.mid},{l:"Collected",v:fmt(totalReceived),c:G.light},{l:"Outstanding",v:fmt(totalAR),c:G.amber},{l:"Invoices",v:invoices.length,c:G.dark}].map(s=>(
+          {[{l:"Total Invoiced",v:fmt(totalRevenue),c:G.mid},{l:"Collected",v:fmt(totalReceived),c:G.light},{l:"Outstanding",v:fmt(totalAR),c:G.amber},{l:"Total Invoices",v:invoices.length,c:G.dark}].map(s=>(
             <div key={s.l} style={{background:G.card,borderRadius:9,padding:"11px 14px",boxShadow:"0 1px 8px rgba(26,92,32,0.07)",borderBottom:`3px solid ${s.c}`}}>
               <div style={{fontSize:9,color:G.muted,fontWeight:700,textTransform:"uppercase",marginBottom:4}}>{s.l}</div>
               <div style={{fontSize:16,fontWeight:800,color:G.ink}}>{s.v}</div>
             </div>
           ))}
         </div>
+
+        {/* Aging buckets (only when unpaid invoices exist) */}
+        {unpaidFil.length>0&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
+            {agingBuckets.map(b=>(
+              <div key={b.l} style={{background:G.card,borderRadius:9,padding:"11px 14px",boxShadow:"0 1px 8px rgba(26,92,32,0.07)",borderLeft:`3px solid ${b.c}`}}>
+                <div style={{fontSize:9,color:G.muted,fontWeight:700,textTransform:"uppercase",marginBottom:3}}>{b.l}</div>
+                <div style={{fontSize:15,fontWeight:800,color:G.ink}}>{fmt(b.inv.reduce((s,i)=>s+i.total,0))}</div>
+                <div style={{fontSize:9,color:G.muted,marginTop:2}}>{b.inv.length} invoice{b.inv.length!==1?"s":""}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Invoice","Date","Customer","Total","Status","Terms","PDF","Actions"]}
-            rows={fil.map(inv=>[
-              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
-              <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
-              <span style={{fontWeight:600,fontSize:11}}>{inv.custName}</span>,
-              <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
-              <Badge text={inv.status}/>,
-              <span style={{fontSize:10,color:G.muted}}>{inv.payTerms}</span>,
-              <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
-              <div style={{display:"flex",gap:4}}>
-                <Btn sm v="ghost" onClick={()=>setModal({t:"viewInvoice",d:inv})}>View</Btn>
-                {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn sm v="success" onClick={()=>markPaid(inv.id)}>✓ Paid</Btn>}
-              </div>,
-            ])}
-          />
+          {fil.length===0?(
+            <div style={{padding:32,textAlign:"center",color:G.muted}}>
+              <div style={{fontSize:24,marginBottom:8}}>📋</div>
+              <div style={{fontWeight:700,fontSize:13,marginBottom:4}}>{invoices.length===0?"No invoices yet — create your first one above":"No invoices match this filter"}</div>
+              {invoices.length===0&&<Btn sm v="secondary" onClick={()=>loadData(true)}>↻ Refresh from Sheet</Btn>}
+            </div>
+          ):(
+            <TblWrap compact heads={["Invoice","Date","Age","Customer","Total","Status","Terms","PDF","Actions"]}
+              rows={fil.map(inv=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
+                <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
+                <AgeBadge ageDays={inv.ageDays} status={inv.status}/>,
+                <span style={{fontWeight:600,fontSize:11}}>{inv.custName}</span>,
+                <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
+                <Badge text={inv.status}/>,
+                <span style={{fontSize:10,color:G.muted}}>{inv.payTerms}</span>,
+                <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
+                <div style={{display:"flex",gap:4}}>
+                  <Btn sm v="ghost" onClick={()=>setModal({t:"viewInvoice",d:inv})}>View</Btn>
+                  {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn sm v="success" onClick={()=>markPaid(inv.id)}>✓ Paid</Btn>}
+                </div>,
+              ])}
+            />
+          )}
         </div>
       </div>
     );
@@ -813,8 +892,45 @@ const result = await gasPost("save_invoice", {
 
   const Reports = () => {
     const topCust=[...customers].map(c=>({...c,rev:invoices.filter(i=>i.custId===c.id).reduce((s,i)=>s+i.total,0)})).sort((a,b)=>b.rev-a.rev).slice(0,8);
+
+    // Build per-customer aging analysis
+    const custAging = ar.filter(r=>r.balance>0).map(r=>{
+      const custInv = invoices.filter(i=>i.custId===r.custId&&(i.status==="Unpaid"||i.status==="Partial"));
+      const maxAge = custInv.length ? Math.max(...custInv.map(i=>i.ageDays||0)) : 0;
+      const buckets = {
+        current: custInv.filter(i=>(i.ageDays||0)<=30).reduce((s,i)=>s+i.total,0),
+        days31:  custInv.filter(i=>(i.ageDays||0)>30&&(i.ageDays||0)<=60).reduce((s,i)=>s+i.total,0),
+        days61:  custInv.filter(i=>(i.ageDays||0)>60&&(i.ageDays||0)<=90).reduce((s,i)=>s+i.total,0),
+        days90:  custInv.filter(i=>(i.ageDays||0)>90).reduce((s,i)=>s+i.total,0),
+      };
+      return {...r, maxAge, buckets, invCount: custInv.length};
+    }).sort((a,b)=>b.balance-a.balance);
+
+    // Totals per aging bucket across all customers
+    const agingTotals = {
+      current: custAging.reduce((s,r)=>s+r.buckets.current,0),
+      days31:  custAging.reduce((s,r)=>s+r.buckets.days31,0),
+      days61:  custAging.reduce((s,r)=>s+r.buckets.days61,0),
+      days90:  custAging.reduce((s,r)=>s+r.buckets.days90,0),
+    };
+
     return(
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        {/* Aging summary tiles */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+          {[
+            {l:"Current (0–30d)", v:agingTotals.current, c:G.mid},
+            {l:"31–60 Days",      v:agingTotals.days31,  c:G.amber},
+            {l:"61–90 Days",      v:agingTotals.days61,  c:"#E65100"},
+            {l:"90+ Days",        v:agingTotals.days90,  c:G.red},
+          ].map(s=>(
+            <div key={s.l} style={{background:G.card,borderRadius:9,padding:"11px 14px",boxShadow:"0 1px 8px rgba(26,92,32,0.07)",borderLeft:`3px solid ${s.c}`}}>
+              <div style={{fontSize:9,color:G.muted,fontWeight:700,textTransform:"uppercase",marginBottom:4}}>{s.l}</div>
+              <div style={{fontSize:15,fontWeight:800,color:s.v>0?s.c:G.ink}}>{fmt(s.v)}</div>
+            </div>
+          ))}
+        </div>
+
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
           <div style={{background:G.mid,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>🏆 Top Customers by Revenue</span></div>
           <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
@@ -829,10 +945,20 @@ const result = await gasPost("save_invoice", {
             ))}
           </div>
         </div>
+
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <div style={{background:G.red,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>⚠ AR Aging</span></div>
-          <TblWrap compact heads={["Customer","Outstanding","Invoices","Action"]}
-            rows={ar.filter(r=>r.balance>0).sort((a,b)=>b.balance-a.balance).map(r=>[<span style={{fontWeight:700,fontSize:11}}>{r.custName}</span>,<span style={{fontWeight:800,color:G.red,fontSize:11}}>{fmt(r.balance)}</span>,<span style={{fontSize:10,color:G.muted}}>{invoices.filter(i=>i.custId===r.custId&&i.status!=="Paid"&&i.status!=="VOIDED").length}</span>,<Btn sm v="danger">Follow Up</Btn>])}
+          <div style={{background:G.red,padding:"11px 16px"}}><span style={{color:G.white,fontWeight:700,fontSize:12}}>⚠ AR Aging Report — {fmt(custAging.reduce((s,r)=>s+r.balance,0))} outstanding</span></div>
+          <TblWrap compact heads={["Customer","Oldest","0–30d","31–60d","61–90d","90+d","Total Due","Action"]}
+            rows={custAging.map(r=>[
+              <div><div style={{fontWeight:700,fontSize:11}}>{r.custName}</div><div style={{fontSize:9,color:G.muted}}>{r.invCount} invoice{r.invCount!==1?"s":""}</div></div>,
+              <AgeBadge ageDays={r.maxAge} status="Unpaid"/>,
+              <span style={{fontWeight:600,fontSize:11,color:r.buckets.current>0?G.mid:G.muted}}>{r.buckets.current>0?fmt(r.buckets.current):"—"}</span>,
+              <span style={{fontWeight:600,fontSize:11,color:r.buckets.days31>0?G.amber:G.muted}}>{r.buckets.days31>0?fmt(r.buckets.days31):"—"}</span>,
+              <span style={{fontWeight:600,fontSize:11,color:r.buckets.days61>0?"#E65100":G.muted}}>{r.buckets.days61>0?fmt(r.buckets.days61):"—"}</span>,
+              <span style={{fontWeight:700,fontSize:11,color:r.buckets.days90>0?G.red:G.muted}}>{r.buckets.days90>0?fmt(r.buckets.days90):"—"}</span>,
+              <span style={{fontWeight:800,color:G.red,fontSize:11}}>{fmt(r.balance)}</span>,
+              <Btn sm v="danger" onClick={()=>{setTab("invoices");setSearch(r.custName);}}>View</Btn>,
+            ])}
           />
         </div>
       </div>
@@ -847,7 +973,10 @@ const result = await gasPost("save_invoice", {
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
         {vendors.map(v=>{const apRow=ap.find(a=>a.vendorId===v.id)||{};return(
           <div key={v.id} style={{background:G.card,borderRadius:11,padding:16,boxShadow:"0 2px 10px rgba(26,92,32,0.07)",borderLeft:`4px solid ${G.mid}`}}>
-            <div style={{fontWeight:800,fontSize:14,color:G.ink,marginBottom:2}}>{v.name}</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:2}}>
+              <div style={{fontWeight:800,fontSize:14,color:G.ink}}>{v.name}</div>
+              <button onClick={()=>setModal({t:"editVendor",d:v})} style={{background:G.pale,border:`1px solid ${G.mid}`,borderRadius:6,padding:"2px 8px",fontSize:10,fontWeight:700,color:G.dark,cursor:"pointer"}}>✏️</button>
+            </div>
             <div style={{fontSize:10,color:G.muted,marginBottom:2}}>{v.id} · {v.category}</div>
             <div style={{fontSize:10,color:G.muted,marginBottom:10}}>{v.contact} · {v.phone}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
@@ -944,20 +1073,27 @@ const result = await gasPost("save_invoice", {
       return <Modal title="🧾 New Invoice → Sheet + PDF + Drive" onClose={closeModal} wide><InvForm/></Modal>;
     }
 
-    // ── View Invoice (with PDF download + Void) ──────────────
+    // ── View Invoice (with PDF download + Void + Edit) ──────────────
     if(modal.t==="viewInvoice"){
       const inv=modal.d;
       return(
         <Modal title={`Invoice — ${inv.id}`} onClose={closeModal} wide>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
-            {[{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
+            {[
+              {l:"Customer",v:inv.custName},
+              {l:"Date",v:inv.date},
+              {l:"Age",v:<AgeBadge ageDays={inv.ageDays} status={inv.status}/>},
+              {l:"Status",v:<Badge text={inv.status}/>},
+              {l:"Total",v:fmt(inv.total)},
+              {l:"Terms",v:inv.payTerms||"COD"},
+            ].map(r=>(
               <div key={r.l} style={{background:G.pale,borderRadius:7,padding:"8px 11px"}}>
                 <div style={{fontSize:8,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:2}}>{r.l}</div>
                 <div style={{fontSize:12,fontWeight:600,color:G.ink}}>{r.v}</div>
               </div>
             ))}
           </div>
-          {/* PDF Button — prominently placed */}
+          {/* PDF Button */}
           <div style={{background:"#E3F2FD",borderRadius:10,padding:"12px 14px",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div>
               <div style={{fontSize:11,fontWeight:700,color:G.blue,marginBottom:2}}>📄 Invoice PDF</div>
@@ -970,6 +1106,7 @@ const result = await gasPost("save_invoice", {
               <Btn v="danger" onClick={()=>deleteInvoice(inv.id)}>🗑️ Delete Permanently</Btn>
             </div>
             <div style={{display:"flex",gap:8}}>
+              {inv.status!=="VOIDED"&&<Btn v="secondary" onClick={()=>{closeModal();setModal({t:"editInvoice",d:inv});}}>✏️ Edit</Btn>}
               {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="success" onClick={()=>{markPaid(inv.id);closeModal();}}>✓ Mark Paid</Btn>}
               {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="secondary" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:inv.custId,invId:inv.id}});}}>💳 Partial</Btn>}
               {inv.status!=="VOIDED"&&<Btn v="danger" onClick={()=>voidInvoice(inv.id)}>🗑 Void</Btn>}
@@ -977,6 +1114,75 @@ const result = await gasPost("save_invoice", {
           </div>
         </Modal>
       );
+    }
+
+    // ── Edit Invoice ──────────────────────────────────────────
+    if(modal.t==="editInvoice"){
+      const srcInv=modal.d;
+      const InvEditForm=()=>{
+        const [f,setF]=useState({invId:srcInv.id,custId:srcInv.custId,date:srcInv.date,payTerms:srcInv.payTerms||"COD",notes:"",items:[{pid:"",qty:1,rate:0,pname:""}]});
+        const [itemsLoaded,setItemsLoaded]=useState(false);
+        const [loading,setLoading]=useState(false);
+        const total=f.items.reduce((s,i)=>s+(+i.qty||0)*(+i.rate||0),0);
+
+        useEffect(()=>{
+          gasGet("invoice_items",{id:srcInv.id}).then(it=>{
+            if(it&&it.length) setF(p=>({...p,items:it.map(i=>({pid:i.pid,qty:i.qty,rate:i.rate,pname:i.pname,notes:i.notes||""}))}));
+            setItemsLoaded(true);
+          }).catch(()=>setItemsLoaded(true));
+        },[]);
+
+        const setLine=(i,k,v)=>setF(p=>{
+          const it=[...p.items];it[i]={...it[i],[k]:v};
+          if(k==="pid"){const pr=prodMap[v];if(pr){it[i].rate=pr.price;it[i].pname=pr.name;}}
+          return{...p,items:it};
+        });
+        const handleSave=async()=>{
+          if(!f.custId){notify("Select a customer","err");return;}
+          if(f.items.some(i=>!i.qty||!i.rate)){notify("Fill in all line items","err");return;}
+          setLoading(true);
+          try{await editInvoice(f);}catch(e){}finally{setLoading(false);}
+        };
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:G.pale,borderRadius:8,padding:"8px 12px",fontSize:11,color:G.dark,fontWeight:600}}>Editing: {srcInv.id}</div>
+            {!itemsLoaded&&<div style={{textAlign:"center",color:G.muted,padding:12}}>⏳ Loading line items…</div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Sel label="Customer" value={f.custId} onChange={e=>setF(p=>({...p,custId:e.target.value}))}>
+                <option value="">— Select Store —</option>
+                {customers.map(c=><option key={c.id} value={c.id}>{c.name} ({c.area})</option>)}
+              </Sel>
+              <Inp label="Date" type="date" value={f.date} onChange={e=>setF(p=>({...p,date:e.target.value}))}/>
+              <Sel label="Payment Terms" value={f.payTerms} onChange={e=>setF(p=>({...p,payTerms:e.target.value}))}>
+                {["COD","NET 7","NET 15","NET 30"].map(t=><option key={t}>{t}</option>)}
+              </Sel>
+              <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Ref / notes"/>
+            </div>
+            <div style={{fontWeight:700,color:G.dark,fontSize:10,textTransform:"uppercase",letterSpacing:"0.07em"}}>Line Items</div>
+            {f.items.map((item,idx)=>(
+              <div key={idx} style={{display:"grid",gridTemplateColumns:"2fr 0.6fr 1fr 1fr auto",gap:8,alignItems:"flex-end"}}>
+                <Sel value={item.pid} onChange={e=>setLine(idx,"pid",e.target.value)}>
+                  <option value={item.pid}>{item.pname||"— Product —"}</option>
+                  {products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                </Sel>
+                <Inp type="number" min="1" value={item.qty} onChange={e=>setLine(idx,"qty",e.target.value)} placeholder="Qty"/>
+                <Inp type="number" value={item.rate} onChange={e=>setLine(idx,"rate",e.target.value)} placeholder="Rate"/>
+                <div style={{background:G.pale,borderRadius:8,padding:"8px 10px",fontSize:12,fontWeight:700,color:G.dark,display:"flex",alignItems:"center"}}>{fmt((+item.qty||0)*(+item.rate||0))}</div>
+                <button onClick={()=>setF(p=>({...p,items:p.items.filter((_,j)=>j!==idx)}))} style={{background:G.pink,border:"none",borderRadius:7,padding:"8px 9px",cursor:"pointer",color:G.red,fontWeight:800}}>✕</button>
+              </div>
+            ))}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4}}>
+              <Btn v="ghost" sm onClick={()=>setF(p=>({...p,items:[...p.items,{pid:"",qty:1,rate:0,pname:""}]}))}>+ Line</Btn>
+              <span style={{fontWeight:800,fontSize:15,color:G.ink}}>Total: {fmt(total)}</span>
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6,paddingTop:10,borderTop:`1px solid ${G.pale}`}}>
+              <Btn v="secondary" onClick={closeModal} disabled={loading}>Cancel</Btn>
+              <Btn onClick={handleSave} disabled={loading}>{loading?"⏳ Saving…":"💾 Save Changes + New PDF"}</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`✏️ Edit Invoice — ${srcInv.id}`} onClose={closeModal} wide><InvEditForm/></Modal>;
     }
 
     // ── Record Payment ────────────────────────────────────────
@@ -1134,14 +1340,18 @@ const result = await gasPost("save_invoice", {
               </div>
             ))}
           </div>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <Btn sm v="secondary" onClick={()=>{closeModal();setModal({t:"editCustomer",d:c});}}>✏️ Edit Customer</Btn>
+            {outstanding>0&&<Btn sm v="success" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:c.id}});}}>💳 Collect Payment</Btn>}
+          </div>
           {outstanding>0&&<div style={{background:G.pink,borderRadius:8,padding:"9px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <span style={{fontWeight:700,color:G.red,fontSize:12}}>⚠ Outstanding: {fmt(outstanding)}</span>
-            <Btn sm v="success" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:c.id}});}}>Collect</Btn>
           </div>}
-          <TblWrap compact heads={["Invoice","Date","Total","Status","PDF"]}
+          <TblWrap compact heads={["Invoice","Date","Age","Total","Status","PDF"]}
             rows={cinv.map(inv=>[
-              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
+              <span style={{fontWeight:700,color:G.dark,fontSize:11,cursor:"pointer"}} onClick={()=>{closeModal();setModal({t:"viewInvoice",d:inv});}}>{inv.id}</span>,
               <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
+              <AgeBadge ageDays={inv.ageDays} status={inv.status}/>,
               <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
               <Badge text={inv.status}/>,
               <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
@@ -1149,6 +1359,59 @@ const result = await gasPost("save_invoice", {
           />
         </Modal>
       );
+    }
+
+    // ── Edit Customer ─────────────────────────────────────────
+    if(modal.t==="editCustomer"){
+      const srcCust=modal.d;
+      const CustEditForm=()=>{
+        const [f,setF]=useState({id:srcCust.id,name:srcCust.name||"",city:srcCust.city||"ISB",area:srcCust.area||"",contact:srcCust.contact||"",phone:srcCust.phone||"",openBal:srcCust.openBal||0,notes:srcCust.notes||""});
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:G.pale,borderRadius:8,padding:"8px 12px",fontSize:11,color:G.dark,fontWeight:600}}>Customer ID: {srcCust.id}</div>
+            <Inp label="Store Name" value={f.name} onChange={e=>setF(p=>({...p,name:e.target.value}))} placeholder="Store name"/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Inp label="Area / Zone" value={f.area} onChange={e=>setF(p=>({...p,area:e.target.value}))} placeholder="F-7 Markaz"/>
+              <Inp label="City" value={f.city} onChange={e=>setF(p=>({...p,city:e.target.value}))} placeholder="ISB"/>
+              <Inp label="Contact Person" value={f.contact} onChange={e=>setF(p=>({...p,contact:e.target.value}))}/>
+              <Inp label="Phone" value={f.phone} onChange={e=>setF(p=>({...p,phone:e.target.value}))} placeholder="+92..."/>
+              <Inp label="Opening Balance (PKR)" type="number" value={f.openBal} onChange={e=>setF(p=>({...p,openBal:e.target.value}))}/>
+            </div>
+            <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn onClick={()=>editCustomer(f)}>💾 Save Changes</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`✏️ Edit Customer — ${srcCust.name}`} onClose={closeModal}><CustEditForm/></Modal>;
+    }
+
+    // ── Edit Vendor ───────────────────────────────────────────
+    if(modal.t==="editVendor"){
+      const srcVen=modal.d;
+      const VenEditForm=()=>{
+        const [f,setF]=useState({id:srcVen.id,name:srcVen.name||"",category:srcVen.category||"",contact:srcVen.contact||"",phone:srcVen.phone||"",openBal:srcVen.openBal||0,notes:srcVen.notes||""});
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:G.pale,borderRadius:8,padding:"8px 12px",fontSize:11,color:G.dark,fontWeight:600}}>Vendor ID: {srcVen.id}</div>
+            <Inp label="Vendor Name" value={f.name} onChange={e=>setF(p=>({...p,name:e.target.value}))} placeholder="Company name"/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Inp label="Category" value={f.category} onChange={e=>setF(p=>({...p,category:e.target.value}))} placeholder="e.g. Skincare, Food"/>
+              <Inp label="Contact Person" value={f.contact} onChange={e=>setF(p=>({...p,contact:e.target.value}))}/>
+              <Inp label="Phone" value={f.phone} onChange={e=>setF(p=>({...p,phone:e.target.value}))} placeholder="+92..."/>
+              <Inp label="Opening Balance (PKR)" type="number" value={f.openBal} onChange={e=>setF(p=>({...p,openBal:e.target.value}))}/>
+            </div>
+            <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn onClick={()=>editVendor(f)}>💾 Save Changes</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`✏️ Edit Vendor — ${srcVen.name}`} onClose={closeModal}><VenEditForm/></Modal>;
     }
 
     return null;
