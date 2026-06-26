@@ -134,6 +134,8 @@ const ageColor = a => a == null ? G.muted : a > 60 ? G.red : a > 30 ? G.amber : 
 // Normalizers for fuzzy matching store/customer/product names across systems.
 const normTxt = s => (s || "").toString().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const digitsOnly = s => (s || "").toString().replace(/\D+/g, "");
+// A finite, non-negative number (for amount/qty/price fields submitted as strings).
+const validNum = v => Number.isFinite(+v) && +v >= 0;
 
 // ── Primitive components ──────────────────────────────────────
 const Badge = ({ text }) => {
@@ -1426,7 +1428,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>savePayment({...f,type:"Received"})}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>{if(!f.custId){notify("Select a customer","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Received"});}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1467,7 +1469,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>savePayment({...f,type:"Paid",vendorId:f.vendorId})}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Paid",vendorId:f.vendorId});}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1491,7 +1493,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="What is this for?"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>saveExpense(f)}>💾 Save to Sheet</Btn>
+              <Btn onClick={()=>{if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}saveExpense(f);}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1517,7 +1519,7 @@ function CrmApp({ user, onLogout }) {
             </div>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>savePurchase(f)}>💾 Save to Sheet</Btn>
+              <Btn onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.total)||+f.total<=0){notify("Enter a valid total","err");return;}if(!validNum(f.paid)){notify("Paid amount is invalid","err");return;}if(+f.paid>+f.total){notify("Paid cannot exceed total","err");return;}savePurchase(f);}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1541,7 +1543,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>addCustomer(f)}>💾 Add to Sheet</Btn>
+              <Btn onClick={()=>{if(!f.name.trim()){notify("Enter store name","err");return;}addCustomer(f);}}>💾 Add to Sheet</Btn>
             </div>
           </div>
         );
