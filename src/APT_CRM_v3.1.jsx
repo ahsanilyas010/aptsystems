@@ -31,6 +31,24 @@ const ALLOWED_EMAILS = [
   "mamoonaasim01@gmail.com",
 ];
 
+const KNOWN_DUPLICATE_GROUPS = [
+  { keepId: "C-004", mergeIds: ["C-072"] },
+  { keepId: "C-039", mergeIds: ["C-073"] },
+  { keepId: "C-069", mergeIds: ["C-074"] },
+  { keepId: "C-062", mergeIds: ["C-075"] },
+  { keepId: "C-005", mergeIds: ["C-076"] },
+  { keepId: "C-008", mergeIds: ["C-079"] },
+  { keepId: "C-009", mergeIds: ["C-081"] },
+  { keepId: "C-010", mergeIds: ["C-082"] },
+  { keepId: "C-011", mergeIds: ["C-083"] },
+  { keepId: "C-046", mergeIds: ["C-084"] },
+  { keepId: "C-047", mergeIds: ["C-085"] },
+  { keepId: "C-020", mergeIds: ["C-086"] },
+  { keepId: "C-031", mergeIds: ["C-087"] },
+  { keepId: "C-053", mergeIds: ["C-088"] },
+  { keepId: "C-068", mergeIds: ["C-089"] },
+];
+
 // Robust fetch helper that handles HTML/non-JSON responses gracefully
 async function safeGasFetch(url, options) {
   const res = await fetch(url, options);
@@ -102,9 +120,22 @@ const G = {
 const fmt  = n => "PKR " + Math.round(n || 0).toLocaleString("en-PK");
 const pct  = (a, b) => b ? ((a / b) * 100).toFixed(1) + "%" : "—";
 const todayStr = () => new Date().toISOString().split("T")[0];
+// Invoice aging: days outstanding since invoice date. Prefers the GAS-computed
+// ageDays field but falls back to computing locally from the date string.
+const ageDaysOf = inv => {
+  if (inv && inv.ageDays != null) return inv.ageDays;
+  if (!inv || !inv.date) return null;
+  const d = new Date(String(inv.date).substring(0, 10));
+  if (isNaN(d.getTime())) return null;
+  const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
+  return diff < 0 ? 0 : diff;
+};
+const ageColor = a => a == null ? G.muted : a > 60 ? G.red : a > 30 ? G.amber : G.light;
 // Normalizers for fuzzy matching store/customer/product names across systems.
 const normTxt = s => (s || "").toString().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const digitsOnly = s => (s || "").toString().replace(/\D+/g, "");
+// A finite, non-negative number (for amount/qty/price fields submitted as strings).
+const validNum = v => Number.isFinite(+v) && +v >= 0;
 
 // ── Primitive components ──────────────────────────────────────
 const Badge = ({ text }) => {
@@ -629,6 +660,15 @@ function CrmApp({ user, onLogout }) {
     catch(e) { notify("❌ "+e.message,"err"); }
   };
 
+  const adjustStock = async (d) => {
+    try {
+      const r = await gasPost("adjust_stock",{pid:d.pid,delta:d.delta,reason:d.reason||""});
+      notify(`✅ ${d.pid} stock → ${r.stock}`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
   const savePayment = async (d) => {
     try { await gasPost("save_payment",d); notify("✅ Payment recorded"); closeModal(); await loadData(true); }
     catch(e) { notify("❌ "+e.message,"err"); }
@@ -693,6 +733,10 @@ function CrmApp({ user, onLogout }) {
         </div>
         <Btn sm v="secondary" onClick={()=>loadData(true)}>{syncing?"⏳ Syncing…":"↻ Sync"}</Btn>
       </div>
+      {lowStock.length>0&&<div onClick={()=>setTab("inventory")} style={{background:"#FFF8E1",borderRadius:9,padding:"10px 14px",border:`1.5px solid ${G.amber}`,fontSize:12,fontWeight:700,color:G.amber,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span>⚠️ {lowStock.length} product{lowStock.length>1?"s":""} at/below minimum stock — {lowStock.filter(p=>p.stock===0).length} out of stock</span>
+        <span style={{fontSize:11,textDecoration:"underline"}}>View inventory →</span>
+      </div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
         <Kpi label="Total Invoiced"  value={fmt(totalRevenue)}  sub={`${invoices.length} invoices`}    color={G.mid}    trend="up"/>
         <Kpi label="Total Received"  value={fmt(totalReceived)} sub="Cash collected"                   color={G.light}  trend="up"/>
@@ -770,7 +814,7 @@ function CrmApp({ user, onLogout }) {
           ))}
           <Btn sm onClick={()=>setModal({t:"newInvoice"})}>+ New Invoice</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 Payment</Btn>
-          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"]])}>⬇ Export</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
           {[{l:"Total Invoiced",v:fmt(totalRevenue),c:G.mid},{l:"Collected",v:fmt(totalReceived),c:G.light},{l:"Outstanding",v:fmt(totalAR),c:G.amber},{l:"Invoices",v:invoices.length,c:G.dark}].map(s=>(
@@ -780,8 +824,27 @@ function CrmApp({ user, onLogout }) {
             </div>
           ))}
         </div>
+        {(()=>{
+          const open=invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial");
+          if(!open.length) return null;
+          const buckets=[{l:"Current (0–30d)",c:G.light,v:0},{l:"31–60 days",c:G.amber,v:0},{l:"61–90 days",c:G.red,v:0},{l:"90+ days",c:G.dark,v:0}];
+          open.forEach(i=>{const a=ageDaysOf(i)||0; if(a<=30)buckets[0].v+=i.total; else if(a<=60)buckets[1].v+=i.total; else if(a<=90)buckets[2].v+=i.total; else buckets[3].v+=i.total;});
+          return(
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:G.muted,fontWeight:800,textTransform:"uppercase",marginBottom:6,letterSpacing:0.5}}>Outstanding by Age</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+                {buckets.map(b=>(
+                  <div key={b.l} style={{background:G.card,borderRadius:9,padding:"10px 14px",boxShadow:"0 1px 8px rgba(26,92,32,0.07)",borderLeft:`4px solid ${b.c}`}}>
+                    <div style={{fontSize:9,color:G.muted,fontWeight:700,textTransform:"uppercase",marginBottom:4}}>{b.l}</div>
+                    <div style={{fontSize:15,fontWeight:800,color:b.c}}>{fmt(b.v)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Invoice","Date","Customer","Total","Status","Terms","PDF","Actions"]}
+          <TblWrap compact heads={["Invoice","Date","Customer","Total","Status","Terms","Age","PDF","Actions"]}
             rows={fil.map(inv=>[
               <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
               <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
@@ -789,6 +852,9 @@ function CrmApp({ user, onLogout }) {
               <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
               <Badge text={inv.status}/>,
               <span style={{fontSize:10,color:G.muted}}>{inv.payTerms}</span>,
+              (inv.status==="Paid"||inv.status==="VOIDED"||ageDaysOf(inv)==null)
+                ?<span style={{fontSize:10,color:G.muted}}>—</span>
+                :<span style={{fontSize:10,fontWeight:800,color:ageColor(ageDaysOf(inv))}}>{ageDaysOf(inv)}d</span>,
               <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
               <div style={{display:"flex",gap:4}}>
                 <Btn sm v="ghost" onClick={()=>setModal({t:"viewInvoice",d:inv})}>View</Btn>
@@ -858,6 +924,33 @@ function CrmApp({ user, onLogout }) {
         }
       } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
     };
+    const removeKnownDuplicates = async () => {
+      if(!confirm(`Remove 15 known duplicate customer rows?\n\nInvoices/payments on duplicates will be re-pointed to the kept records and the duplicate Sheet rows deleted. This action can be undone.`)) return;
+      setMerging(true);
+      try {
+        const result = await gasPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
+        const target={};
+        KNOWN_DUPLICATE_GROUPS.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
+        const storeRepoints=[];
+        for(const s of sbData.stores){
+          if(s.gas_customer_id && target[s.gas_customer_id]){
+            storeRepoints.push({id:s.id,from:s.gas_customer_id,to:target[s.gas_customer_id]});
+            try{ await sbPost("update_store",{id:s.id,gas_customer_id:target[s.gas_customer_id]}); }catch{/* non-fatal */}
+          }
+        }
+        notify(`✅ Removed 15 duplicate customer rows`);
+        await loadData(true); await loadSupabase(true);
+        if(result?.snapshot?.groups?.length){
+          pushUndo(`Removed 15 duplicate customers`, async () => {
+            await gasPost("undo_merge_customers", result.snapshot);
+            for(const r of storeRepoints){
+              try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
+            }
+            await loadData(true); await loadSupabase(true);
+          });
+        }
+      } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
+    };
     const fil=customers.filter(c=>{
       if(hideDupes && dupInfo.dupIds.has(c.id)) return false;
       return !search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase());
@@ -872,6 +965,7 @@ function CrmApp({ user, onLogout }) {
           <Btn sm onClick={()=>setModal({t:"addCustomer"})}>+ Add Store</Btn>
           {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
           {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
+          {user?.email==="ahsanilyas35@gmail.com"&&<Btn sm v="danger" disabled={merging} onClick={removeKnownDuplicates}>{merging?"⏳ Removing…":"🗑 Remove 15 Known Duplicates"}</Btn>}
           <Btn sm v="secondary" onClick={()=>exportCsv("customers.csv",fil,[["id","ID"],["name","Name"],["area","Area"],["city","City"],["phone","Phone"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
@@ -1091,8 +1185,8 @@ function CrmApp({ user, onLogout }) {
           <Btn sm v="secondary" onClick={()=>exportCsv("inventory.csv",inventory,[["pid","PID"],["pname","Product"],["category","Category"],["cost","Cost"],["purchased","In"],["sold","Sold"],["stock","Stock"],["minStock","Min"]])}>⬇ Export</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["PID","Product","Cat","Cost","In","Sold","Stock","Min","Status"]}
-            rows={inventory.map(p=>{const s=p.stock===0?"Out of Stock":p.stock<=p.minStock?"Low Stock":"Active";return[<span style={{fontWeight:700,fontSize:10,color:G.dark}}>{p.pid}</span>,<span style={{fontWeight:600,fontSize:11}}>{p.pname}</span>,<Badge text={p.category}/>,<span style={{fontSize:10,color:G.muted}}>PKR {p.cost?.toLocaleString()}</span>,<span style={{fontWeight:600}}>{p.purchased}</span>,<span style={{fontWeight:600,color:G.mid}}>{p.sold}</span>,<span style={{fontWeight:800,color:p.stock===0?G.red:p.stock<=p.minStock?G.amber:G.ink}}>{p.stock}</span>,<span style={{fontSize:10,color:G.muted}}>{p.minStock}</span>,<Badge text={s}/>];})}
+          <TblWrap compact heads={["PID","Product","Cat","Cost","In","Sold","Stock","Min","Status","Adjust"]}
+            rows={inventory.map(p=>{const s=p.stock===0?"Out of Stock":p.stock<=p.minStock?"Low Stock":"Active";return[<span style={{fontWeight:700,fontSize:10,color:G.dark}}>{p.pid}</span>,<span style={{fontWeight:600,fontSize:11}}>{p.pname}</span>,<Badge text={p.category}/>,<span style={{fontSize:10,color:G.muted}}>PKR {p.cost?.toLocaleString()}</span>,<span style={{fontWeight:600}}>{p.purchased}</span>,<span style={{fontWeight:600,color:G.mid}}>{p.sold}</span>,<span style={{fontWeight:800,color:p.stock===0?G.red:p.stock<=p.minStock?G.amber:G.ink}}>{p.stock}</span>,<span style={{fontSize:10,color:G.muted}}>{p.minStock}</span>,<Badge text={s}/>,<Btn sm v="ghost" onClick={()=>setModal({t:"adjustStock",d:p})}>± Adjust</Btn>];})}
           />
         </div>
       </div>
@@ -1278,7 +1372,7 @@ function CrmApp({ user, onLogout }) {
       return(
         <Modal title={`Invoice — ${inv.id}`} onClose={closeModal} wide>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
-            {[{l:"Invoice #",v:inv.id},{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
+            {[{l:"Invoice #",v:inv.id},{l:"Customer",v:inv.custName},{l:"Date",v:inv.date},{l:"Status",v:inv.status},{l:"Total",v:fmt(inv.total)},{l:"Terms",v:inv.payTerms||"COD"},{l:"Age",v:(inv.status==="Paid"||inv.status==="VOIDED"||ageDaysOf(inv)==null)?"—":`${ageDaysOf(inv)} days`},{l:"Created By",v:(inv.createdBy||"").split("@")[0]}].map(r=>(
               <div key={r.l} style={{background:G.pale,borderRadius:7,padding:"8px 11px"}}>
                 <div style={{fontSize:8,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:2}}>{r.l}</div>
                 <div style={{fontSize:12,fontWeight:600,color:G.ink}}>{r.v}</div>
@@ -1347,7 +1441,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>savePayment({...f,type:"Received"})}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>{if(!f.custId){notify("Select a customer","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Received"});}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1388,7 +1482,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>savePayment({...f,type:"Paid",vendorId:f.vendorId})}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Paid",vendorId:f.vendorId});}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1412,12 +1506,45 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="What is this for?"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>saveExpense(f)}>💾 Save to Sheet</Btn>
+              <Btn onClick={()=>{if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}saveExpense(f);}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
       };
       return <Modal title="💸 Add Expense → Google Sheet" onClose={closeModal}><ExpForm/></Modal>;
+    }
+
+    // ── Adjust Stock (goods receipt / correction) ─────────────
+    if(modal.t==="adjustStock"){
+      const p=modal.d;
+      const AdjForm=()=>{
+        const [mode,setMode]=useState("add");
+        const [qty,setQty]=useState("");
+        const [reason,setReason]=useState("");
+        const delta=mode==="add"?Math.abs(+qty||0):-Math.abs(+qty||0);
+        const newStock=(p.stock||0)+delta;
+        return(
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{background:G.pale,borderRadius:8,padding:"8px 12px",fontSize:12,fontWeight:600,color:G.dark}}>
+              {p.pname} <span style={{color:G.muted}}>({p.pid})</span> · Current stock: <b>{p.stock}</b>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <Sel label="Action" value={mode} onChange={e=>setMode(e.target.value)}>
+                <option value="add">Receive / Add (+)</option>
+                <option value="remove">Remove / Correct (−)</option>
+              </Sel>
+              <Inp label="Quantity" type="number" value={qty} onChange={e=>setQty(e.target.value)} placeholder="0"/>
+            </div>
+            <Inp label="Reason (optional)" value={reason} onChange={e=>setReason(e.target.value)} placeholder="e.g. Goods received, stock count fix"/>
+            <div style={{fontSize:12,color:newStock<0?G.red:G.mid,fontWeight:700}}>New stock: {newStock}{newStock<0?" — cannot go below 0":""}</div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn onClick={()=>{if(!validNum(qty)||+qty<=0){notify("Enter a valid quantity","err");return;}if(newStock<0){notify("Stock cannot go below 0","err");return;}adjustStock({pid:p.pid,delta,reason});}}>💾 Apply</Btn>
+            </div>
+          </div>
+        );
+      };
+      return <Modal title={`📦 Adjust Stock — ${p.pid}`} onClose={closeModal}><AdjForm/></Modal>;
     }
 
     // ── New Purchase ──────────────────────────────────────────
@@ -1438,7 +1565,7 @@ function CrmApp({ user, onLogout }) {
             </div>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>savePurchase(f)}>💾 Save to Sheet</Btn>
+              <Btn onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.total)||+f.total<=0){notify("Enter a valid total","err");return;}if(!validNum(f.paid)){notify("Paid amount is invalid","err");return;}if(+f.paid>+f.total){notify("Paid cannot exceed total","err");return;}savePurchase(f);}}>💾 Save to Sheet</Btn>
             </div>
           </div>
         );
@@ -1462,7 +1589,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>addCustomer(f)}>💾 Add to Sheet</Btn>
+              <Btn onClick={()=>{if(!f.name.trim()){notify("Enter store name","err");return;}addCustomer(f);}}>💾 Add to Sheet</Btn>
             </div>
           </div>
         );

@@ -719,6 +719,9 @@ function doPost(e) {
         invH.getRange(rowIdx, 5).setValue(total);
         invH.getRange(rowIdx, 7).setValue(d.payTerms || "COD");
 
+        // Capture the pre-edit line items so we can reverse their stock effect.
+        var oldItems = _readInvoiceItems(ss, invId);
+
         // Replace line items
         var invI = ss.getSheetByName(CFG.INV_I);
         if (invI) {
@@ -738,6 +741,10 @@ function doPost(e) {
           });
           invI.getRange(iRow, 1, itemRows.length, 7).setValues(itemRows);
         }
+
+        // Reverse the old line items' stock effect, then apply the new ones.
+        _applyInventoryDelta(ss, oldItems, -1);
+        _applyInventoryDelta(ss, d.items, 1);
 
         // Refresh status against recorded payments + AR balances
         _updateInvoiceStatus(ss, invId, 0);
@@ -772,6 +779,50 @@ function doPost(e) {
           id: invId,
           pdfUrl: pdfUrl
         });
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  ADJUST STOCK — manual goods receipt / correction
+      //  body.data = { pid, delta, reason }
+      // ══════════════════════════════════════════════════════
+      case "adjust_stock": {
+        var d = body.data;
+        if (!d || !d.pid) return _apiErr("Missing product id");
+        if (d.delta === undefined || d.delta === null || isNaN(parseFloat(d.delta))) return _apiErr("Missing/invalid delta");
+        var res = _adjustStock(ss, d.pid, parseFloat(d.delta));
+        return _apiOk(res);
+      }
+
+      // ══════════════════════════════════════════════════════
+      //  CREATE CREDIT NOTE (customer return from rider app)
+      //  body.creditNote / body.data = { custId, reason, total,
+      //    returnId, items:[{pid,pname,qty,rate}] }
+      // ══════════════════════════════════════════════════════
+      case "create_credit_note": {
+        var cn = body.data || body.creditNote || {};
+        var custId = cn.custId || cn.customer_id || cn.gas_customer_id || "";
+        var items = (cn.items || []).map(function(it) {
+          return { pid: it.pid || it.product_id || "", pname: it.pname || it.product_name || "",
+                   qty: parseFloat(it.qty || it.quantity || 0), rate: parseFloat(it.rate || it.trade_price || 0) };
+        });
+        var total = parseFloat(cn.total) || items.reduce(function(s, i) { return s + i.qty * i.rate; }, 0);
+        if (!custId || !items.length || total <= 0) return _apiErr("Missing custId, items or total");
+
+        var creditId = _getNextId(ss.getSheetByName(CFG.PAY), "PAY");
+        // A credit note reduces AR: record it as a "Received" credit against the customer.
+        savePayment(ss, {
+          payId: creditId,
+          date: cn.date || _today(),
+          type: "Received",
+          partyId: custId,
+          refId: cn.returnId || "",
+          amount: total,
+          notes: "Credit Note (return)" + (cn.reason ? " — " + cn.reason : "")
+        });
+        _recalcAR(ss, custId);
+        _applyReturnDelta(ss, items);
+
+        return _apiOk({ credit_id: creditId, message: "Credit note " + creditId + " recorded" });
       }
 
       // ══════════════════════════════════════════════════════
@@ -883,7 +934,8 @@ function doPost(e) {
           payTerms:   raw.payTerms || "COD",
           notes:      "[Rider App] " + (raw.notes || ""),
           date:       raw.date || (raw.created_at ? String(raw.created_at).split("T")[0] : null) || "",
-          items:      normalItems
+          items:      normalItems,
+          supabaseOrderId: raw.order_id || raw.orderId || ""
         };
 
         var total = normalItems.reduce(function(s, i) {
@@ -980,6 +1032,25 @@ function _fmtDate(val) {
   return val.toString().substring(0, 10);
 }
 
+// Whole days elapsed from the given date to today (invoice aging).
+// Accepts a Date object or a string. Returns null if unparseable,
+// 0 for today or any future date (never negative).
+function _daysSince(val) {
+  if (val === null || val === undefined || val === "") return null;
+  var d;
+  if (val instanceof Date) {
+    d = val;
+  } else {
+    d = new Date(val.toString().substring(0, 10));
+  }
+  if (!d || isNaN(d.getTime())) return null;
+  var now = new Date();
+  var d0 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  var t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var diff = Math.floor((t0.getTime() - d0.getTime()) / 86400000);
+  return diff < 0 ? 0 : diff;
+}
+
 function _apiGetLastDataRow(ws, col) {
   col = col || 1;
   var total = ws.getLastRow();
@@ -1068,6 +1139,12 @@ function _writeInvoiceToSheet(ss, invId, d, total) {
     d.createdBy || "api"
   ]]);
 
+  // 3c sync mapping: stash the Supabase order id in a trailing column so the
+  // CRM can later push payment/status back to the rider app.
+  if (d.supabaseOrderId) {
+    invH.getRange(hRow, 9).setValue("sb_order:" + d.supabaseOrderId);
+  }
+
   var invI = ss.getSheetByName(CFG.INV_I);
   if (!invI) throw new Error("Invoice Items sheet not found");
 
@@ -1086,6 +1163,7 @@ function _writeInvoiceToSheet(ss, invId, d, total) {
 
   _ensureCustomerInAR(ss, d.custId);
   _recalcAR(ss, d.custId);
+  _applyInventoryDelta(ss, d.items, 1);
   return "Invoice " + invId + " saved";
 }
 
@@ -1404,8 +1482,14 @@ function voidInvoice(ss, invId) {
   var data = ws.getDataRange().getValues();
   for (var i = 3; i < data.length; i++) {
     if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+      var alreadyVoid = (data[i][5] || "").toString().trim().toLowerCase() === "voided";
       ws.getRange(i + 1, 5).setValue(0);
       ws.getRange(i + 1, 6).setValue("Voided");
+      // Return the voided invoice's units to stock (only once).
+      if (!alreadyVoid) {
+        _applyInventoryDelta(ss, _readInvoiceItems(ss, invId), -1);
+      }
+      _syncInvoicePaymentToSupabase(ss, invId);
       return "Invoice " + invId + " voided";
     }
   }
@@ -1463,6 +1547,47 @@ function testNextCustomerId() {
       Logger.log("Row " + (4 + i) + " col A: [" + typeof r[0] + "] " + JSON.stringify(r[0]));
     });
   }
+}
+
+// Run this in the Apps Script editor to verify every sheet is read correctly.
+// Logs the row count for each entity and the detected header row + columns,
+// so you can confirm the webapp's "all" payload is fully populated.
+function testReadAll() {
+  var ss = _getSs();
+  if (!ss) { Logger.log("No spreadsheet"); return; }
+
+  var counts = {
+    customers: _readCustomers(ss).length,
+    vendors:   _readVendors(ss).length,
+    products:  _readProducts(ss).length,
+    invoices:  _readInvoices(ss).length,
+    purchases: _readPurchases(ss).length,
+    payments:  _readPayments(ss).length,
+    expenses:  _readExpenses(ss).length,
+    ar:        _readAR(ss).length,
+    ap:        _readAP(ss).length,
+    inventory: _readInventory(ss).length
+  };
+  Logger.log("ROW COUNTS: " + JSON.stringify(counts, null, 2));
+
+  // Show the header row each reader detected for the main sheets.
+  var checks = [
+    [CFG.CUST,  ["id", "name", "city", "area", "contact", "phone", "balance", "notes"]],
+    [CFG.VEN,   ["id", "name", "category", "contact", "phone", "balance", "notes"]],
+    [CFG.PROD,  ["id", "name", "category", "vendor", "cost", "price", "minstock"]],
+    [CFG.INV_H, ["invoice", "date", "customer", "total", "status", "terms"]],
+    [CFG.PAY,   ["payment", "date", "type", "party", "ref", "amount"]],
+    [CFG.EXP,   ["expense", "date", "category", "amount"]],
+    [CFG.AR,    ["customer", "billed", "paid", "balance"]],
+    [CFG.AP,    ["vendor", "ordered", "paid", "balance"]],
+    [CFG.INV_L, ["product", "cost", "purchased", "sold", "stock"]]
+  ];
+  checks.forEach(function(ch) {
+    var ws = ss.getSheetByName(ch[0]);
+    if (!ws) { Logger.log(ch[0] + ": SHEET NOT FOUND"); return; }
+    var map = _headerMap(ws, ch[1]);
+    Logger.log(ch[0] + " header columns: " + JSON.stringify(map));
+  });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1559,30 +1684,106 @@ function _lookupCustomer(ss, custId) {
   return null;
 }
 
+// ════════════════════════════════════════════════════════════
+//  HEADER-AWARE COLUMN MAPPING
+//  Readers previously assumed fixed column positions (id=A, name=B…).
+//  If a column is inserted/reordered in the Sheet, every field after it
+//  shifts and reads blank/wrong data ("some data shows, some doesn't").
+//  These helpers detect the header row and map each field by its column
+//  name, falling back to the legacy fixed index so behaviour never
+//  regresses when no header is found.
+// ════════════════════════════════════════════════════════════
+function _normHdr(s) {
+  return (s == null ? "" : s.toString()).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Scan the first 3 rows, pick the one that best matches the expected field
+// keywords, and return { name -> zero-based column index }.
+function _headerMap(ws, expectedKeys) {
+  var lastCol = ws.getLastColumn();
+  var lastRow = ws.getLastRow();
+  if (lastCol < 1 || lastRow < 1) return {};
+  var scanRows = Math.min(3, lastRow);
+  var top = ws.getRange(1, 1, scanRows, lastCol).getValues();
+  var keys = (expectedKeys || []).map(_normHdr);
+
+  var bestIdx = -1, bestScore = -1;
+  for (var i = 0; i < top.length; i++) {
+    var score = 0;
+    for (var c = 0; c < top[i].length; c++) {
+      var n = _normHdr(top[i][c]);
+      if (!n) continue;
+      for (var k = 0; k < keys.length; k++) {
+        if (keys[k] && (n.indexOf(keys[k]) !== -1 || keys[k].indexOf(n) !== -1)) { score++; break; }
+      }
+    }
+    if (score > bestScore) { bestScore = score; bestIdx = i; }
+  }
+
+  var map = {};
+  // Require at least 2 header matches before trusting the row — otherwise the
+  // sheet has no usable header and we leave the map empty (pure fallback mode).
+  if (bestIdx >= 0 && bestScore >= 2) {
+    for (var ci = 0; ci < top[bestIdx].length; ci++) {
+      var nn = _normHdr(top[bestIdx][ci]);
+      if (nn && map[nn] == null) map[nn] = ci;
+    }
+  }
+  return map;
+}
+
+// Resolve a field's column index: try each candidate header name (exact then
+// contains), else use the legacy fixed fallback index.
+function _col(map, candidates, fallback) {
+  for (var i = 0; i < candidates.length; i++) {
+    var n = _normHdr(candidates[i]);
+    if (n && map[n] != null) return map[n];
+  }
+  for (var key in map) {
+    for (var j = 0; j < candidates.length; j++) {
+      var c = _normHdr(candidates[j]);
+      if (c && (key.indexOf(c) !== -1 || c.indexOf(key) !== -1)) return map[key];
+    }
+  }
+  return fallback;
+}
+
 function _readCustomers(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
   var ws = ss.getSheetByName(CFG.CUST);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 8).getValues();
+
+  var hm = _headerMap(ws, ["id", "name", "city", "area", "contact", "phone", "balance", "notes"]);
+  var c = {
+    id:      _col(hm, ["customerid", "custid", "id"], 0),
+    name:    _col(hm, ["customername", "name", "store"], 1),
+    city:    _col(hm, ["city"], 2),
+    area:    _col(hm, ["area"], 3),
+    contact: _col(hm, ["contactperson", "contact", "owner", "ownername"], 4),
+    phone:   _col(hm, ["phone", "mobile", "contactno"], 5),
+    openBal: _col(hm, ["openingbalance", "openbal", "balance"], 6),
+    notes:   _col(hm, ["notes", "note", "remarks"], 7)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0] || !r[0].toString().trim()) return;
+    if (!r[c.id] || !r[c.id].toString().trim()) return;
     out.push({
-      id: r[0].toString().trim(),
-      name: r[1] ? r[1].toString().trim() : "",
-      city: r[2] ? r[2].toString().trim() : "",
-      area: r[3] ? r[3].toString().trim() : "",
-      contact: r[4] ? r[4].toString().trim() : "",
-      phone: r[5] ? r[5].toString().trim() : "",
-      openBal: parseFloat(r[6]) || 0,
-      notes: r[7] ? r[7].toString().trim() : ""
+      id: r[c.id].toString().trim(),
+      name: r[c.name] ? r[c.name].toString().trim() : "",
+      city: r[c.city] ? r[c.city].toString().trim() : "",
+      area: r[c.area] ? r[c.area].toString().trim() : "",
+      contact: r[c.contact] ? r[c.contact].toString().trim() : "",
+      phone: r[c.phone] ? r[c.phone].toString().trim() : "",
+      openBal: parseFloat(r[c.openBal]) || 0,
+      notes: r[c.notes] ? r[c.notes].toString().trim() : ""
     });
   });
-  
+
   return out;
 }
 
@@ -1592,23 +1793,34 @@ function _readVendors(ss) {
   
   var ws = ss.getSheetByName(CFG.VEN);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 8).getValues();
+
+  var hm = _headerMap(ws, ["id", "name", "category", "contact", "phone", "balance", "notes"]);
+  var c = {
+    id:       _col(hm, ["vendorid", "venid", "id"], 0),
+    name:     _col(hm, ["vendorname", "name"], 1),
+    category: _col(hm, ["category", "type"], 2),
+    contact:  _col(hm, ["contactperson", "contact", "owner"], 3),
+    phone:    _col(hm, ["phone", "mobile", "contactno"], 4),
+    openBal:  _col(hm, ["openingbalance", "openbal", "balance"], 5),
+    notes:    _col(hm, ["notes", "note", "remarks"], 6)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0] || !r[0].toString().trim()) return;
+    if (!r[c.id] || !r[c.id].toString().trim()) return;
     out.push({
-      id: r[0].toString().trim(),
-      name: r[1] ? r[1].toString().trim() : "",
-      category: r[2] ? r[2].toString().trim() : "",
-      contact: r[3] ? r[3].toString().trim() : "",
-      phone: r[4] ? r[4].toString().trim() : "",
-      openBal: parseFloat(r[5]) || 0,
-      notes: r[6] ? r[6].toString().trim() : ""
+      id: r[c.id].toString().trim(),
+      name: r[c.name] ? r[c.name].toString().trim() : "",
+      category: r[c.category] ? r[c.category].toString().trim() : "",
+      contact: r[c.contact] ? r[c.contact].toString().trim() : "",
+      phone: r[c.phone] ? r[c.phone].toString().trim() : "",
+      openBal: parseFloat(r[c.openBal]) || 0,
+      notes: r[c.notes] ? r[c.notes].toString().trim() : ""
     });
   });
-  
+
   return out;
 }
 
@@ -1618,24 +1830,34 @@ function _readProducts(ss) {
   
   var ws = ss.getSheetByName(CFG.PROD);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var numCols = Math.min(ws.getLastColumn(), 9);
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, numCols).getValues();
+
+  var hm = _headerMap(ws, ["id", "name", "category", "vendor", "cost", "price", "minstock"]);
+  var c = {
+    id:       _col(hm, ["productid", "prodid", "pid", "id"], 0),
+    name:     _col(hm, ["productname", "name", "description"], 1),
+    category: _col(hm, ["category", "type"], 2),
+    vendorId: _col(hm, ["vendorid", "venid", "vendor"], 3),
+    cost:     _col(hm, ["cost", "costprice", "buyprice", "purchaseprice"], 5),
+    price:    _col(hm, ["price", "saleprice", "tradeprice", "sellprice"], 6),
+    minStock: _col(hm, ["minstock", "minimumstock", "reorder"], 8)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0] || !r[1]) return;
+    if (!r[c.id] || !r[c.name]) return;
     out.push({
-      id: r[0].toString().trim(),
-      name: r[1].toString().trim(),
-      category: r[2] ? r[2].toString().trim() : "",
-      vendorId: r[3] ? r[3].toString().trim() : "",
-      cost: parseFloat(r[5]) || 0,
-      price: parseFloat(r[6]) || 0,
-      minStock: parseFloat(r[8]) || 0
+      id: r[c.id].toString().trim(),
+      name: r[c.name].toString().trim(),
+      category: r[c.category] ? r[c.category].toString().trim() : "",
+      vendorId: r[c.vendorId] ? r[c.vendorId].toString().trim() : "",
+      cost: parseFloat(r[c.cost]) || 0,
+      price: parseFloat(r[c.price]) || 0,
+      minStock: parseFloat(r[c.minStock]) || 0
     });
   });
-  
+
   return out;
 }
 
@@ -1646,26 +1868,55 @@ function _readInvoices(ss, limit) {
   var ws = ss.getSheetByName(CFG.INV_H);
   if (!ws || ws.getLastRow() < 4) return [];
   
+  var hm = _headerMap(ws, ["invoice", "date", "customer", "total", "status", "terms", "createdby"]);
+  var mapped = {
+    id:        _col(hm, ["invoiceid", "invid", "invoice", "id"], 0),
+    date:      _col(hm, ["date"], 1),
+    custId:    _col(hm, ["customerid", "custid"], 2),
+    custName:  _col(hm, ["customername", "customer", "custname"], 3),
+    total:     _col(hm, ["total", "amount", "grandtotal"], 4),
+    status:    _col(hm, ["status"], 5),
+    payTerms:  _col(hm, ["payterms", "paymentterms", "terms"], 6),
+    createdBy: _col(hm, ["createdby", "creator", "by"], 7)
+  };
+  // Canonical layout used as a fallback when header detection misfires.
+  var fixed = { id: 0, date: 1, custId: 2, custName: 3, total: 4, status: 5, payTerms: 6, createdBy: 7 };
+
   var lastRow = ws.getLastRow();
   var startRow = Math.max(4, lastRow - (limit || 300) + 1);
   var numRows = lastRow - startRow + 1;
-  var data = ws.getRange(startRow, 1, numRows, 8).getValues();
-  var out = [];
-  
-  data.forEach(function(r) {
-    if (!r[0]) return;
-    out.push({
-      id: r[0].toString().trim(),
-      date: _fmtDate(r[1]),
-      custId: r[2] ? r[2].toString().trim() : "",
-      custName: r[3] ? r[3].toString().trim() : "",
-      total: parseFloat(r[4]) || 0,
-      status: r[5] ? r[5].toString().trim() : "Unpaid",
-      payTerms: r[6] ? r[6].toString().trim() : "COD",
-      createdBy: r[7] ? r[7].toString().trim() : ""
+  var data = ws.getRange(startRow, 1, numRows, ws.getLastColumn()).getValues();
+
+  function build(c) {
+    var rows = [];
+    data.forEach(function(r) {
+      if (r[c.id] === null || r[c.id] === undefined || r[c.id].toString().trim() === "") return;
+      rows.push({
+        id: r[c.id].toString().trim(),
+        date: _fmtDate(r[c.date]),
+        custId: r[c.custId] ? r[c.custId].toString().trim() : "",
+        custName: r[c.custName] ? r[c.custName].toString().trim() : "",
+        total: parseFloat(r[c.total]) || 0,
+        status: r[c.status] ? r[c.status].toString().trim() : "Unpaid",
+        payTerms: r[c.payTerms] ? r[c.payTerms].toString().trim() : "COD",
+        createdBy: r[c.createdBy] ? r[c.createdBy].toString().trim() : "",
+        ageDays: _daysSince(r[c.date])
+      });
     });
-  });
-  
+    return rows;
+  }
+
+  var out = build(mapped);
+  // FIX: if header-mapped columns produced no invoices but the sheet clearly
+  // has data rows, the header scan picked the wrong id column and silently
+  // skipped every row. Retry with the canonical fixed layout so invoices load.
+  if (out.length === 0) {
+    var anyData = data.some(function(r) {
+      return r.join("").toString().trim() !== "";
+    });
+    if (anyData) out = build(fixed);
+  }
+
   out.reverse();
   return out;
 }
@@ -1673,25 +1924,36 @@ function _readInvoices(ss, limit) {
 function _readInvoiceItems(ss, invId) {
   var ws = ss.getSheetByName(CFG.INV_I);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 7).getValues();
+
+  var hm = _headerMap(ws, ["invoice", "product", "name", "qty", "rate", "total", "notes"]);
+  var c = {
+    invId: _col(hm, ["invoiceid", "invid", "invoice"], 0),
+    pid:   _col(hm, ["productid", "prodid", "pid"], 1),
+    pname: _col(hm, ["productname", "pname", "name", "description"], 2),
+    qty:   _col(hm, ["qty", "quantity"], 3),
+    rate:  _col(hm, ["rate", "price", "unitprice"], 4),
+    total: _col(hm, ["total", "amount", "linetotal"], 5),
+    notes: _col(hm, ["notes", "note", "remarks"], 6)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var items = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0] || r[0].toString().trim().toUpperCase() !== invId.toUpperCase()) {
+    if (!r[c.invId] || r[c.invId].toString().trim().toUpperCase() !== invId.toUpperCase()) {
       return;
     }
     items.push({
-      invId: r[0].toString().trim(),
-      pid: r[1] ? r[1].toString().trim() : "",
-      pname: r[2] ? r[2].toString().trim() : "",
-      qty: parseFloat(r[3]) || 0,
-      rate: parseFloat(r[4]) || 0,
-      total: parseFloat(r[5]) || 0,
-      notes: r[6] ? r[6].toString().trim() : ""
+      invId: r[c.invId].toString().trim(),
+      pid: r[c.pid] ? r[c.pid].toString().trim() : "",
+      pname: r[c.pname] ? r[c.pname].toString().trim() : "",
+      qty: parseFloat(r[c.qty]) || 0,
+      rate: parseFloat(r[c.rate]) || 0,
+      total: parseFloat(r[c.total]) || 0,
+      notes: r[c.notes] ? r[c.notes].toString().trim() : ""
     });
   });
-  
+
   return items;
 }
 
@@ -1701,23 +1963,34 @@ function _readPurchases(ss) {
   
   var ws = ss.getSheetByName(CFG.PUR_H);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 7).getValues();
+
+  var hm = _headerMap(ws, ["purchase", "date", "vendor", "total", "paid", "notes"]);
+  var c = {
+    id:       _col(hm, ["purchaseid", "purid", "purchase", "id"], 0),
+    date:     _col(hm, ["date"], 1),
+    vendorId: _col(hm, ["vendorid", "venid"], 2),
+    vendor:   _col(hm, ["vendorname", "vendor"], 3),
+    total:    _col(hm, ["total", "amount", "grandtotal"], 4),
+    paid:     _col(hm, ["paid", "amountpaid"], 5),
+    notes:    _col(hm, ["notes", "note", "remarks"], 6)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0]) return;
+    if (!r[c.id]) return;
     out.push({
-      id: r[0].toString().trim(),
-      date: _fmtDate(r[1]),
-      vendorId: r[2] ? r[2].toString().trim() : "",
-      vendor: r[3] ? r[3].toString().trim() : "",
-      total: parseFloat(r[4]) || 0,
-      paid: parseFloat(r[5]) || 0,
-      notes: r[6] ? r[6].toString().trim() : ""
+      id: r[c.id].toString().trim(),
+      date: _fmtDate(r[c.date]),
+      vendorId: r[c.vendorId] ? r[c.vendorId].toString().trim() : "",
+      vendor: r[c.vendor] ? r[c.vendor].toString().trim() : "",
+      total: parseFloat(r[c.total]) || 0,
+      paid: parseFloat(r[c.paid]) || 0,
+      notes: r[c.notes] ? r[c.notes].toString().trim() : ""
     });
   });
-  
+
   out.reverse();
   return out;
 }
@@ -1728,24 +2001,36 @@ function _readPayments(ss) {
   
   var ws = ss.getSheetByName(CFG.PAY);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 8).getValues();
+
+  var hm = _headerMap(ws, ["payment", "date", "type", "party", "ref", "amount", "notes"]);
+  var c = {
+    id:        _col(hm, ["paymentid", "payid", "payment", "id"], 0),
+    date:      _col(hm, ["date"], 1),
+    type:      _col(hm, ["type", "paymenttype"], 2),
+    partyId:   _col(hm, ["partyid", "customerid", "vendorid", "custid"], 3),
+    partyName: _col(hm, ["partyname", "customername", "vendorname", "party", "name"], 4),
+    refId:     _col(hm, ["refid", "reference", "invoiceid", "ref"], 5),
+    amount:    _col(hm, ["amount", "total"], 6),
+    notes:     _col(hm, ["notes", "note", "method", "remarks"], 7)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0]) return;
+    if (!r[c.id]) return;
     out.push({
-      id: r[0].toString().trim(),
-      date: _fmtDate(r[1]),
-      type: r[2] ? r[2].toString().trim() : "",
-      partyId: r[3] ? r[3].toString().trim() : "",
-      partyName: r[4] ? r[4].toString().trim() : "",
-      refId: r[5] ? r[5].toString().trim() : "",
-      amount: parseFloat(r[6]) || 0,
-      notes: r[7] ? r[7].toString().trim() : ""
+      id: r[c.id].toString().trim(),
+      date: _fmtDate(r[c.date]),
+      type: r[c.type] ? r[c.type].toString().trim() : "",
+      partyId: r[c.partyId] ? r[c.partyId].toString().trim() : "",
+      partyName: r[c.partyName] ? r[c.partyName].toString().trim() : "",
+      refId: r[c.refId] ? r[c.refId].toString().trim() : "",
+      amount: parseFloat(r[c.amount]) || 0,
+      notes: r[c.notes] ? r[c.notes].toString().trim() : ""
     });
   });
-  
+
   out.reverse();
   return out;
 }
@@ -1756,22 +2041,32 @@ function _readExpenses(ss) {
   
   var ws = ss.getSheetByName(CFG.EXP);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 7).getValues();
+
+  var hm = _headerMap(ws, ["expense", "date", "category", "notes", "amount", "by"]);
+  var c = {
+    id:       _col(hm, ["expenseid", "expid", "expense", "id"], 0),
+    date:     _col(hm, ["date"], 1),
+    category: _col(hm, ["category", "type"], 2),
+    notes:    _col(hm, ["notes", "description", "desc", "note", "remarks"], 3),
+    amount:   _col(hm, ["amount", "total"], 4),
+    by:       _col(hm, ["paidby", "by", "creator", "createdby"], 5)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0]) return;
+    if (!r[c.id]) return;
     out.push({
-      id: r[0].toString().trim(),
-      date: _fmtDate(r[1]),
-      category: r[2] ? r[2].toString().trim() : "",
-      notes: r[3] ? r[3].toString().trim() : "",
-      amount: parseFloat(r[4]) || 0,
-      by: r[5] ? r[5].toString().trim() : ""
+      id: r[c.id].toString().trim(),
+      date: _fmtDate(r[c.date]),
+      category: r[c.category] ? r[c.category].toString().trim() : "",
+      notes: r[c.notes] ? r[c.notes].toString().trim() : "",
+      amount: parseFloat(r[c.amount]) || 0,
+      by: r[c.by] ? r[c.by].toString().trim() : ""
     });
   });
-  
+
   out.reverse();
   return out;
 }
@@ -1782,23 +2077,34 @@ function _readAR(ss) {
   
   var ws = ss.getSheetByName(CFG.AR);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 7).getValues();
+
+  var hm = _headerMap(ws, ["customer", "city", "billed", "paid", "balance", "status"]);
+  var c = {
+    custId:      _col(hm, ["customerid", "custid", "id"], 0),
+    custName:    _col(hm, ["customername", "customer", "name"], 1),
+    city:        _col(hm, ["city", "area"], 2),
+    totalBilled: _col(hm, ["totalbilled", "billed", "invoiced"], 3),
+    totalPaid:   _col(hm, ["totalpaid", "paid", "received"], 4),
+    balance:     _col(hm, ["balance", "outstanding", "due"], 5),
+    status:      _col(hm, ["status"], 6)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0]) return;
+    if (!r[c.custId]) return;
     out.push({
-      custId: r[0].toString().trim(),
-      custName: r[1] ? r[1].toString().trim() : "",
-      city: r[2] ? r[2].toString().trim() : "",
-      totalBilled: parseFloat(r[3]) || 0,
-      totalPaid: parseFloat(r[4]) || 0,
-      balance: parseFloat(r[5]) || 0,
-      status: r[6] ? r[6].toString().trim() : ""
+      custId: r[c.custId].toString().trim(),
+      custName: r[c.custName] ? r[c.custName].toString().trim() : "",
+      city: r[c.city] ? r[c.city].toString().trim() : "",
+      totalBilled: parseFloat(r[c.totalBilled]) || 0,
+      totalPaid: parseFloat(r[c.totalPaid]) || 0,
+      balance: parseFloat(r[c.balance]) || 0,
+      status: r[c.status] ? r[c.status].toString().trim() : ""
     });
   });
-  
+
   return out;
 }
 
@@ -1808,22 +2114,32 @@ function _readAP(ss) {
   
   var ws = ss.getSheetByName(CFG.AP);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 6).getValues();
+
+  var hm = _headerMap(ws, ["vendor", "category", "ordered", "paid", "balance"]);
+  var c = {
+    vendorId:     _col(hm, ["vendorid", "venid", "id"], 0),
+    vendorName:   _col(hm, ["vendorname", "vendor", "name"], 1),
+    category:     _col(hm, ["category", "type"], 2),
+    totalOrdered: _col(hm, ["totalordered", "ordered", "purchased", "billed"], 3),
+    totalPaid:    _col(hm, ["totalpaid", "paid"], 4),
+    balance:      _col(hm, ["balance", "outstanding", "due"], 5)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0]) return;
+    if (!r[c.vendorId]) return;
     out.push({
-      vendorId: r[0].toString().trim(),
-      vendorName: r[1] ? r[1].toString().trim() : "",
-      category: r[2] ? r[2].toString().trim() : "",
-      totalOrdered: parseFloat(r[3]) || 0,
-      totalPaid: parseFloat(r[4]) || 0,
-      balance: parseFloat(r[5]) || 0
+      vendorId: r[c.vendorId].toString().trim(),
+      vendorName: r[c.vendorName] ? r[c.vendorName].toString().trim() : "",
+      category: r[c.category] ? r[c.category].toString().trim() : "",
+      totalOrdered: parseFloat(r[c.totalOrdered]) || 0,
+      totalPaid: parseFloat(r[c.totalPaid]) || 0,
+      balance: parseFloat(r[c.balance]) || 0
     });
   });
-  
+
   return out;
 }
 
@@ -1833,27 +2149,205 @@ function _readInventory(ss) {
   
   var ws = ss.getSheetByName(CFG.INV_L);
   if (!ws || ws.getLastRow() < 4) return [];
-  
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 10).getValues();
+
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var c = {
+    pid:        _col(hm, ["productid", "prodid", "pid", "id"], 0),
+    pname:      _col(hm, ["productname", "pname", "name", "description"], 1),
+    category:   _col(hm, ["category", "type"], 2),
+    cost:       _col(hm, ["cost", "costprice"], 3),
+    purchased:  _col(hm, ["purchased", "totalpurchased", "bought"], 4),
+    sold:       _col(hm, ["sold", "totalsold"], 5),
+    returned:   _col(hm, ["returned", "salesreturned", "custreturned"], 6),
+    prReturned: _col(hm, ["purchasereturned", "prreturned", "vendorreturned"], 7),
+    stock:      _col(hm, ["currentstock", "stock", "instock", "balance"], 8),
+    minStock:   _col(hm, ["minstock", "minimumstock", "reorder"], 9)
+  };
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
   var out = [];
-  
+
   data.forEach(function(r) {
-    if (!r[0]) return;
+    if (!r[c.pid]) return;
     out.push({
-      pid: r[0].toString().trim(),
-      pname: r[1] ? r[1].toString().trim() : "",
-      category: r[2] ? r[2].toString().trim() : "",
-      cost: parseFloat(r[3]) || 0,
-      purchased: parseFloat(r[4]) || 0,
-      sold: parseFloat(r[5]) || 0,
-      returned: parseFloat(r[6]) || 0,
-      prReturned: parseFloat(r[7]) || 0,
-      stock: parseFloat(r[8]) || 0,
-      minStock: parseFloat(r[9]) || 0
+      pid: r[c.pid].toString().trim(),
+      pname: r[c.pname] ? r[c.pname].toString().trim() : "",
+      category: r[c.category] ? r[c.category].toString().trim() : "",
+      cost: parseFloat(r[c.cost]) || 0,
+      purchased: parseFloat(r[c.purchased]) || 0,
+      sold: parseFloat(r[c.sold]) || 0,
+      returned: parseFloat(r[c.returned]) || 0,
+      prReturned: parseFloat(r[c.prReturned]) || 0,
+      stock: parseFloat(r[c.stock]) || 0,
+      minStock: parseFloat(r[c.minStock]) || 0
     });
   });
-  
+
   return out;
+}
+
+// Apply a stock movement for a set of invoice line items against Inventory_List.
+//   dir = +1 → a sale: sold += qty, stock -= qty
+//   dir = -1 → reverse a sale (void / delete / edit): sold -= qty, stock += qty
+// Header-aware; products not present in Inventory_List are logged and skipped
+// so an invoice operation is never blocked by a missing inventory row.
+function _applyInventoryDelta(ss, items, dir) {
+  ss = _getSs(ss);
+  if (!ss || !items || !items.length) return;
+  var ws = ss.getSheetByName(CFG.INV_L);
+  if (!ws || ws.getLastRow() < 4) return;
+
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var cPid  = _col(hm, ["productid", "prodid", "pid", "id"], 0);
+  var cSold = _col(hm, ["sold", "totalsold"], 5);
+  var cStk  = _col(hm, ["currentstock", "stock", "instock", "balance"], 8);
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var index = {};
+  for (var i = 0; i < data.length; i++) {
+    var id = data[i][cPid];
+    if (id !== null && id !== undefined && id.toString().trim() !== "") {
+      index[id.toString().trim().toUpperCase()] = i;
+    }
+  }
+
+  items.forEach(function(it) {
+    var pid = (it.pid || it.product_id || "").toString().trim().toUpperCase();
+    var qty = parseFloat(it.qty != null ? it.qty : it.quantity) || 0;
+    if (!pid || !qty) return;
+    var r = index[pid];
+    if (r === undefined) { Logger.log("_applyInventoryDelta: product not in Inventory_List: " + pid); return; }
+    var rowNum = r + 4;
+    var sold  = parseFloat(data[r][cSold]) || 0;
+    var stock = parseFloat(data[r][cStk]) || 0;
+    ws.getRange(rowNum, cSold + 1).setValue(sold + dir * qty);
+    ws.getRange(rowNum, cStk + 1).setValue(stock - dir * qty);
+  });
+}
+
+// Manual stock adjustment (goods receipt / correction) since CRM purchases
+// don't carry line items. delta > 0 adds stock (and to 'purchased'); delta < 0
+// removes. Returns the new stock level.
+function _adjustStock(ss, pid, delta) {
+  ss = _getSs(ss);
+  if (!ss) throw new Error("Spreadsheet not found");
+  var ws = ss.getSheetByName(CFG.INV_L);
+  if (!ws || ws.getLastRow() < 4) throw new Error("Inventory sheet not found");
+  pid = (pid || "").toString().trim();
+  delta = parseFloat(delta) || 0;
+  if (!pid) throw new Error("Product id required");
+
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var cPid  = _col(hm, ["productid", "prodid", "pid", "id"], 0);
+  var cPur  = _col(hm, ["purchased", "totalpurchased", "bought"], 4);
+  var cStk  = _col(hm, ["currentstock", "stock", "instock", "balance"], 8);
+
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][cPid] && data[i][cPid].toString().trim().toUpperCase() === pid.toUpperCase()) {
+      var rowNum = i + 4;
+      var stock = (parseFloat(data[i][cStk]) || 0) + delta;
+      ws.getRange(rowNum, cStk + 1).setValue(stock);
+      if (delta > 0) {
+        var purchased = (parseFloat(data[i][cPur]) || 0) + delta;
+        ws.getRange(rowNum, cPur + 1).setValue(purchased);
+      }
+      return { pid: pid, stock: stock };
+    }
+  }
+  throw new Error("Product not found in Inventory_List: " + pid);
+}
+
+// ── 3c two-way sync: CRM → rider app (Supabase) ──────────────
+// Read the Supabase order id stashed on an invoice header (column 9).
+function _findOrderIdForInvoice(ss, invId) {
+  try {
+    var ws = ss.getSheetByName(CFG.INV_H);
+    if (!ws || ws.getLastRow() < 4 || ws.getLastColumn() < 9) return "";
+    var data = ws.getRange(4, 1, ws.getLastRow() - 3, 9).getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+        var v = (data[i][8] || "").toString().trim();
+        return v.indexOf("sb_order:") === 0 ? v.substring(9) : "";
+      }
+    }
+  } catch (e) { Logger.log("_findOrderIdForInvoice: " + e.message); }
+  return "";
+}
+
+// Best-effort PATCH of a rider-app order. Credentials live in Script Properties
+// (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY); never blocks the CRM action.
+function _pushOrderStatusToSupabase(orderId, fields) {
+  if (!orderId || !fields) return;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var url = props.getProperty("SUPABASE_URL");
+    var key = props.getProperty("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) { Logger.log("Supabase sync skipped: missing SUPABASE_URL/SERVICE_ROLE_KEY"); return; }
+    var endpoint = url.replace(/\/$/, "") + "/rest/v1/orders?id=eq." + encodeURIComponent(orderId);
+    UrlFetchApp.fetch(endpoint, {
+      method: "patch",
+      contentType: "application/json",
+      headers: { apikey: key, Authorization: "Bearer " + key, Prefer: "return=minimal" },
+      payload: JSON.stringify(fields),
+      muteHttpExceptions: true
+    });
+  } catch (e) { Logger.log("_pushOrderStatusToSupabase: " + e.message); }
+}
+
+// Map an invoice → its rider order and push payment status/amount.
+function _syncInvoicePaymentToSupabase(ss, invId) {
+  var orderId = _findOrderIdForInvoice(ss, invId);
+  if (!orderId) return;
+  var ws = ss.getSheetByName(CFG.INV_H);
+  if (!ws || ws.getLastRow() < 4) return;
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 6).getValues();
+  var status = "", total = 0;
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+      total = parseFloat(data[i][4]) || 0;
+      status = (data[i][5] || "").toString().trim();
+      break;
+    }
+  }
+  var payWs = ss.getSheetByName(CFG.PAY);
+  var paid = 0;
+  if (payWs && payWs.getLastRow() > 3) {
+    var pData = payWs.getRange(4, 1, payWs.getLastRow() - 3, 7).getValues();
+    pData.forEach(function(p) {
+      if (p[5] && p[5].toString().trim() === invId && p[2] === "Received") paid += parseFloat(p[6]) || 0;
+    });
+  }
+  var ps = status.toLowerCase() === "voided" ? "void"
+         : (paid >= total && total > 0) ? "paid"
+         : paid > 0 ? "partial" : "unpaid";
+  _pushOrderStatusToSupabase(orderId, { payment_status: ps, amount_paid: paid });
+}
+
+// Customer return: add units back to stock and to the 'returned' tally.
+function _applyReturnDelta(ss, items) {
+  ss = _getSs(ss);
+  if (!ss || !items || !items.length) return;
+  var ws = ss.getSheetByName(CFG.INV_L);
+  if (!ws || ws.getLastRow() < 4) return;
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var cPid = _col(hm, ["productid", "prodid", "pid", "id"], 0);
+  var cRet = _col(hm, ["returned", "salesreturned", "custreturned"], 6);
+  var cStk = _col(hm, ["currentstock", "stock", "instock", "balance"], 8);
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var index = {};
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][cPid] && data[i][cPid].toString().trim() !== "") index[data[i][cPid].toString().trim().toUpperCase()] = i;
+  }
+  items.forEach(function(it) {
+    var pid = (it.pid || it.product_id || "").toString().trim().toUpperCase();
+    var qty = parseFloat(it.qty != null ? it.qty : it.quantity) || 0;
+    if (!pid || !qty) return;
+    var r = index[pid];
+    if (r === undefined) { Logger.log("_applyReturnDelta: not in Inventory_List: " + pid); return; }
+    ws.getRange(r + 4, cRet + 1).setValue((parseFloat(data[r][cRet]) || 0) + qty);
+    ws.getRange(r + 4, cStk + 1).setValue((parseFloat(data[r][cStk]) || 0) + qty);
+  });
 }
 
 function _readDashboard(ss) {
@@ -2237,6 +2731,7 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
           ? "Partial" 
           : "Unpaid";
       ws.getRange(i + 4, 6).setValue(status);
+      _syncInvoicePaymentToSupabase(ss, invId);
       return;
     }
   }
@@ -2265,11 +2760,28 @@ function _deleteInvoice(ss, invId) {
   ss = _getSs(ss);
   if (!ss) return "Error: Spreadsheet not found";
   
+  // Return units to stock before the rows are gone — but only if the invoice
+  // wasn't already Voided (voiding already reversed it).
+  var wasVoided = false;
+  var sheetHchk = ss.getSheetByName(CFG.INV_H);
+  if (sheetHchk) {
+    var chk = sheetHchk.getDataRange().getValues();
+    for (var ci = 3; ci < chk.length; ci++) {
+      if (chk[ci][0] && chk[ci][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
+        wasVoided = (chk[ci][5] || "").toString().trim().toLowerCase() === "voided";
+        break;
+      }
+    }
+  }
+  if (!wasVoided) {
+    _applyInventoryDelta(ss, _readInvoiceItems(ss, invId), -1);
+  }
+
   var sheetH = ss.getSheetByName(CFG.INV_H);
   if (sheetH) {
     var dataH = sheetH.getDataRange().getValues();
     for (var i = dataH.length - 1; i >= 3; i--) {
-      if (dataH[i][0] && 
+      if (dataH[i][0] &&
           dataH[i][0].toString().trim().toUpperCase() === invId.toUpperCase()) {
         sheetH.deleteRow(i + 1);
       }
