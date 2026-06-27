@@ -794,6 +794,38 @@ function doPost(e) {
       }
 
       // ══════════════════════════════════════════════════════
+      //  CREATE CREDIT NOTE (customer return from rider app)
+      //  body.creditNote / body.data = { custId, reason, total,
+      //    returnId, items:[{pid,pname,qty,rate}] }
+      // ══════════════════════════════════════════════════════
+      case "create_credit_note": {
+        var cn = body.data || body.creditNote || {};
+        var custId = cn.custId || cn.customer_id || cn.gas_customer_id || "";
+        var items = (cn.items || []).map(function(it) {
+          return { pid: it.pid || it.product_id || "", pname: it.pname || it.product_name || "",
+                   qty: parseFloat(it.qty || it.quantity || 0), rate: parseFloat(it.rate || it.trade_price || 0) };
+        });
+        var total = parseFloat(cn.total) || items.reduce(function(s, i) { return s + i.qty * i.rate; }, 0);
+        if (!custId || !items.length || total <= 0) return _apiErr("Missing custId, items or total");
+
+        var creditId = _getNextId(ss.getSheetByName(CFG.PAY), "PAY");
+        // A credit note reduces AR: record it as a "Received" credit against the customer.
+        savePayment(ss, {
+          payId: creditId,
+          date: cn.date || _today(),
+          type: "Received",
+          partyId: custId,
+          refId: cn.returnId || "",
+          amount: total,
+          notes: "Credit Note (return)" + (cn.reason ? " — " + cn.reason : "")
+        });
+        _recalcAR(ss, custId);
+        _applyReturnDelta(ss, items);
+
+        return _apiOk({ credit_id: creditId, message: "Credit note " + creditId + " recorded" });
+      }
+
+      // ══════════════════════════════════════════════════════
       //  MARK INVOICE PAID
       // ══════════════════════════════════════════════════════
       case "mark_paid": {
@@ -902,7 +934,8 @@ function doPost(e) {
           payTerms:   raw.payTerms || "COD",
           notes:      "[Rider App] " + (raw.notes || ""),
           date:       raw.date || (raw.created_at ? String(raw.created_at).split("T")[0] : null) || "",
-          items:      normalItems
+          items:      normalItems,
+          supabaseOrderId: raw.order_id || raw.orderId || ""
         };
 
         var total = normalItems.reduce(function(s, i) {
@@ -1105,6 +1138,12 @@ function _writeInvoiceToSheet(ss, invId, d, total) {
     d.payTerms || "COD",
     d.createdBy || "api"
   ]]);
+
+  // 3c sync mapping: stash the Supabase order id in a trailing column so the
+  // CRM can later push payment/status back to the rider app.
+  if (d.supabaseOrderId) {
+    invH.getRange(hRow, 9).setValue("sb_order:" + d.supabaseOrderId);
+  }
 
   var invI = ss.getSheetByName(CFG.INV_I);
   if (!invI) throw new Error("Invoice Items sheet not found");
@@ -1450,6 +1489,7 @@ function voidInvoice(ss, invId) {
       if (!alreadyVoid) {
         _applyInventoryDelta(ss, _readInvoiceItems(ss, invId), -1);
       }
+      _syncInvoicePaymentToSupabase(ss, invId);
       return "Invoice " + invId + " voided";
     }
   }
@@ -2218,6 +2258,98 @@ function _adjustStock(ss, pid, delta) {
   throw new Error("Product not found in Inventory_List: " + pid);
 }
 
+// ── 3c two-way sync: CRM → rider app (Supabase) ──────────────
+// Read the Supabase order id stashed on an invoice header (column 9).
+function _findOrderIdForInvoice(ss, invId) {
+  try {
+    var ws = ss.getSheetByName(CFG.INV_H);
+    if (!ws || ws.getLastRow() < 4 || ws.getLastColumn() < 9) return "";
+    var data = ws.getRange(4, 1, ws.getLastRow() - 3, 9).getValues();
+    for (var i = 0; i < data.length; i++) {
+      if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+        var v = (data[i][8] || "").toString().trim();
+        return v.indexOf("sb_order:") === 0 ? v.substring(9) : "";
+      }
+    }
+  } catch (e) { Logger.log("_findOrderIdForInvoice: " + e.message); }
+  return "";
+}
+
+// Best-effort PATCH of a rider-app order. Credentials live in Script Properties
+// (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY); never blocks the CRM action.
+function _pushOrderStatusToSupabase(orderId, fields) {
+  if (!orderId || !fields) return;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var url = props.getProperty("SUPABASE_URL");
+    var key = props.getProperty("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) { Logger.log("Supabase sync skipped: missing SUPABASE_URL/SERVICE_ROLE_KEY"); return; }
+    var endpoint = url.replace(/\/$/, "") + "/rest/v1/orders?id=eq." + encodeURIComponent(orderId);
+    UrlFetchApp.fetch(endpoint, {
+      method: "patch",
+      contentType: "application/json",
+      headers: { apikey: key, Authorization: "Bearer " + key, Prefer: "return=minimal" },
+      payload: JSON.stringify(fields),
+      muteHttpExceptions: true
+    });
+  } catch (e) { Logger.log("_pushOrderStatusToSupabase: " + e.message); }
+}
+
+// Map an invoice → its rider order and push payment status/amount.
+function _syncInvoicePaymentToSupabase(ss, invId) {
+  var orderId = _findOrderIdForInvoice(ss, invId);
+  if (!orderId) return;
+  var ws = ss.getSheetByName(CFG.INV_H);
+  if (!ws || ws.getLastRow() < 4) return;
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 6).getValues();
+  var status = "", total = 0;
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][0] && data[i][0].toString().trim().toUpperCase() === invId.toString().trim().toUpperCase()) {
+      total = parseFloat(data[i][4]) || 0;
+      status = (data[i][5] || "").toString().trim();
+      break;
+    }
+  }
+  var payWs = ss.getSheetByName(CFG.PAY);
+  var paid = 0;
+  if (payWs && payWs.getLastRow() > 3) {
+    var pData = payWs.getRange(4, 1, payWs.getLastRow() - 3, 7).getValues();
+    pData.forEach(function(p) {
+      if (p[5] && p[5].toString().trim() === invId && p[2] === "Received") paid += parseFloat(p[6]) || 0;
+    });
+  }
+  var ps = status.toLowerCase() === "voided" ? "void"
+         : (paid >= total && total > 0) ? "paid"
+         : paid > 0 ? "partial" : "unpaid";
+  _pushOrderStatusToSupabase(orderId, { payment_status: ps, amount_paid: paid });
+}
+
+// Customer return: add units back to stock and to the 'returned' tally.
+function _applyReturnDelta(ss, items) {
+  ss = _getSs(ss);
+  if (!ss || !items || !items.length) return;
+  var ws = ss.getSheetByName(CFG.INV_L);
+  if (!ws || ws.getLastRow() < 4) return;
+  var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
+  var cPid = _col(hm, ["productid", "prodid", "pid", "id"], 0);
+  var cRet = _col(hm, ["returned", "salesreturned", "custreturned"], 6);
+  var cStk = _col(hm, ["currentstock", "stock", "instock", "balance"], 8);
+  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var index = {};
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][cPid] && data[i][cPid].toString().trim() !== "") index[data[i][cPid].toString().trim().toUpperCase()] = i;
+  }
+  items.forEach(function(it) {
+    var pid = (it.pid || it.product_id || "").toString().trim().toUpperCase();
+    var qty = parseFloat(it.qty != null ? it.qty : it.quantity) || 0;
+    if (!pid || !qty) return;
+    var r = index[pid];
+    if (r === undefined) { Logger.log("_applyReturnDelta: not in Inventory_List: " + pid); return; }
+    ws.getRange(r + 4, cRet + 1).setValue((parseFloat(data[r][cRet]) || 0) + qty);
+    ws.getRange(r + 4, cStk + 1).setValue((parseFloat(data[r][cStk]) || 0) + qty);
+  });
+}
+
 function _readDashboard(ss) {
   ss = _getSs(ss);
   if (!ss) {
@@ -2599,6 +2731,7 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
           ? "Partial" 
           : "Unpaid";
       ws.getRange(i + 4, 6).setValue(status);
+      _syncInvoicePaymentToSupabase(ss, invId);
       return;
     }
   }
