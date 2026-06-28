@@ -514,30 +514,47 @@ function doPost(e) {
 
         var ws = ss.getSheetByName(CFG.CUST);
 
-        // Check for duplicate by supabase store_id in notes
+        // Resolve columns by header (1-based), falling back to the canonical
+        // A–H layout. Keeps the new row aligned with however the sheet is
+        // actually arranged, so the ID lands in the real ID column.
+        var custKeys = ["id", "name", "city", "area", "contact", "phone", "balance", "notes"];
+        var chm = _headerMap(ws, custKeys);
+        var col = {
+          id:      _col(chm, ["customerid", "custid", "id"], 0) + 1,
+          name:    _col(chm, ["customername", "name", "store"], 1) + 1,
+          city:    _col(chm, ["city"], 2) + 1,
+          area:    _col(chm, ["area"], 3) + 1,
+          contact: _col(chm, ["contactperson", "contact", "owner", "ownername"], 4) + 1,
+          phone:   _col(chm, ["phone", "mobile", "contactno"], 5) + 1,
+          openBal: _col(chm, ["openingbalance", "openbal", "balance"], 6) + 1,
+          notes:   _col(chm, ["notes", "note", "remarks"], 7) + 1
+        };
+
+        // Check for duplicate by supabase store_id in the notes column
         if (d.store_id) {
           var existRows = ws.getDataRange().getValues();
           var ref = "supabase_id:" + d.store_id;
           for (var ei = 3; ei < existRows.length; ei++) {
-            if (existRows[ei][0] && String(existRows[ei][7]).indexOf(ref) !== -1) {
-              var existId = String(existRows[ei][0]);
+            if (existRows[ei][col.id - 1] && String(existRows[ei][col.notes - 1]).indexOf(ref) !== -1) {
+              var existId = String(existRows[ei][col.id - 1]);
               return _apiOk({ id: existId, customer_id: existId, message: "Customer already exists: " + existId });
             }
           }
         }
 
         var newId = _getNextCustomerId(ss);
-        var row = _apiGetLastDataRow(ws, 1) + 1;
-        if (row < 4) row = 4;
+        var startR = _dataStartRow(ws, custKeys);
+        var row = _apiGetLastDataRow(ws, col.id) + 1;
+        if (row < startR) row = startR;
 
-        ws.getRange(row, 1).setValue(newId);
-        ws.getRange(row, 2).setValue(d.name);
-        ws.getRange(row, 3).setValue(d.city || d.area || "ISB");
-        ws.getRange(row, 4).setValue(d.area || "");
-        ws.getRange(row, 5).setValue(d.contact || d.owner_name || "");
-        ws.getRange(row, 6).setValue(d.phone || d.mobile || "");
-        ws.getRange(row, 7).setValue(parseFloat(d.openBal) || 0);
-        ws.getRange(row, 8).setValue(d.notes || (d.store_id ? "supabase_id:" + d.store_id : ""));
+        ws.getRange(row, col.id).setValue(newId);
+        ws.getRange(row, col.name).setValue(d.name);
+        ws.getRange(row, col.city).setValue(d.city || d.area || "ISB");
+        ws.getRange(row, col.area).setValue(d.area || "");
+        ws.getRange(row, col.contact).setValue(d.contact || d.owner_name || "");
+        ws.getRange(row, col.phone).setValue(d.phone || d.mobile || "");
+        ws.getRange(row, col.openBal).setValue(parseFloat(d.openBal) || 0);
+        ws.getRange(row, col.notes).setValue(d.notes || (d.store_id ? "supabase_id:" + d.store_id : ""));
 
         _ensureCustomerInAR(ss, newId);
 
@@ -1572,39 +1589,24 @@ function voidInvoice(ss, invId) {
 
 function _getNextCustomerId(ss) {
   ss = _getSs(ss);
-  if (!ss) return "C-0001";
+  if (!ss) return "C-001";
 
-  var ws = ss.getSheetByName(CFG.CUST);
-  if (!ws || ws.getLastRow() < 4) return "C-0001";
-
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, 1).getValues();
-  var max = 0;
-  var rowCount = 0;
-
-  data.forEach(function(r) {
-    var raw = r[0];
-    if (raw === null || raw === undefined || raw === "") return;
-    rowCount++;
-    var v = raw.toString().trim();
-
-    // Strategy 1: C-001, C-089, C-0001 — same approach as _getNextId
-    if (v.toUpperCase().startsWith("C-")) {
-      var n = parseInt(v.split("-").pop()) || 0;
-      if (n > max) max = n;
-      return;
-    }
-    // Strategy 2: pure numeric IDs stored as numbers (Sheets custom format)
-    if (/^\d+$/.test(v)) {
-      var n = parseInt(v) || 0;
-      if (n > max) max = n;
-    }
+  // Derive the next ID from the SAME reader the app uses (_readCustomers),
+  // which locates the ID column by header. The previous version hardcoded
+  // column A + row 4, so when the real ID column was elsewhere it read an
+  // empty range and reset every new customer back to C-0001.
+  var max = 0, padW = 3;
+  _readCustomers(ss).forEach(function(c) {
+    var v = (c.id || "").toString().trim();
+    var m = v.match(/(\d+)\s*$/);   // trailing digits: handles C-088, C-0088, CUST-88, 88
+    if (!m) return;
+    var n = parseInt(m[1], 10) || 0;
+    if (n > max) { max = n; padW = Math.max(3, m[1].length); }  // keep existing width (C-088 → C-089)
   });
 
-  // Fallback: if no C-style IDs found at all, base on row count
-  if (max === 0 && rowCount > 0) max = rowCount;
-
-  Logger.log("_getNextCustomerId: rowCount=" + rowCount + " max=" + max + " → C-" + String(max + 1).padStart(4, "0"));
-  return "C-" + String(max + 1).padStart(4, "0");
+  var next = "C-" + String(max + 1).padStart(padW, "0");
+  Logger.log("_getNextCustomerId: max=" + max + " → " + next);
+  return next;
 }
 
 // Run this function in Apps Script editor to verify customer ID generation
