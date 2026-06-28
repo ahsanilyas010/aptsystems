@@ -307,7 +307,7 @@ function _syncOrderFromWebhook(ss, payload) {
   });
   if (!items.length) return _apiJson({ ok: false, reason: "no_items" });
 
-  var invWs = ss.getSheetByName(CFG.INV_H);
+  var invWs = _invHeaderSheet(ss);
   var invId = _getNextId(invWs, "INV");
   var date = payload.created_at ? String(payload.created_at).split("T")[0] : new Date().toISOString().split("T")[0];
   var total = parseFloat(payload.total_value) || items.reduce(function(s, i) { return s + i.qty * i.rate; }, 0);
@@ -366,7 +366,7 @@ function doPost(e) {
         }
 
         // Step 1: Generate Invoice ID
-        var invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
+        var invId = _getNextId(_invHeaderSheet(ss), "INV");
         d.invId = invId;
         Logger.log("✓ Generated Invoice ID: " + invId);
 
@@ -690,7 +690,7 @@ function doPost(e) {
         }
         var invId = d.invId.toString().trim();
 
-        var invH = ss.getSheetByName(CFG.INV_H);
+        var invH = _invHeaderSheet(ss);
         if (!invH) return _apiErr("Invoice Headers sheet not found");
 
         var hData = invH.getDataRange().getValues();
@@ -723,7 +723,7 @@ function doPost(e) {
         var oldItems = _readInvoiceItems(ss, invId);
 
         // Replace line items
-        var invI = ss.getSheetByName(CFG.INV_I);
+        var invI = _invItemsSheet(ss);
         if (invI) {
           var iData = invI.getDataRange().getValues();
           for (var i = iData.length - 1; i >= 3; i--) {
@@ -832,7 +832,7 @@ function doPost(e) {
         var invId = body.invId;
         if (!invId) return _apiErr("Missing invId");
         
-        var ws = ss.getSheetByName(CFG.INV_H);
+        var ws = _invHeaderSheet(ss);
         var data = ws.getDataRange().getValues();
         var found = false;
         
@@ -857,7 +857,7 @@ function doPost(e) {
         var d = body.data;
         if (!d || !d.invId) return _apiErr("Missing invId");
 
-        var ws = ss.getSheetByName(CFG.INV_H);
+        var ws = _invHeaderSheet(ss);
         if (!ws) return _apiErr("Invoice Headers sheet not found");
 
         var data = ws.getDataRange().getValues();
@@ -915,7 +915,7 @@ function doPost(e) {
         }
 
         // Generate invoice ID
-        var invId = _getNextId(ss.getSheetByName(CFG.INV_H), "INV");
+        var invId = _getNextId(_invHeaderSheet(ss), "INV");
 
         // Resolve customer name + area/purchaser details
         var custName = _resolveCustomerName(ss, custId, raw);
@@ -1020,6 +1020,79 @@ function _getSs(ss) {
   return null;
 }
 
+// ── Sheet resolution (name-tolerant) ─────────────────────────
+// Tabs sometimes get renamed (e.g. "05_Invoice_Headers" → "05_Invoice"),
+// which silently broke invoice reads. _resolveSheet tries an explicit list
+// of candidate names first, then falls back to scanning every tab for one
+// whose header row best matches the expected columns — mirroring the
+// product-sheet fallback already used in doGet (GET_PRODUCT).
+function _resolveSheet(ss, names, signatureKeys) {
+  ss = _getSs(ss);
+  if (!ss) return null;
+  var i, w, firstExisting = null;
+  for (i = 0; i < (names || []).length; i++) {
+    if (!names[i]) continue;
+    w = ss.getSheetByName(names[i]);
+    if (!w) continue;
+    if (!firstExisting) firstExisting = w;
+    // Prefer a candidate that actually has data — guards against a stale,
+    // empty tab (e.g. an old "05_Invoice_Headers") shadowing the real one.
+    if (w.getLastRow() > 1) return w;
+  }
+  if (firstExisting) return firstExisting;
+  // Fallback: pick the tab whose header best matches the expected columns.
+  if (signatureKeys && signatureKeys.length) {
+    var sheets = ss.getSheets(), best = null, bestScore = 1; // require 2+ matches
+    for (i = 0; i < sheets.length; i++) {
+      var hm = _headerMap(sheets[i], signatureKeys);
+      var score = 0;
+      for (var k in hm) { if (hm.hasOwnProperty(k)) score++; }
+      // _headerMap only populates when it found a credible header row, so a
+      // non-empty map already implies a decent match; use its size as score.
+      if (score > bestScore) { bestScore = score; best = sheets[i]; }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
+function _invHeaderSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.INV_H, "05_Invoice", "05_Invoices", "Invoices", "Invoice"],
+    ["invoice", "date", "customer", "total", "status", "terms"]);
+}
+
+function _invItemsSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.INV_I, "06_Invoice_Items", "06_Invoice", "05_Invoice_Items", "Invoice_Items"],
+    ["invoice", "product", "qty", "rate"]);
+}
+
+// Find the first data row by locating the header row (same top-3 scan that
+// _headerMap uses) and returning the row after it. Falls back to 4 (the
+// legacy 3-header-row layout) when no header is detected.
+function _dataStartRow(ws, expectedKeys) {
+  var lastCol = ws.getLastColumn(), lastRow = ws.getLastRow();
+  if (lastCol < 1 || lastRow < 1) return 4;
+  var scanRows = Math.min(3, lastRow);
+  var top = ws.getRange(1, 1, scanRows, lastCol).getValues();
+  var keys = (expectedKeys || []).map(_normHdr);
+  var bestIdx = -1, bestScore = -1;
+  for (var i = 0; i < top.length; i++) {
+    var score = 0;
+    for (var c = 0; c < top[i].length; c++) {
+      var n = _normHdr(top[i][c]);
+      if (!n) continue;
+      for (var k = 0; k < keys.length; k++) {
+        if (keys[k] && (n.indexOf(keys[k]) !== -1 || keys[k].indexOf(n) !== -1)) { score++; break; }
+      }
+    }
+    if (score > bestScore) { bestScore = score; bestIdx = i; }
+  }
+  // Need at least 2 header matches to trust the detected row.
+  return (bestIdx >= 0 && bestScore >= 2) ? bestIdx + 2 : 4;
+}
+
 function _today() {
   return Utilities.formatDate(new Date(), API_CFG.TZ, "yyyy-MM-dd");
 }
@@ -1120,7 +1193,7 @@ function _getNextId(ws, prefix) {
 // Write a new invoice directly to INV_H and INV_I sheets.
 // Replaces the legacy saveInvoice() call to avoid double-PDF generation.
 function _writeInvoiceToSheet(ss, invId, d, total) {
-  var invH = ss.getSheetByName(CFG.INV_H);
+  var invH = _invHeaderSheet(ss);
   if (!invH) throw new Error("Invoice Headers sheet not found");
 
   var hRow = _apiGetLastDataRow(invH, 1) + 1;
@@ -1145,7 +1218,7 @@ function _writeInvoiceToSheet(ss, invId, d, total) {
     invH.getRange(hRow, 9).setValue("sb_order:" + d.supabaseOrderId);
   }
 
-  var invI = ss.getSheetByName(CFG.INV_I);
+  var invI = _invItemsSheet(ss);
   if (!invI) throw new Error("Invoice Items sheet not found");
 
   var iRow = _apiGetLastDataRow(invI, 1) + 1;
@@ -1188,7 +1261,7 @@ function _recalcAR(ss, custId) {
     if (arWs.getRange(rowIdx, 4).getFormula()) return;
 
     var billed = 0;
-    var invWs = ss.getSheetByName(CFG.INV_H);
+    var invWs = _invHeaderSheet(ss);
     if (invWs && invWs.getLastRow() > 3) {
       invWs.getRange(4, 1, invWs.getLastRow() - 3, 6).getValues().forEach(function(r) {
         var status = r[5] ? r[5].toString().trim().toUpperCase() : "";
@@ -1224,7 +1297,7 @@ function _recalcAR(ss, custId) {
 function _mergeCustomers(ss, groups) {
   var custWs = ss.getSheetByName(CFG.CUST);
   var arWs   = ss.getSheetByName(CFG.AR);
-  var invWs  = ss.getSheetByName(CFG.INV_H);
+  var invWs  = _invHeaderSheet(ss);
   var payWs  = ss.getSheetByName(CFG.PAY);
   var merged = 0, errors = [], snapshotGroups = [];
 
@@ -1313,7 +1386,7 @@ function _mergeCustomers(ss, groups) {
 // keepId onto its own id, then recalculates AR for everyone involved.
 function _undoMergeCustomers(ss, snapshot) {
   var custWs = ss.getSheetByName(CFG.CUST);
-  var invWs  = ss.getSheetByName(CFG.INV_H);
+  var invWs  = _invHeaderSheet(ss);
   var payWs  = ss.getSheetByName(CFG.PAY);
   var restored = 0, errors = [];
 
@@ -1476,7 +1549,7 @@ function savePurchase(ss, obj) {
 // Void an invoice in place: zero its total and mark it Voided so AR recalculation
 // excludes it (mirrors the "Voided" status check already used by _recalcAR).
 function voidInvoice(ss, invId) {
-  var ws = ss.getSheetByName(CFG.INV_H);
+  var ws = _invHeaderSheet(ss);
   if (!ws) throw new Error("Invoice Headers sheet not found");
 
   var data = ws.getDataRange().getValues();
@@ -1865,10 +1938,12 @@ function _readInvoices(ss, limit) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.INV_H);
-  if (!ws || ws.getLastRow() < 4) return [];
-  
-  var hm = _headerMap(ws, ["invoice", "date", "customer", "total", "status", "terms", "createdby"]);
+  var invKeys = ["invoice", "date", "customer", "total", "status", "terms", "createdby"];
+  var ws = _invHeaderSheet(ss);
+  var dataStart = ws ? _dataStartRow(ws, invKeys) : 4;
+  if (!ws || ws.getLastRow() < dataStart) return [];
+
+  var hm = _headerMap(ws, invKeys);
   var mapped = {
     id:        _col(hm, ["invoiceid", "invid", "invoice", "id"], 0),
     date:      _col(hm, ["date"], 1),
@@ -1883,7 +1958,7 @@ function _readInvoices(ss, limit) {
   var fixed = { id: 0, date: 1, custId: 2, custName: 3, total: 4, status: 5, payTerms: 6, createdBy: 7 };
 
   var lastRow = ws.getLastRow();
-  var startRow = Math.max(4, lastRow - (limit || 300) + 1);
+  var startRow = Math.max(dataStart, lastRow - (limit || 300) + 1);
   var numRows = lastRow - startRow + 1;
   var data = ws.getRange(startRow, 1, numRows, ws.getLastColumn()).getValues();
 
@@ -1922,10 +1997,13 @@ function _readInvoices(ss, limit) {
 }
 
 function _readInvoiceItems(ss, invId) {
-  var ws = ss.getSheetByName(CFG.INV_I);
-  if (!ws || ws.getLastRow() < 4) return [];
+  ss = _getSs(ss);
+  var itemKeys = ["invoice", "product", "name", "qty", "rate", "total", "notes"];
+  var ws = _invItemsSheet(ss);
+  var dataStart = ws ? _dataStartRow(ws, itemKeys) : 4;
+  if (!ws || ws.getLastRow() < dataStart) return [];
 
-  var hm = _headerMap(ws, ["invoice", "product", "name", "qty", "rate", "total", "notes"]);
+  var hm = _headerMap(ws, itemKeys);
   var c = {
     invId: _col(hm, ["invoiceid", "invid", "invoice"], 0),
     pid:   _col(hm, ["productid", "prodid", "pid"], 1),
@@ -1936,7 +2014,7 @@ function _readInvoiceItems(ss, invId) {
     notes: _col(hm, ["notes", "note", "remarks"], 6)
   };
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(dataStart, 1, ws.getLastRow() - dataStart + 1, ws.getLastColumn()).getValues();
   var items = [];
 
   data.forEach(function(r) {
@@ -2262,7 +2340,7 @@ function _adjustStock(ss, pid, delta) {
 // Read the Supabase order id stashed on an invoice header (column 9).
 function _findOrderIdForInvoice(ss, invId) {
   try {
-    var ws = ss.getSheetByName(CFG.INV_H);
+    var ws = _invHeaderSheet(ss);
     if (!ws || ws.getLastRow() < 4 || ws.getLastColumn() < 9) return "";
     var data = ws.getRange(4, 1, ws.getLastRow() - 3, 9).getValues();
     for (var i = 0; i < data.length; i++) {
@@ -2299,7 +2377,7 @@ function _pushOrderStatusToSupabase(orderId, fields) {
 function _syncInvoicePaymentToSupabase(ss, invId) {
   var orderId = _findOrderIdForInvoice(ss, invId);
   if (!orderId) return;
-  var ws = ss.getSheetByName(CFG.INV_H);
+  var ws = _invHeaderSheet(ss);
   if (!ws || ws.getLastRow() < 4) return;
   var data = ws.getRange(4, 1, ws.getLastRow() - 3, 6).getValues();
   var status = "", total = 0;
@@ -2387,7 +2465,7 @@ function _readDashboard(ss) {
       outstandingAR: snap[5][0] || 0
     };
   } catch(e) {
-    var invH = ss.getSheetByName(CFG.INV_H);
+    var invH = _invHeaderSheet(ss);
     var pay = ss.getSheetByName(CFG.PAY);
     var purH = ss.getSheetByName(CFG.PUR_H);
     var exp = ss.getSheetByName(CFG.EXP);
@@ -2497,8 +2575,8 @@ function _generatePdfForInvoice(ss, invId) {
   ss = _getSs(ss);
   if (!ss) return null;
   
-  var invH = ss.getSheetByName(CFG.INV_H);
-  var invI = ss.getSheetByName(CFG.INV_I);
+  var invH = _invHeaderSheet(ss);
+  var invI = _invItemsSheet(ss);
   
   if (!invH || !invI) return null;
 
@@ -2702,7 +2780,7 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
   ss = _getSs(ss);
   if (!ss) return;
   
-  var ws = ss.getSheetByName(CFG.INV_H);
+  var ws = _invHeaderSheet(ss);
   if (!ws) return;
   
   var data = ws.getLastRow() < 4 
@@ -2739,7 +2817,7 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
 
 function _findInvoiceCustId(ss, invId) {
   try {
-    var ws = ss.getSheetByName(CFG.INV_H);
+    var ws = _invHeaderSheet(ss);
     if (!ws || ws.getLastRow() < 4) return "";
     var data = ws.getRange(4, 1, ws.getLastRow() - 3, 3).getValues();
     for (var i = 0; i < data.length; i++) {
@@ -2763,7 +2841,7 @@ function _deleteInvoice(ss, invId) {
   // Return units to stock before the rows are gone — but only if the invoice
   // wasn't already Voided (voiding already reversed it).
   var wasVoided = false;
-  var sheetHchk = ss.getSheetByName(CFG.INV_H);
+  var sheetHchk = _invHeaderSheet(ss);
   if (sheetHchk) {
     var chk = sheetHchk.getDataRange().getValues();
     for (var ci = 3; ci < chk.length; ci++) {
@@ -2777,7 +2855,7 @@ function _deleteInvoice(ss, invId) {
     _applyInventoryDelta(ss, _readInvoiceItems(ss, invId), -1);
   }
 
-  var sheetH = ss.getSheetByName(CFG.INV_H);
+  var sheetH = _invHeaderSheet(ss);
   if (sheetH) {
     var dataH = sheetH.getDataRange().getValues();
     for (var i = dataH.length - 1; i >= 3; i--) {
@@ -2788,7 +2866,7 @@ function _deleteInvoice(ss, invId) {
     }
   }
   
-  var sheetI = ss.getSheetByName(CFG.INV_I);
+  var sheetI = _invItemsSheet(ss);
   if (sheetI) {
     var dataI = sheetI.getDataRange().getValues();
     for (var i = dataI.length - 1; i >= 3; i--) {
