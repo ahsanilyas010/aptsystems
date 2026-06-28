@@ -917,7 +917,8 @@ function CrmApp({ user, onLogout }) {
               <div><b>invoices array length:</b> {data?.invoices?.length??'missing key'}</div>
               <div><b>First invoice object:</b> <code style={{whiteSpace:"pre-wrap",display:"block",background:"#f7f7f7",padding:6,borderRadius:4,marginTop:4}}>{data?.invoices?.[0]?JSON.stringify(data.invoices[0],null,2):"(array is empty)"}</code></div>
               <div><b>dashboard snapshot:</b> <code style={{whiteSpace:"pre-wrap",display:"block",background:"#f7f7f7",padding:6,borderRadius:4,marginTop:4}}>{JSON.stringify(data?.dashboard,null,2)}</code></div>
-              <div style={{color:"#666",marginTop:4}}>If <b>invoices</b> is missing or empty, the fix is in Google Apps Script: redeploy the Web App or check the Invoices sheet tab name.</div>
+              <div><b>GAS runtime diagnostic (_debug):</b> <code style={{whiteSpace:"pre-wrap",display:"block",background:"#f7f7f7",padding:6,borderRadius:4,marginTop:4}}>{data?._debug?JSON.stringify(data._debug,null,2):"(no _debug field — the deployed Apps Script is NOT running the latest code; redeploy a New version)"}</code></div>
+              <div style={{color:"#666",marginTop:4}}>If <b>_debug</b> is missing, the live Web App is serving old code — redeploy a <b>New version</b> of the existing deployment. If <b>_debug</b> shows the tabs but invoices are still empty, send me this block.</div>
             </div>
           </details>
         )}

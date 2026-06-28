@@ -146,11 +146,15 @@ function doGet(e) {
         var inventory  = _readInventory(ss);
         var dashboard  = _readDashboard(ss);
         
-        return _apiOk({
+        var resp = {
           dashboard, customers, vendors, products, invoices,
           purchases, payments, expenses, ar, ap, inventory,
           lastSync: new Date().toISOString()
-        });
+        };
+        // Attach a runtime diagnostic only when invoices fail to load, so the
+        // CRM panel can show exactly what the live script sees.
+        if (!invoices.length) resp._debug = _invoiceDebug(ss);
+        return _apiOk(resp);
       }
 
       case "dashboard":  return _apiOk(_readDashboard(ss));
@@ -168,6 +172,8 @@ function doGet(e) {
         var limit = parseInt(e.parameter.limit) || 300;
         return _apiOk(_readInvoices(ss, limit));
       }
+
+      case "debug_sheets": return _apiOk(_invoiceDebug(ss));
 
       case "invoice_items": {
         var invId = e.parameter.id;
@@ -1085,6 +1091,32 @@ function _invItemsSheet(ss) {
     ["invoice", "product", "qty", "rate"]);
 }
 
+// Bump this whenever the file is redeployed so we can confirm the live Web App
+// is actually running the latest code (it shows up in the _debug payload).
+var API_BUILD = "inv-fix-2026-06-28b";
+
+// Runtime self-diagnostic: reports every tab name and probes the resolved
+// invoice header/items sheets (dimensions + first rows). Surfaced in the
+// CRM diagnostic panel when the invoice list comes back empty.
+function _invoiceDebug(ss) {
+  ss = _getSs(ss);
+  if (!ss) return { build: API_BUILD, error: "no spreadsheet" };
+  function probe(ws, keys) {
+    if (!ws) return "NOT RESOLVED";
+    var lr = ws.getLastRow(), lc = ws.getLastColumn();
+    var n = Math.min(6, lr);
+    var rows = (n > 0 && lc > 0) ? ws.getRange(1, 1, n, Math.min(lc, 8)).getValues() : [];
+    return { name: ws.getName(), lastRow: lr, lastCol: lc,
+             dataStart: _dataStartRow(ws, keys), firstRows: rows };
+  }
+  return {
+    build: API_BUILD,
+    allTabs: ss.getSheets().map(function(s) { return s.getName(); }),
+    header: probe(_invHeaderSheet(ss), ["invoice", "date", "customer", "total", "status", "terms"]),
+    items:  probe(_invItemsSheet(ss),  ["invoice", "product", "qty", "rate"])
+  };
+}
+
 // Find the first data row by locating the header row (same top-3 scan that
 // _headerMap uses) and returning the row after it. Falls back to 4 (the
 // legacy 3-header-row layout) when no header is detected.
@@ -1968,6 +2000,11 @@ function _readInvoices(ss, limit) {
     var rows = [];
     data.forEach(function(r) {
       if (r[c.id] === null || r[c.id] === undefined || r[c.id].toString().trim() === "") return;
+      // Skip banner / section-title rows: only the first column is filled while
+      // date and status are blank (e.g. the "APT ERP — Invoice Header" row).
+      var dateBlank = r[c.date] === null || r[c.date] === undefined || r[c.date].toString().trim() === "";
+      var statBlank = r[c.status] === null || r[c.status] === undefined || r[c.status].toString().trim() === "";
+      if (dateBlank && statBlank) return;
       rows.push({
         id: r[c.id].toString().trim(),
         date: _fmtDate(r[c.date]),
