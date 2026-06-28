@@ -1093,7 +1093,7 @@ function _invItemsSheet(ss) {
 
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "inv-fix-2026-06-28d";
+var API_BUILD = "inv-fix-2026-06-28e";
 
 // Runtime self-diagnostic: reports every tab name and probes the resolved
 // invoice header/items sheets (dimensions + first rows). Surfaced in the
