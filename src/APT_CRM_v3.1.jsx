@@ -909,6 +909,18 @@ function CrmApp({ user, onLogout }) {
             ])}
           />
         </div>
+        {invoices.length===0&&(
+          <details style={{marginTop:12,background:"#fffbe6",border:"1.5px solid #f5c518",borderRadius:8,padding:"10px 14px",fontSize:11}}>
+            <summary style={{cursor:"pointer",fontWeight:700,color:"#92680a"}}>⚠ No invoices returned — API diagnostic (expand)</summary>
+            <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>
+              <div><b>data keys:</b> {data?Object.keys(data).join(", "):"(no data)"}</div>
+              <div><b>invoices array length:</b> {data?.invoices?.length??'missing key'}</div>
+              <div><b>First invoice object:</b> <code style={{whiteSpace:"pre-wrap",display:"block",background:"#f7f7f7",padding:6,borderRadius:4,marginTop:4}}>{data?.invoices?.[0]?JSON.stringify(data.invoices[0],null,2):"(array is empty)"}</code></div>
+              <div><b>dashboard snapshot:</b> <code style={{whiteSpace:"pre-wrap",display:"block",background:"#f7f7f7",padding:6,borderRadius:4,marginTop:4}}>{JSON.stringify(data?.dashboard,null,2)}</code></div>
+              <div style={{color:"#666",marginTop:4}}>If <b>invoices</b> is missing or empty, the fix is in Google Apps Script: redeploy the Web App or check the Invoices sheet tab name.</div>
+            </div>
+          </details>
+        )}
       </div>
     );
   };
