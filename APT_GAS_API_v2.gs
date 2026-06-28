@@ -237,6 +237,7 @@ function _syncStoreFromWebhook(ss, payload) {
   if (!payload || !payload.name) return _apiJson({ ok: false, reason: "missing_name" });
 
   var ws = ss.getSheetByName(CFG.CUST);
+  if (!ws) return _apiJson({ ok: false, reason: "Customers sheet not found" });
   var rows = ws.getDataRange().getValues();
 
   // Check for existing customer with this supabase_id to avoid duplicates
@@ -519,6 +520,7 @@ function doPost(e) {
         if (!d || !d.name) return _apiErr("Missing name");
 
         var ws = ss.getSheetByName(CFG.CUST);
+        if (!ws) return _apiErr("Customers sheet not found");
 
         // Resolve columns by header (1-based), falling back to the canonical
         // A–H layout. Keeps the new row aligned with however the sheet is
@@ -1093,7 +1095,7 @@ function _invItemsSheet(ss) {
 
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "inv-fix-2026-06-28e";
+var API_BUILD = "inv-fix-2026-06-28f";
 
 // Runtime self-diagnostic: reports every tab name and probes the resolved
 // invoice header/items sheets (dimensions + first rows). Surfaced in the
@@ -1121,6 +1123,7 @@ function _invoiceDebug(ss) {
 // _headerMap uses) and returning the row after it. Falls back to 4 (the
 // legacy 3-header-row layout) when no header is detected.
 function _dataStartRow(ws, expectedKeys) {
+  if (!ws) return 4;
   var lastCol = ws.getLastColumn(), lastRow = ws.getLastRow();
   if (lastCol < 1 || lastRow < 1) return 4;
   var scanRows = Math.min(3, lastRow);
@@ -1174,6 +1177,7 @@ function _daysSince(val) {
 }
 
 function _apiGetLastDataRow(ws, col) {
+  if (!ws) return 3;
   col = col || 1;
   var total = ws.getLastRow();
   if (total < 4) return 3;
@@ -1807,6 +1811,7 @@ function _normHdr(s) {
 // Scan the first 3 rows, pick the one that best matches the expected field
 // keywords, and return { name -> zero-based column index }.
 function _headerMap(ws, expectedKeys) {
+  if (!ws) return {};
   var lastCol = ws.getLastColumn();
   var lastRow = ws.getLastRow();
   if (lastCol < 1 || lastRow < 1) return {};
