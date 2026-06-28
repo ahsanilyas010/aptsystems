@@ -15,6 +15,11 @@ import {
   getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
   signInWithEmailAndPassword
 } from "firebase/auth";
+import {
+  LayoutDashboard, Users, FileText, CreditCard, ShoppingCart, Truck, Receipt,
+  TrendingUp, Scale, Package, BarChart3, ClipboardList, Store, Bike, MapPin,
+  Boxes, Link2, Map as MapIcon, FileBarChart, Settings, Menu, RefreshCw, Leaf,
+} from "lucide-react";
 
 const firebaseConfig = {
   apiKey:     import.meta.env.VITE_FIREBASE_API_KEY,
@@ -117,6 +122,42 @@ const G = {
   card:"#FFFFFF", border:"#D0E8D0", sidebar:"#0F2010",
 };
 
+// Colorful icon + accent per nav item (keyed by tab id).
+const NAV_ICONS = {
+  dashboard:     { Icon: LayoutDashboard, color: "#4CAF50" },
+  customers:     { Icon: Users,           color: "#1565C0" },
+  invoices:      { Icon: FileText,        color: "#00897B" },
+  payments:      { Icon: CreditCard,      color: "#43A047" },
+  purchases:     { Icon: ShoppingCart,    color: "#6A1B9A" },
+  vendors:       { Icon: Truck,           color: "#5E35B1" },
+  expenses:      { Icon: Receipt,         color: "#C62828" },
+  pnl:           { Icon: TrendingUp,      color: "#2E7D32" },
+  arap:          { Icon: Scale,           color: "#F9A825" },
+  inventory:     { Icon: Package,         color: "#FB8C00" },
+  reports:       { Icon: BarChart3,       color: "#3949AB" },
+  "rider-orders":   { Icon: ClipboardList, color: "#E53935" },
+  "rider-stores":   { Icon: Store,         color: "#00897B" },
+  riders:           { Icon: Bike,          color: "#1E88E5" },
+  locations:        { Icon: MapPin,        color: "#D81B60" },
+  "rider-products": { Icon: Boxes,         color: "#FB8C00" },
+  "store-assign":   { Icon: Link2,         color: "#8E24AA" },
+  areas:            { Icon: MapIcon,       color: "#00ACC1" },
+  "rider-reports":  { Icon: FileBarChart,  color: "#3949AB" },
+  "rider-config":   { Icon: Settings,      color: "#607D8B" },
+};
+
+// Responsive helper — true on phone-width viewports.
+function useIsMobile(bp = 768) {
+  const [m, setM] = useState(typeof window !== "undefined" && window.innerWidth < bp);
+  useEffect(() => {
+    const on = () => setM(window.innerWidth < bp);
+    window.addEventListener("resize", on);
+    on();
+    return () => window.removeEventListener("resize", on);
+  }, [bp]);
+  return m;
+}
+
 const fmt  = n => "PKR " + Math.round(n || 0).toLocaleString("en-PK");
 const pct  = (a, b) => b ? ((a / b) * 100).toFixed(1) + "%" : "—";
 const todayStr = () => new Date().toISOString().split("T")[0];
@@ -166,9 +207,12 @@ const Btn = ({children,v="primary",onClick,sm,disabled,full}) => {
   const s=vs[v]||vs.primary;
   return <button onClick={onClick} disabled={disabled} style={{background:s.bg,color:s.c,border:s.br,borderRadius:8,padding:sm?"5px 11px":"9px 18px",fontSize:sm?11:13,fontWeight:700,cursor:disabled?"not-allowed":"pointer",display:"inline-flex",alignItems:"center",gap:5,whiteSpace:"nowrap",opacity:disabled?0.6:1,width:full?"100%":"auto",justifyContent:full?"center":"flex-start"}}>{children}</button>;
 };
-const Kpi = ({label,value,sub,color,trend}) => (
+const Kpi = ({label,value,sub,color,trend,icon:Ico}) => (
   <div style={{background:G.card,borderRadius:12,padding:"14px 16px",boxShadow:"0 2px 12px rgba(26,92,32,0.08)",borderLeft:`3px solid ${color||G.mid}`,display:"flex",flexDirection:"column",gap:5}}>
-    <span style={{fontSize:9,fontWeight:700,color:G.muted,letterSpacing:"0.09em",textTransform:"uppercase"}}>{label}</span>
+    <span style={{display:"flex",alignItems:"center",gap:6,fontSize:9,fontWeight:700,color:G.muted,letterSpacing:"0.09em",textTransform:"uppercase"}}>
+      {Ico&&<span style={{display:"inline-flex",width:22,height:22,borderRadius:6,background:`${color||G.mid}1A`,alignItems:"center",justifyContent:"center"}}><Ico size={13} color={color||G.mid}/></span>}
+      {label}
+    </span>
     <div style={{fontSize:20,fontWeight:800,color:G.ink,letterSpacing:"-0.03em"}}>{value}</div>
     {sub&&<div style={{fontSize:10,color:trend==="up"?G.mid:trend==="dn"?G.red:G.muted}}>{trend==="up"?"↑ ":trend==="dn"?"↓ ":""}{sub}</div>}
   </div>
@@ -397,6 +441,8 @@ const LoadingScreen = ({msg}) => (
 // ═══════════════════════════════════════════════════════════════
 function CrmApp({ user, onLogout }) {
   const [tab, setTab]         = useState("dashboard");
+  const isMobile              = useIsMobile();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -738,12 +784,12 @@ function CrmApp({ user, onLogout }) {
         <span style={{fontSize:11,textDecoration:"underline"}}>View inventory →</span>
       </div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-        <Kpi label="Total Invoiced"  value={fmt(totalRevenue)}  sub={`${invoices.length} invoices`}    color={G.mid}    trend="up"/>
-        <Kpi label="Total Received"  value={fmt(totalReceived)} sub="Cash collected"                   color={G.light}  trend="up"/>
-        <Kpi label="AR Outstanding"  value={fmt(totalAR)}       sub={`${unpaidInv.length} unpaid`}      color={G.amber}/>
-        <Kpi label="Total Purchases" value={fmt(totalPurchases)}sub={`${purchases.length} POs`}         color={G.purple}/>
-        <Kpi label="Total Expenses"  value={fmt(totalExpenses)} sub="Operating costs"                  color={G.red}/>
-        <Kpi label="Net Profit"      value={fmt(netProfit)}     sub={`NP: ${npMargin}%`}               color={netProfit>0?G.mid:G.red} trend={netProfit>0?"up":"dn"}/>
+        <Kpi label="Total Invoiced"  value={fmt(totalRevenue)}  sub={`${invoices.length} invoices`}    color={G.mid}    trend="up" icon={FileText}/>
+        <Kpi label="Total Received"  value={fmt(totalReceived)} sub="Cash collected"                   color={G.light}  trend="up" icon={CreditCard}/>
+        <Kpi label="AR Outstanding"  value={fmt(totalAR)}       sub={`${unpaidInv.length} unpaid`}      color={G.amber}  icon={Scale}/>
+        <Kpi label="Total Purchases" value={fmt(totalPurchases)}sub={`${purchases.length} POs`}         color={G.purple} icon={ShoppingCart}/>
+        <Kpi label="Total Expenses"  value={fmt(totalExpenses)} sub="Operating costs"                  color={G.red}    icon={Receipt}/>
+        <Kpi label="Net Profit"      value={fmt(netProfit)}     sub={`NP: ${npMargin}%`}               color={netProfit>0?G.mid:G.red} trend={netProfit>0?"up":"dn"} icon={TrendingUp}/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1.5fr 1fr",gap:16}}>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -2385,12 +2431,16 @@ function CrmApp({ user, onLogout }) {
   };
 
   return (
-    <div style={{display:"flex",height:"100vh",overflow:"hidden",fontFamily:"'DM Sans',system-ui,sans-serif",background:G.bg}}>
+    <div className="crm-root" style={{display:"flex",height:"100vh",overflow:"hidden",fontFamily:"'DM Sans',system-ui,sans-serif",background:G.bg}}>
+      {/* MOBILE BACKDROP */}
+      {isMobile&&sidebarOpen&&<div onClick={()=>setSidebarOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1090}}/>}
       {/* SIDEBAR */}
-      <div style={{width:200,background:G.sidebar,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}}>
+      <div style={isMobile
+        ? {width:240,background:G.sidebar,display:"flex",flexDirection:"column",position:"fixed",top:0,left:0,height:"100vh",zIndex:1100,transform:sidebarOpen?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",boxShadow:sidebarOpen?"0 0 40px rgba(0,0,0,0.5)":"none"}
+        : {width:200,background:G.sidebar,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}}>
         <div style={{padding:"16px 14px 12px",borderBottom:"1px solid rgba(255,255,255,0.07)"}}>
           <div style={{display:"flex",alignItems:"center",gap:9}}>
-            <div style={{width:32,height:32,background:`linear-gradient(135deg,${G.mid},${G.accent})`,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>🌿</div>
+            <div style={{width:32,height:32,background:`linear-gradient(135deg,${G.mid},${G.accent})`,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Leaf size={17} color={G.white}/></div>
             <div>
               <div style={{color:G.white,fontWeight:800,fontSize:12}}>APT CRM</div>
               <div style={{display:"flex",alignItems:"center",gap:4,marginTop:1}}>
@@ -2406,10 +2456,14 @@ function CrmApp({ user, onLogout }) {
               <div style={{fontSize:8,fontWeight:800,color:"rgba(255,255,255,0.22)",textTransform:"uppercase",letterSpacing:"0.12em",padding:"8px 8px 3px"}}>{section.group}</div>
               {section.items.map(n=>{
                 const active=tab===n.id;
+                const ic=NAV_ICONS[n.id];
                 return(
-                  <button key={n.id} onClick={()=>{setTab(n.id);setSearch("");}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 9px",borderRadius:7,border:"none",cursor:"pointer",background:active?"rgba(76,175,80,0.18)":"transparent",color:active?"#8BC34A":"rgba(255,255,255,0.52)",fontWeight:active?700:500,fontSize:12,width:"100%",textAlign:"left"}}>
-                    <span>{n.label}</span>
-                    {n.badge&&<span style={{background:typeof n.badge==="number"&&n.badge>10?G.blue:G.red,color:G.white,borderRadius:9,padding:"1px 6px",fontSize:8,fontWeight:800}}>{n.badge}</span>}
+                  <button key={n.id} onClick={()=>{setTab(n.id);setSearch("");if(isMobile)setSidebarOpen(false);}} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 9px",borderRadius:7,border:"none",cursor:"pointer",background:active?"rgba(76,175,80,0.18)":"transparent",color:active?"#8BC34A":"rgba(255,255,255,0.52)",fontWeight:active?700:500,fontSize:12,width:"100%",textAlign:"left"}}>
+                    <span style={{display:"flex",alignItems:"center",gap:9,minWidth:0}}>
+                      {ic&&<ic.Icon size={15} color={ic.color} style={{flexShrink:0}}/>}
+                      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{n.label}</span>
+                    </span>
+                    {n.badge&&<span style={{background:typeof n.badge==="number"&&n.badge>10?G.blue:G.red,color:G.white,borderRadius:9,padding:"1px 6px",fontSize:8,fontWeight:800,flexShrink:0}}>{n.badge}</span>}
                   </button>
                 );
               })}
@@ -2430,13 +2484,16 @@ function CrmApp({ user, onLogout }) {
 
       {/* MAIN */}
       <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        <div style={{background:G.white,borderBottom:`1px solid ${G.border}`,padding:"0 22px",height:52,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,boxShadow:"0 1px 4px rgba(26,92,32,0.06)"}}>
-          <h1 style={{margin:0,fontSize:17,fontWeight:800,color:G.ink}}>{NAV_GROUPS.flatMap(g=>g.items).find(n=>n.id===tab)?.label}</h1>
-          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            {(syncing||sbSyncing)&&<span style={{fontSize:10,color:G.muted,fontWeight:600}}>⏳ Syncing…</span>}
+        <div style={{background:G.white,borderBottom:`1px solid ${G.border}`,padding:isMobile?"0 14px":"0 22px",height:52,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,boxShadow:"0 1px 4px rgba(26,92,32,0.06)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+            {isMobile&&<button onClick={()=>setSidebarOpen(true)} aria-label="Open menu" style={{display:"flex",alignItems:"center",justifyContent:"center",background:G.pale,border:`1px solid ${G.border}`,borderRadius:8,width:34,height:34,cursor:"pointer",color:G.dark,flexShrink:0}}><Menu size={18}/></button>}
+            <h1 style={{margin:0,fontSize:isMobile?15:17,fontWeight:800,color:G.ink,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{NAV_GROUPS.flatMap(g=>g.items).find(n=>n.id===tab)?.label}</h1>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+            {(syncing||sbSyncing)&&<span style={{fontSize:10,color:G.muted,fontWeight:600,display:"inline-flex",alignItems:"center",gap:4}}><RefreshCw size={11} style={{animation:"spin 1s linear infinite"}}/>{!isMobile&&"Syncing…"}</span>}
             {RIDER_HUB_TABS.has(tab)
-              ?<button onClick={()=>loadSupabase()} style={{background:"#E3F2FD",border:`1px solid ${G.blue}`,borderRadius:7,padding:"4px 11px",fontSize:10,fontWeight:700,color:G.blue,cursor:"pointer"}}>↻ Rider Sync</button>
-              :<button onClick={()=>loadData(true)} style={{background:G.pale,border:`1px solid ${G.mid}`,borderRadius:7,padding:"4px 11px",fontSize:10,fontWeight:700,color:G.dark,cursor:"pointer"}}>↻ Sync</button>}
+              ?<button onClick={()=>loadSupabase()} style={{background:"#E3F2FD",border:`1px solid ${G.blue}`,borderRadius:7,padding:"5px 11px",fontSize:10,fontWeight:700,color:G.blue,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}><RefreshCw size={12}/>{!isMobile&&"Rider Sync"}</button>
+              :<button onClick={()=>loadData(true)} style={{background:G.pale,border:`1px solid ${G.mid}`,borderRadius:7,padding:"5px 11px",fontSize:10,fontWeight:700,color:G.dark,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}><RefreshCw size={12}/>{!isMobile&&"Sync"}</button>}
           </div>
         </div>
 
@@ -2453,7 +2510,7 @@ function CrmApp({ user, onLogout }) {
           </div>
         )}
 
-        <div style={{flex:1,overflow:"auto",padding:18}}>{PAGES[tab]}</div>
+        <div style={{flex:1,overflow:"auto",padding:isMobile?12:18}}>{PAGES[tab]}</div>
       </div>
 
       {renderModal()}

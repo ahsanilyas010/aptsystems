@@ -43,3 +43,28 @@ button:hover:not(:disabled) {
 button:active:not(:disabled) {
   transform: scale(0.97);
 }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Mobile responsiveness ────────────────────────────────────
+   The app is built with inline styles, so we override the hard-coded
+   two/three-column dashboard & detail grids to stack on phones. The
+   attribute selectors match the inline grid-template-columns strings and
+   !important wins over inline styles. `repeat(auto-fit,…)` grids are
+   already responsive and intentionally left alone. */
+@media (max-width: 768px) {
+  /* two-column layouts → single column */
+  .crm-root [style*="grid-template-columns:1.5fr 1fr"],
+  .crm-root [style*="grid-template-columns:1.3fr 1fr"],
+  .crm-root [style*="grid-template-columns:2fr 1fr"],
+  .crm-root [style*="grid-template-columns:1fr 1.5fr"],
+  .crm-root [style*="grid-template-columns:1fr 2fr"],
+  .crm-root [style*="grid-template-columns:1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+  /* dense 3/4-column stat rows → two columns (kept compact, not cramped) */
+  .crm-root [style*="grid-template-columns:repeat(3,1fr)"],
+  .crm-root [style*="grid-template-columns:repeat(4,1fr)"] {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
