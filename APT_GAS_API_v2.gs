@@ -1,14 +1,4 @@
 // ============================================================
-//  APT ERP — GAS REST API v2.2 — COMPLETE FIX
-//  ADD THIS AS A SEPARATE FILE in Apps Script (File → New → Script)
-//  Name it: "z_API"
-//
-//  FIXES:
-//  - Invoice ID now properly passed to PDF
-//  - Logo URL included
-//  - Currency set to PKR (Pakistani Rupees)
-//  - Customer name properly resolved
-// ============================================================
 
 var API_CFG = {
   SHEET_ID:    "1-L73aqBLjapsE53MTnYkJ2HvRjYlql-wM1QjgPvLs_w",
@@ -445,7 +435,7 @@ function doPost(e) {
         
         d.paidBy = body.user || d.by || "api";
         var result = saveExpense(ss, {
-          expId: _getNextId(ss.getSheetByName(CFG.EXP), "EXP"),
+          expId: _getNextId(_expSheet(ss), "EXP"),
           date: d.date || _today(),
           cat: d.category || "Misc",
           desc: d.notes || d.desc || "",
@@ -465,7 +455,7 @@ function doPost(e) {
         if (!d || !d.amount) return _apiErr("Missing amount");
         
         var result = savePayment(ss, {
-          payId: _getNextId(ss.getSheetByName(CFG.PAY), "PAY"),
+          payId: _getNextId(_paySheet(ss), "PAY"),
           date: d.date || _today(),
           type: d.type || "Received",
           partyId: d.custId || d.vendorId || d.partyId || "",
@@ -501,7 +491,7 @@ function doPost(e) {
         }];
         
         var result = savePurchase(ss, {
-          purId: _getNextId(ss.getSheetByName(CFG.PUR_H), "PUR"),
+          purId: _getNextId(_purSheet(ss), "PUR"),
           date: d.date || _today(),
           venId: d.vendorId,
           notes: d.notes || "",
@@ -599,7 +589,7 @@ function doPost(e) {
 
             // Keep AR ledger name in sync
             if (d.name) {
-              var arWs = ss.getSheetByName(CFG.AR);
+              var arWs = _arSheet(ss);
               if (arWs) {
                 var arData = arWs.getDataRange().getValues();
                 for (var j = 3; j < arData.length; j++) {
@@ -833,7 +823,7 @@ function doPost(e) {
         var total = parseFloat(cn.total) || items.reduce(function(s, i) { return s + i.qty * i.rate; }, 0);
         if (!custId || !items.length || total <= 0) return _apiErr("Missing custId, items or total");
 
-        var creditId = _getNextId(ss.getSheetByName(CFG.PAY), "PAY");
+        var creditId = _getNextId(_paySheet(ss), "PAY");
         // A credit note reduces AR: record it as a "Received" credit against the customer.
         savePayment(ss, {
           payId: creditId,
@@ -1118,9 +1108,40 @@ function _prodSheet(ss) {
     ["id", "name", "category", "vendor", "price"]);
 }
 
+
+function _paySheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.PAY, "10_Payments", "10_Payment", "Payments", "Payment"],
+    ["payment", "date", "type", "party", "amount", "notes"]);
+}
+
+function _expSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.EXP, "11_Expenses", "11_Expense", "Expenses", "Expense"],
+    ["expense", "date", "category", "amount"]);
+}
+
+function _purSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.PUR_H, "08_Purchase_Headers", "08_Purchases", "08_Purchase", "Purchases", "Purchase"],
+    ["purchase", "date", "vendor", "total"]);
+}
+
+function _arSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.AR, "12_AR_Ledger", "12_AR", "AR_Ledger", "AR Ledger", "AR"],
+    ["customer", "billed", "paid", "balance", "status"]);
+}
+
+function _apSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.AP, "13_AP_Ledger", "13_AP", "AP_Ledger", "AP Ledger", "AP"],
+    ["vendor", "ordered", "paid", "balance"]);
+}
+
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "inv-fix-2026-06-29a";
+var API_BUILD = "data-fetch-fix-2026-06-29b";
 
 // Runtime self-diagnostic: reports every tab name and probes the resolved
 // invoice header/items sheets (dimensions + first rows). Surfaced in the
@@ -1324,7 +1345,7 @@ function _recalcAR(ss, custId) {
   try {
     if (!custId) return;
     custId = custId.toString().trim();
-    var arWs = ss.getSheetByName(CFG.AR);
+    var arWs = _arSheet(ss);
     if (!arWs || arWs.getLastRow() < 4) return;
 
     var arData = arWs.getDataRange().getValues();
@@ -1350,7 +1371,7 @@ function _recalcAR(ss, custId) {
     }
 
     var paid = 0;
-    var payWs = ss.getSheetByName(CFG.PAY);
+    var payWs = _paySheet(ss);
     if (payWs && payWs.getLastRow() > 3) {
       payWs.getRange(4, 1, payWs.getLastRow() - 3, 7).getValues().forEach(function(r) {
         if (r[3] && r[3].toString().trim() === custId && r[2] === "Received") {
@@ -1374,9 +1395,9 @@ function _recalcAR(ss, custId) {
 // via _undoMergeCustomers.
 function _mergeCustomers(ss, groups) {
   var custWs = _custSheet(ss);
-  var arWs   = ss.getSheetByName(CFG.AR);
+  var arWs   = _arSheet(ss);
   var invWs  = _invHeaderSheet(ss);
-  var payWs  = ss.getSheetByName(CFG.PAY);
+  var payWs  = _paySheet(ss);
   var merged = 0, errors = [], snapshotGroups = [];
 
   groups.forEach(function(g) {
@@ -1465,7 +1486,7 @@ function _mergeCustomers(ss, groups) {
 function _undoMergeCustomers(ss, snapshot) {
   var custWs = _custSheet(ss);
   var invWs  = _invHeaderSheet(ss);
-  var payWs  = ss.getSheetByName(CFG.PAY);
+  var payWs  = _paySheet(ss);
   var restored = 0, errors = [];
 
   (snapshot.groups || []).forEach(function(g) {
@@ -1544,7 +1565,7 @@ function _lookupPartyName(ss, partyId) {
 // Append a row to the Payments sheet (col1=payId,col2=date,col3=type,
 // col4=partyId,col5=partyName,col6=refId,col7=amount,col8=notes).
 function savePayment(ss, obj) {
-  var ws = ss.getSheetByName(CFG.PAY);
+  var ws = _paySheet(ss);
   if (!ws) throw new Error("Payments sheet not found");
 
   var row = _apiGetLastDataRow(ws, 1) + 1;
@@ -1567,7 +1588,7 @@ function savePayment(ss, obj) {
 // Append a row to the Expenses sheet (col1=expId,col2=date,col3=category,
 // col4=desc/notes,col5=amount,col6=paidBy,col7=notes).
 function saveExpense(ss, obj) {
-  var ws = ss.getSheetByName(CFG.EXP);
+  var ws = _expSheet(ss);
   if (!ws) throw new Error("Expenses sheet not found");
 
   var row = _apiGetLastDataRow(ws, 1) + 1;
@@ -1589,7 +1610,7 @@ function saveExpense(ss, obj) {
 // Append a row to the Purchase Headers sheet (col1=purId,col2=date,
 // col3=vendorId,col4=vendorName,col5=total,col6=paid,col7=notes).
 function savePurchase(ss, obj) {
-  var ws = ss.getSheetByName(CFG.PUR_H);
+  var ws = _purSheet(ss);
   if (!ws) throw new Error("Purchase Headers sheet not found");
 
   var row = _apiGetLastDataRow(ws, 1) + 1;
@@ -1761,7 +1782,7 @@ function _resolveCustomerName(ss, custId, dataObj) {
 
 function _ensureCustomerInAR(ss, custId) {
   try {
-    var arWs = ss.getSheetByName(CFG.AR);
+    var arWs = _arSheet(ss);
     if (!arWs) return;
     
     var data = arWs.getDataRange().getValues();
@@ -2108,7 +2129,7 @@ function _readPurchases(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.PUR_H);
+  var ws = _purSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["purchase", "date", "vendor", "total", "paid", "notes"]);
@@ -2146,7 +2167,7 @@ function _readPayments(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.PAY);
+  var ws = _paySheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["payment", "date", "type", "party", "ref", "amount", "notes"]);
@@ -2186,7 +2207,7 @@ function _readExpenses(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.EXP);
+  var ws = _expSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["expense", "date", "category", "notes", "amount", "by"]);
@@ -2222,7 +2243,7 @@ function _readAR(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.AR);
+  var ws = _arSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["customer", "city", "billed", "paid", "balance", "status"]);
@@ -2259,7 +2280,7 @@ function _readAP(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.AP);
+  var ws = _apSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["vendor", "category", "ordered", "paid", "balance"]);
@@ -2457,7 +2478,7 @@ function _syncInvoicePaymentToSupabase(ss, invId) {
       break;
     }
   }
-  var payWs = ss.getSheetByName(CFG.PAY);
+  var payWs = _paySheet(ss);
   var paid = 0;
   if (payWs && payWs.getLastRow() > 3) {
     var pData = payWs.getRange(4, 1, payWs.getLastRow() - 3, 7).getValues();
@@ -2535,9 +2556,9 @@ function _readDashboard(ss) {
     };
   } catch(e) {
     var invH = _invHeaderSheet(ss);
-    var pay = ss.getSheetByName(CFG.PAY);
-    var purH = ss.getSheetByName(CFG.PUR_H);
-    var exp = ss.getSheetByName(CFG.EXP);
+    var pay = _paySheet(ss);
+    var purH = _purSheet(ss);
+    var exp = _expSheet(ss);
     
     var ti = 0, tr = 0, tp = 0, te = 0;
     
@@ -2856,7 +2877,7 @@ function _updateInvoiceStatus(ss, invId, amtReceived) {
     ? [] 
     : ws.getRange(4, 1, ws.getLastRow() - 3, 6).getValues();
   
-  var payWs = ss.getSheetByName(CFG.PAY);
+  var payWs = _paySheet(ss);
   var totalPaid = amtReceived;
   
   if (payWs && payWs.getLastRow() > 3) {
@@ -2946,7 +2967,7 @@ function _deleteInvoice(ss, invId) {
     }
   }
 
-  var sheetPay = ss.getSheetByName(CFG.PAY);
+  var sheetPay = _paySheet(ss);
   if (sheetPay) {
     var dataPay = sheetPay.getDataRange().getValues();
     for (var i = dataPay.length - 1; i >= 3; i--) {
