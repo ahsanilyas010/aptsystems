@@ -856,8 +856,9 @@ function doPost(e) {
       case "mark_paid": {
         var invId = body.invId;
         if (!invId) return _apiErr("Missing invId");
-        
+
         var ws = _invHeaderSheet(ss);
+        if (!ws) return _apiErr("Invoice Headers sheet not found");
         var data = ws.getDataRange().getValues();
         var found = false;
         
@@ -1093,9 +1094,15 @@ function _invItemsSheet(ss) {
     ["invoice", "product", "qty", "rate"]);
 }
 
+function _invListSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.INV_L, "14_Inventory_List", "14_Inventory", "Inventory_List", "Inventory", "Stock"],
+    ["product", "name", "purchased", "sold", "stock"]);
+}
+
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "inv-fix-2026-06-28f";
+var API_BUILD = "inv-fix-2026-06-28g";
 
 // Runtime self-diagnostic: reports every tab name and probes the resolved
 // invoice header/items sheets (dimensions + first rows). Surfaced in the
@@ -2268,8 +2275,8 @@ function _readAP(ss) {
 function _readInventory(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
-  var ws = ss.getSheetByName(CFG.INV_L);
+
+  var ws = _invListSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
@@ -2316,7 +2323,7 @@ function _readInventory(ss) {
 function _applyInventoryDelta(ss, items, dir) {
   ss = _getSs(ss);
   if (!ss || !items || !items.length) return;
-  var ws = ss.getSheetByName(CFG.INV_L);
+  var ws = _invListSheet(ss);
   if (!ws || ws.getLastRow() < 4) return;
 
   var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
@@ -2353,8 +2360,8 @@ function _applyInventoryDelta(ss, items, dir) {
 function _adjustStock(ss, pid, delta) {
   ss = _getSs(ss);
   if (!ss) throw new Error("Spreadsheet not found");
-  var ws = ss.getSheetByName(CFG.INV_L);
-  if (!ws || ws.getLastRow() < 4) throw new Error("Inventory sheet not found");
+  var ws = _invListSheet(ss);
+  if (!ws || ws.getLastRow() < 4) throw new Error("Inventory sheet not found — check tab is named '14_Inventory_List' or similar");
   pid = (pid || "").toString().trim();
   delta = parseFloat(delta) || 0;
   if (!pid) throw new Error("Product id required");
@@ -2450,7 +2457,7 @@ function _syncInvoicePaymentToSupabase(ss, invId) {
 function _applyReturnDelta(ss, items) {
   ss = _getSs(ss);
   if (!ss || !items || !items.length) return;
-  var ws = ss.getSheetByName(CFG.INV_L);
+  var ws = _invListSheet(ss);
   if (!ws || ws.getLastRow() < 4) return;
   var hm = _headerMap(ws, ["product", "name", "category", "cost", "purchased", "sold", "returned", "stock", "minstock"]);
   var cPid = _col(hm, ["productid", "prodid", "pid", "id"], 0);
