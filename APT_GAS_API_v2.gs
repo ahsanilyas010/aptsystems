@@ -236,7 +236,7 @@ function _handleMirrorWebhook(type, payload) {
 function _syncStoreFromWebhook(ss, payload) {
   if (!payload || !payload.name) return _apiJson({ ok: false, reason: "missing_name" });
 
-  var ws = ss.getSheetByName(CFG.CUST);
+  var ws = _custSheet(ss);
   if (!ws) return _apiJson({ ok: false, reason: "Customers sheet not found" });
   var rows = ws.getDataRange().getValues();
 
@@ -274,7 +274,7 @@ function _syncOrderFromWebhook(ss, payload) {
 
   if (!custId && payload.store_id) {
     // Try to find by supabase_id in notes
-    var custWs = ss.getSheetByName(CFG.CUST);
+    var custWs = _custSheet(ss);
     var custRows = custWs.getDataRange().getValues();
     var supabaseRef = "supabase_id:" + payload.store_id;
     for (var i = 3; i < custRows.length; i++) {
@@ -519,7 +519,7 @@ function doPost(e) {
         var d = body.data || body.customer || {};
         if (!d || !d.name) return _apiErr("Missing name");
 
-        var ws = ss.getSheetByName(CFG.CUST);
+        var ws = _custSheet(ss);
         if (!ws) return _apiErr("Customers sheet not found");
 
         // Resolve columns by header (1-based), falling back to the canonical
@@ -580,7 +580,7 @@ function doPost(e) {
         var d = body.data;
         if (!d || !d.id) return _apiErr("Missing customer id");
 
-        var ws = ss.getSheetByName(CFG.CUST);
+        var ws = _custSheet(ss);
         if (!ws) return _apiErr("Customers sheet not found");
 
         var data = ws.getDataRange().getValues();
@@ -647,7 +647,7 @@ function doPost(e) {
         var d = body.data;
         if (!d || !d.name) return _apiErr("Missing vendor name");
 
-        var ws = ss.getSheetByName(CFG.VEN);
+        var ws = _venSheet(ss);
         if (!ws) return _apiErr("Vendors sheet not found");
 
         var max = 0;
@@ -684,7 +684,7 @@ function doPost(e) {
         var d = body.data;
         if (!d || !d.id) return _apiErr("Missing vendor id");
 
-        var ws = ss.getSheetByName(CFG.VEN);
+        var ws = _venSheet(ss);
         if (!ws) return _apiErr("Vendors sheet not found");
 
         var data = ws.getDataRange().getValues();
@@ -1100,9 +1100,27 @@ function _invListSheet(ss) {
     ["product", "name", "purchased", "sold", "stock"]);
 }
 
+function _custSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.CUST, "02_Customers", "02_Customer", "Customers", "Customer"],
+    ["id", "name", "city", "area", "contact", "phone"]);
+}
+
+function _venSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.VEN, "03_Vendors", "03_Vendor", "Vendors", "Vendor"],
+    ["id", "name", "category", "contact", "phone"]);
+}
+
+function _prodSheet(ss) {
+  return _resolveSheet(ss,
+    [CFG.PROD, "04_Products", "04_Product", "Products", "Product"],
+    ["id", "name", "category", "vendor", "price"]);
+}
+
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "inv-fix-2026-06-28g";
+var API_BUILD = "inv-fix-2026-06-29a";
 
 // Runtime self-diagnostic: reports every tab name and probes the resolved
 // invoice header/items sheets (dimensions + first rows). Surfaced in the
@@ -1355,7 +1373,7 @@ function _recalcAR(ss, custId) {
 // Captures a snapshot of everything it changes so the merge can be reversed later
 // via _undoMergeCustomers.
 function _mergeCustomers(ss, groups) {
-  var custWs = ss.getSheetByName(CFG.CUST);
+  var custWs = _custSheet(ss);
   var arWs   = ss.getSheetByName(CFG.AR);
   var invWs  = _invHeaderSheet(ss);
   var payWs  = ss.getSheetByName(CFG.PAY);
@@ -1445,7 +1463,7 @@ function _mergeCustomers(ss, groups) {
 // customer's original row, re-points its specific invoice/payment ids back from
 // keepId onto its own id, then recalculates AR for everyone involved.
 function _undoMergeCustomers(ss, snapshot) {
-  var custWs = ss.getSheetByName(CFG.CUST);
+  var custWs = _custSheet(ss);
   var invWs  = _invHeaderSheet(ss);
   var payWs  = ss.getSheetByName(CFG.PAY);
   var restored = 0, errors = [];
@@ -1500,7 +1518,7 @@ function _lookupPartyName(ss, partyId) {
   if (!partyId) return "";
   partyId = partyId.toString().trim();
 
-  var custWs = ss.getSheetByName(CFG.CUST);
+  var custWs = _custSheet(ss);
   if (custWs && custWs.getLastRow() >= 4) {
     var cData = custWs.getRange(4, 1, custWs.getLastRow() - 3, 2).getValues();
     for (var i = 0; i < cData.length; i++) {
@@ -1510,7 +1528,7 @@ function _lookupPartyName(ss, partyId) {
     }
   }
 
-  var venWs = ss.getSheetByName(CFG.VEN);
+  var venWs = _venSheet(ss);
   if (venWs && venWs.getLastRow() >= 4) {
     var vData = venWs.getRange(4, 1, venWs.getLastRow() - 3, 2).getValues();
     for (var j = 0; j < vData.length; j++) {
@@ -1581,7 +1599,7 @@ function savePurchase(ss, obj) {
     return s + (parseFloat(it.total) || (parseFloat(it.qty) || 0) * (parseFloat(it.cost) || 0));
   }, 0);
 
-  var venWs = ss.getSheetByName(CFG.VEN);
+  var venWs = _venSheet(ss);
   var venName = obj.venId || "";
   if (venWs && venWs.getLastRow() >= 4) {
     var vData = venWs.getRange(4, 1, venWs.getLastRow() - 3, 2).getValues();
@@ -1658,7 +1676,7 @@ function testNextCustomerId() {
   var nextId = _getNextCustomerId(ss);
   Logger.log("Next Customer ID will be: " + nextId);
   // Also log first 5 raw values from col A to diagnose format issues
-  var ws = ss.getSheetByName(CFG.CUST);
+  var ws = _custSheet(ss);
   if (ws && ws.getLastRow() >= 4) {
     var sample = ws.getRange(4, 1, Math.min(5, ws.getLastRow() - 3), 1).getValues();
     sample.forEach(function(r, i) {
@@ -1717,7 +1735,7 @@ function _resolveCustomerName(ss, custId, dataObj) {
   
   if (!custName || custName === custId || custName.trim() === "") {
     try {
-      var custWs = ss.getSheetByName(CFG.CUST);
+      var custWs = _custSheet(ss);
       if (custWs) {
         var cData = custWs.getDataRange().getValues();
         for (var i = 3; i < cData.length; i++) {
@@ -1757,7 +1775,7 @@ function _ensureCustomerInAR(ss, custId) {
     }
     
     if (!found) {
-      var custWs = ss.getSheetByName(CFG.CUST);
+      var custWs = _custSheet(ss);
       var custName = custId;
       
       if (custWs) {
@@ -1786,7 +1804,7 @@ function _ensureCustomerInAR(ss, custId) {
 // ============================================================
 
 function _lookupCustomer(ss, custId) {
-  var ws = ss.getSheetByName(CFG.CUST);
+  var ws = _custSheet(ss);
   if (!ws) return null;
   var data = ws.getDataRange().getValues();
   for (var i = 3; i < data.length; i++) {
@@ -1871,7 +1889,7 @@ function _readCustomers(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.CUST);
+  var ws = _custSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["id", "name", "city", "area", "contact", "phone", "balance", "notes"]);
@@ -1910,7 +1928,7 @@ function _readVendors(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.VEN);
+  var ws = _venSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["id", "name", "category", "contact", "phone", "balance", "notes"]);
@@ -1947,7 +1965,7 @@ function _readProducts(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
   
-  var ws = ss.getSheetByName(CFG.PROD);
+  var ws = _prodSheet(ss);
   if (!ws || ws.getLastRow() < 4) return [];
 
   var hm = _headerMap(ws, ["id", "name", "category", "vendor", "cost", "price", "minstock"]);
