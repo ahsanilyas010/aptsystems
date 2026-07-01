@@ -1051,6 +1051,16 @@ function CrmApp({ user, onLogout }) {
           })}
           {fil.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12,gridColumn:"1/-1"}}>No customers found</div>}
         </div>
+        {customers.length===0&&(
+          <details style={{marginTop:12,background:"#fffbe6",border:"1.5px solid #f5c518",borderRadius:8,padding:"10px 14px",fontSize:11}}>
+            <summary style={{cursor:"pointer",fontWeight:700,color:"#92680a"}}>⚠ No customers returned — API diagnostic (expand to share with developer)</summary>
+            <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>
+              <div><b>Build:</b> {data?._debug?.build??"(no _debug — old code running, redeploy New version)"}</div>
+              <div><b>All sheet tabs:</b> {data?._debug?.allTabs?.join(", ")??"(unknown)"}</div>
+              <div><b>Resolved sheets:</b><code style={{whiteSpace:"pre-wrap",display:"block",background:"#f7f7f7",padding:6,borderRadius:4,marginTop:4}}>{data?._debug?JSON.stringify({customers:data._debug.customers,vendors:data._debug.vendors,payments:data._debug.payments,expenses:data._debug.expenses,purchases:data._debug.purchases,ar:data._debug.ar,ap:data._debug.ap},null,2):"(no _debug)"}</code></div>
+            </div>
+          </details>
+        )}
       </div>
     );
   };
