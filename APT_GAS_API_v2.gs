@@ -139,11 +139,9 @@ function doGet(e) {
         var resp = {
           dashboard, customers, vendors, products, invoices,
           purchases, payments, expenses, ar, ap, inventory,
-          lastSync: new Date().toISOString()
+          lastSync: new Date().toISOString(),
+          _debug: _invoiceDebug(ss)
         };
-        // Attach a runtime diagnostic only when invoices fail to load, so the
-        // CRM panel can show exactly what the live script sees.
-        if (!invoices.length) resp._debug = _invoiceDebug(ss);
         return _apiOk(resp);
       }
 
@@ -1141,27 +1139,36 @@ function _apSheet(ss) {
 
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "data-fetch-fix-2026-06-29b";
+var API_BUILD = "full-diag-2026-07-01";
 
-// Runtime self-diagnostic: reports every tab name and probes the resolved
-// invoice header/items sheets (dimensions + first rows). Surfaced in the
-// CRM diagnostic panel when the invoice list comes back empty.
+// Runtime self-diagnostic: reports every tab name and probes all resolved
+// data sheets. Always included in action=all so DevTools / the CRM diagnostic
+// panel can show exactly what the live script sees — build string, tab list,
+// and which sheet each resolver found (with row counts).
 function _invoiceDebug(ss) {
   ss = _getSs(ss);
   if (!ss) return { build: API_BUILD, error: "no spreadsheet" };
   function probe(ws, keys) {
     if (!ws) return "NOT RESOLVED";
     var lr = ws.getLastRow(), lc = ws.getLastColumn();
-    var n = Math.min(6, lr);
-    var rows = (n > 0 && lc > 0) ? ws.getRange(1, 1, n, Math.min(lc, 8)).getValues() : [];
+    var n = Math.min(4, lr);
+    var rows = (n > 0 && lc > 0) ? ws.getRange(1, 1, n, Math.min(lc, 6)).getValues() : [];
     return { name: ws.getName(), lastRow: lr, lastCol: lc,
              dataStart: _dataStartRow(ws, keys), firstRows: rows };
   }
   return {
     build: API_BUILD,
     allTabs: ss.getSheets().map(function(s) { return s.getName(); }),
-    header: probe(_invHeaderSheet(ss), ["invoice", "date", "customer", "total", "status", "terms"]),
-    items:  probe(_invItemsSheet(ss),  ["invoice", "product", "qty", "rate"])
+    customers:  probe(_custSheet(ss),       ["id", "name", "city", "area", "phone"]),
+    vendors:    probe(_venSheet(ss),        ["id", "name", "category", "phone"]),
+    products:   probe(_prodSheet(ss),       ["id", "name", "category", "price"]),
+    payments:   probe(_paySheet(ss),        ["payment", "date", "type", "party", "amount"]),
+    expenses:   probe(_expSheet(ss),        ["expense", "date", "category", "amount"]),
+    purchases:  probe(_purSheet(ss),        ["purchase", "date", "vendor", "total"]),
+    ar:         probe(_arSheet(ss),         ["customer", "billed", "paid", "balance"]),
+    ap:         probe(_apSheet(ss),         ["vendor", "ordered", "paid", "balance"]),
+    header:     probe(_invHeaderSheet(ss),  ["invoice", "date", "customer", "total", "status"]),
+    items:      probe(_invItemsSheet(ss),   ["invoice", "product", "qty", "rate"])
   };
 }
 
@@ -1909,9 +1916,9 @@ function _col(map, candidates, fallback) {
 function _readCustomers(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _custSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["id", "name", "city", "area", "contact", "phone", "balance", "notes"]);
   var c = {
@@ -1924,8 +1931,10 @@ function _readCustomers(ss) {
     openBal: _col(hm, ["openingbalance", "openbal", "balance"], 6),
     notes:   _col(hm, ["notes", "note", "remarks"], 7)
   };
+  var _ds = _dataStartRow(ws, ["id", "name", "city", "area", "phone"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -1948,9 +1957,9 @@ function _readCustomers(ss) {
 function _readVendors(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _venSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["id", "name", "category", "contact", "phone", "balance", "notes"]);
   var c = {
@@ -1962,8 +1971,10 @@ function _readVendors(ss) {
     openBal:  _col(hm, ["openingbalance", "openbal", "balance"], 5),
     notes:    _col(hm, ["notes", "note", "remarks"], 6)
   };
+  var _ds = _dataStartRow(ws, ["id", "name", "category", "phone"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -1985,9 +1996,9 @@ function _readVendors(ss) {
 function _readProducts(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _prodSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["id", "name", "category", "vendor", "cost", "price", "minstock"]);
   var c = {
@@ -1999,8 +2010,10 @@ function _readProducts(ss) {
     price:    _col(hm, ["price", "saleprice", "tradeprice", "sellprice"], 6),
     minStock: _col(hm, ["minstock", "minimumstock", "reorder"], 8)
   };
+  var _ds = _dataStartRow(ws, ["id", "name", "category", "price"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -2128,9 +2141,9 @@ function _readInvoiceItems(ss, invId) {
 function _readPurchases(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _purSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["purchase", "date", "vendor", "total", "paid", "notes"]);
   var c = {
@@ -2142,8 +2155,10 @@ function _readPurchases(ss) {
     paid:     _col(hm, ["paid", "amountpaid"], 5),
     notes:    _col(hm, ["notes", "note", "remarks"], 6)
   };
+  var _ds = _dataStartRow(ws, ["purchase", "date", "vendor", "total"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -2166,9 +2181,9 @@ function _readPurchases(ss) {
 function _readPayments(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _paySheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["payment", "date", "type", "party", "ref", "amount", "notes"]);
   var c = {
@@ -2181,8 +2196,10 @@ function _readPayments(ss) {
     amount:    _col(hm, ["amount", "total"], 6),
     notes:     _col(hm, ["notes", "note", "method", "remarks"], 7)
   };
+  var _ds = _dataStartRow(ws, ["payment", "date", "type", "amount"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -2206,9 +2223,9 @@ function _readPayments(ss) {
 function _readExpenses(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _expSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["expense", "date", "category", "notes", "amount", "by"]);
   var c = {
@@ -2219,8 +2236,10 @@ function _readExpenses(ss) {
     amount:   _col(hm, ["amount", "total"], 4),
     by:       _col(hm, ["paidby", "by", "creator", "createdby"], 5)
   };
+  var _ds = _dataStartRow(ws, ["expense", "date", "category", "amount"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -2242,9 +2261,9 @@ function _readExpenses(ss) {
 function _readAR(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _arSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["customer", "city", "billed", "paid", "balance", "status"]);
   var c = {
@@ -2256,8 +2275,10 @@ function _readAR(ss) {
     balance:     _col(hm, ["balance", "outstanding", "due"], 5),
     status:      _col(hm, ["status"], 6)
   };
+  var _ds = _dataStartRow(ws, ["customer", "billed", "paid", "balance"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
@@ -2279,9 +2300,9 @@ function _readAR(ss) {
 function _readAP(ss) {
   ss = _getSs(ss);
   if (!ss) return [];
-  
+
   var ws = _apSheet(ss);
-  if (!ws || ws.getLastRow() < 4) return [];
+  if (!ws) return [];
 
   var hm = _headerMap(ws, ["vendor", "category", "ordered", "paid", "balance"]);
   var c = {
@@ -2292,8 +2313,10 @@ function _readAP(ss) {
     totalPaid:    _col(hm, ["totalpaid", "paid"], 4),
     balance:      _col(hm, ["balance", "outstanding", "due"], 5)
   };
+  var _ds = _dataStartRow(ws, ["vendor", "ordered", "paid", "balance"]);
+  if (ws.getLastRow() < _ds) return [];
 
-  var data = ws.getRange(4, 1, ws.getLastRow() - 3, ws.getLastColumn()).getValues();
+  var data = ws.getRange(_ds, 1, ws.getLastRow() - _ds + 1, ws.getLastColumn()).getValues();
   var out = [];
 
   data.forEach(function(r) {
