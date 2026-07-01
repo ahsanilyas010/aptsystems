@@ -506,7 +506,7 @@ function CrmApp({ user, onLogout }) {
   }, [notify]);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useEffect(() => { if (RIDER_HUB_TABS.has(tab)) loadSupabase(true); }, [tab, loadSupabase]);
+  useEffect(() => { if (tab === "customers" || RIDER_HUB_TABS.has(tab)) loadSupabase(true); }, [tab, loadSupabase]);
 
   // ── Maps ──────────────────────────────────────────────────
   const customers  = data?.customers  || [];
@@ -1014,6 +1014,21 @@ function CrmApp({ user, onLogout }) {
       if(hideDupes && dupInfo.dupIds.has(c.id)) return false;
       return !search||c.name?.toLowerCase().includes(search.toLowerCase())||c.area?.toLowerCase().includes(search.toLowerCase());
     });
+
+    // Rider stores not yet linked to any Sheets customer row — shown as read-only cards
+    const linkedStoreIds = useMemo(() => {
+      const ids = new Set();
+      customers.forEach(c => { const m = c.notes?.match(/supabase_id:([^\s,]+)/); if (m) ids.add(m[1]); });
+      sbData.stores.forEach(s => { if (s.gas_customer_id) ids.add(s.id); });
+      return ids;
+    }, [customers, sbData.stores]);
+    const virtualStores = useMemo(() =>
+      sbData.stores
+        .filter(s => s.name && !linkedStoreIds.has(s.id))
+        .map(s => ({ _storeId: s.id, _isRiderStore: true, name: s.name, area: s.area||"", city: s.city||"", phone: s.mobile||"", contact: s.owner_name||"" }))
+        .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.area.toLowerCase().includes(search.toLowerCase()))
+    , [sbData.stores, linkedStoreIds, search]);
+
     return (
       <div>
         <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
@@ -1049,7 +1064,24 @@ function CrmApp({ user, onLogout }) {
               </div>
             );
           })}
-          {fil.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12,gridColumn:"1/-1"}}>No customers found</div>}
+          {virtualStores.map(s=>(
+            <div key={"rs-"+s._storeId} onClick={()=>setModal({t:"viewRiderStore",d:s})} style={{background:G.card,borderRadius:11,padding:16,boxShadow:"0 2px 10px rgba(0,137,123,0.07)",borderTop:"3px solid #00897B",cursor:"pointer",opacity:0.92}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                <div><div style={{fontWeight:800,fontSize:13,color:G.ink,marginBottom:2}}>{s.name}</div><div style={{fontSize:10,color:G.muted}}>{s.area}</div></div>
+                <span style={{fontSize:9,fontWeight:700,color:"#00695C",background:"#E0F2F1",padding:"2px 7px",borderRadius:6,alignSelf:"flex-start",whiteSpace:"nowrap"}}>Rider Store</span>
+              </div>
+              <div style={{fontSize:10,color:G.muted,marginBottom:10}}>📞 {s.phone||"—"}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                {[{l:"Orders",v:"—"},{l:"Revenue",v:"—"},{l:"Due",v:"—"}].map(x=>(
+                  <div key={x.l} style={{background:"#E0F2F1",borderRadius:6,padding:"6px 5px",textAlign:"center"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#00695C",lineHeight:1.2}}>{x.v}</div>
+                    <div style={{fontSize:8,color:G.muted,marginTop:1}}>{x.l}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {fil.length===0&&virtualStores.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12,gridColumn:"1/-1"}}>No customers found</div>}
         </div>
         {customers.length===0&&(
           <details style={{marginTop:12,background:"#fffbe6",border:"1.5px solid #f5c518",borderRadius:8,padding:"10px 14px",fontSize:11}}>
@@ -1775,6 +1807,29 @@ function CrmApp({ user, onLogout }) {
               <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)} sm/>,
             ])}
           />
+        </Modal>
+      );
+    }
+
+    if(modal.t==="viewRiderStore"){
+      const s=modal.d;
+      const store=sbData.stores.find(st=>st.id===s._storeId)||{};
+      return(
+        <Modal title={s.name} onClose={closeModal}>
+          <div style={{background:"#E0F2F1",borderRadius:8,padding:"9px 12px",marginBottom:12,fontSize:11,color:"#00695C",fontWeight:600}}>
+            Rider Store — not yet added to the Customers sheet. Use the <b>Rider Stores</b> tab to sync it.
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:14}}>
+            {[{l:"Area",v:s.area||"—"},{l:"Phone",v:s.phone||"—"},{l:"Contact",v:s.contact||"—"},{l:"Category",v:store.category||"—"}].map(r=>(
+              <div key={r.l} style={{background:G.pale,borderRadius:7,padding:"8px 11px"}}>
+                <div style={{fontSize:8,fontWeight:700,color:G.muted,textTransform:"uppercase",marginBottom:2}}>{r.l}</div>
+                <div style={{fontSize:12,fontWeight:600,color:G.ink}}>{r.v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <Btn sm v="secondary" onClick={()=>{closeModal();setTab("rider-stores");}}>Go to Rider Stores →</Btn>
+          </div>
         </Modal>
       );
     }
