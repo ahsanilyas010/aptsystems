@@ -954,6 +954,32 @@ function CrmApp({ user, onLogout }) {
       return { dupIds, groupSize, groups };
     },[customers, invoices]);
     const [merging, setMerging] = useState(false);
+    const [importingSb, setImportingSb] = useState(false);
+    const importRiderStores = async (stores) => {
+      if(!stores.length){ notify("No unsynced rider stores to import","err"); return; }
+      if(!confirm(`Import ${stores.length} rider store(s) into the Customers list in Google Sheet?\n(already-synced stores are skipped; stores matching an existing customer by name+phone are linked, not duplicated)`)) return;
+      setImportingSb(true);
+      const custByKey={}, custByName={};
+      customers.forEach(c=>{ const n=normTxt(c.name); if(!n) return; custByName[n]=c; custByKey[n+"|"+digitsOnly(c.phone)]=c; });
+      let created=0, linked=0, fail=0;
+      for(const s of stores){
+        try{
+          const storeRec = sbData.stores.find(r=>r.id===s._storeId)||{};
+          const n=normTxt(s.name), mobile=digitsOnly(s.phone);
+          const existing = custByKey[n+"|"+mobile] || (!mobile ? custByName[n] : null);
+          if(existing){
+            try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:existing.id}); }catch{/*non-fatal*/}
+            linked++; continue;
+          }
+          const r = await gasPost("add_customer",{name:s.name,area:s.area||"",city:s.city||"",contact:s.contact||"",phone:s.phone||"",notes:`supabase_id:${s._storeId}`});
+          if(r?.id){ try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:r.id}); }catch{/*non-fatal*/} }
+          created++;
+        }catch(e){ fail++; }
+      }
+      setImportingSb(false);
+      notify(`✅ ${created} imported, ${linked} linked to existing${fail?`, ${fail} failed`:""}`);
+      await loadData(true); await loadSupabase(true);
+    };
     const mergeDuplicates = async () => {
       if(!dupInfo.groups.length) return;
       if(!confirm(`Merge ${dupInfo.dupIds.size} duplicate customer row(s) into ${dupInfo.groups.length} record(s)?\n\nInvoices and payments on the duplicates will be moved to the kept record, and the duplicate Sheet rows will be removed.`)) return;
@@ -1041,6 +1067,7 @@ function CrmApp({ user, onLogout }) {
           {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
           {user?.email==="ahsanilyas35@gmail.com"&&<Btn sm v="danger" disabled={merging} onClick={removeKnownDuplicates}>{merging?"⏳ Removing…":"🗑 Remove 15 Known Duplicates"}</Btn>}
           <Btn sm v="secondary" onClick={()=>exportCsv("customers.csv",fil,[["id","ID"],["name","Name"],["area","Area"],["city","City"],["phone","Phone"]])}>⬇ Export</Btn>
+          {virtualStores.length>0&&<Btn sm v="secondary" disabled={importingSb} onClick={()=>importRiderStores(virtualStores)}>{importingSb?"⏳ Importing…":`⬆ Import ${virtualStores.length} Rider Store${virtualStores.length===1?"":"s"} to Sheet`}</Btn>}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
           {fil.map(c=>{
@@ -1829,6 +1856,7 @@ function CrmApp({ user, onLogout }) {
           </div>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
             <Btn sm v="secondary" onClick={()=>{closeModal();setTab("rider-stores");}}>Go to Rider Stores →</Btn>
+            <Btn sm v="success" onClick={()=>{closeModal();importRiderStores([s]);}}>⬆ Import to Sheet</Btn>
           </div>
         </Modal>
       );
