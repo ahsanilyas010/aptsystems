@@ -1084,62 +1084,61 @@ function _invItemsSheet(ss) {
 
 function _invListSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.INV_L, "14_Inventory_List", "14_Inventory", "Inventory_List", "Inventory", "Stock"],
+    ["12_Inventory_Ledger", CFG.INV_L, "14_Inventory_List", "14_Inventory", "Inventory_Ledger", "Inventory_List", "Inventory", "Stock"],
     ["product", "name", "purchased", "sold", "stock"]);
 }
 
 function _custSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.CUST, "02_Customers", "02_Customer", "Customers", "Customer"],
+    ["03_Customers", CFG.CUST, "02_Customers", "03_Customer", "02_Customer", "Customers", "Customer", "Stores", "Store"],
     ["id", "name", "city", "area", "contact", "phone"]);
 }
 
 function _venSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.VEN, "03_Vendors", "03_Vendor", "Vendors", "Vendor"],
+    ["02_Vendors", CFG.VEN, "03_Vendors", "02_Vendor", "03_Vendor", "Vendors", "Vendor", "Supplier", "Suppliers"],
     ["id", "name", "category", "contact", "phone"]);
 }
 
 function _prodSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.PROD, "04_Products", "04_Product", "Products", "Product"],
+    ["04_Product_Master", CFG.PROD, "04_Products", "04_Product", "Product_Master", "Products", "Product"],
     ["id", "name", "category", "vendor", "price"]);
 }
 
-
 function _paySheet(ss) {
   return _resolveSheet(ss,
-    [CFG.PAY, "10_Payments", "10_Payment", "Payments", "Payment"],
+    ["11_Payments", CFG.PAY, "10_Payments", "11_Payment", "10_Payment", "Payments", "Payment"],
     ["payment", "date", "type", "party", "amount", "notes"]);
 }
 
 function _expSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.EXP, "11_Expenses", "11_Expense", "Expenses", "Expense"],
+    ["15_Expenses", CFG.EXP, "11_Expenses", "15_Expense", "11_Expense", "Expenses", "Expense"],
     ["expense", "date", "category", "amount"]);
 }
 
 function _purSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.PUR_H, "08_Purchase_Headers", "08_Purchases", "08_Purchase", "Purchases", "Purchase"],
+    ["07_Purchase_Header", "07_Purchase_Headers", CFG.PUR_H, "08_Purchase_Headers", "08_Purchases", "08_Purchase", "Purchases", "Purchase"],
     ["purchase", "date", "vendor", "total"]);
 }
 
 function _arSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.AR, "12_AR_Ledger", "12_AR", "AR_Ledger", "AR Ledger", "AR"],
+    ["13_AR_Ledger", CFG.AR, "12_AR_Ledger", "13_AR", "12_AR", "AR_Ledger", "AR Ledger", "AR"],
     ["customer", "billed", "paid", "balance", "status"]);
 }
 
 function _apSheet(ss) {
   return _resolveSheet(ss,
-    [CFG.AP, "13_AP_Ledger", "13_AP", "AP_Ledger", "AP Ledger", "AP"],
+    ["14_AP_Ledger", CFG.AP, "13_AP_Ledger", "14_AP", "13_AP", "AP_Ledger", "AP Ledger", "AP"],
     ["vendor", "ordered", "paid", "balance"]);
 }
 
 // Bump this whenever the file is redeployed so we can confirm the live Web App
 // is actually running the latest code (it shows up in the _debug payload).
-var API_BUILD = "full-diag-2026-07-01";
+var API_BUILD = "tab-fix-2026-07-01";
 
 // Runtime self-diagnostic: reports every tab name and probes all resolved
 // data sheets. Always included in action=all so DevTools / the CRM diagnostic
