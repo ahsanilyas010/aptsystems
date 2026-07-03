@@ -19,6 +19,7 @@ import {
   LayoutDashboard, Users, FileText, CreditCard, ShoppingCart, Truck, Receipt,
   TrendingUp, Scale, Package, BarChart3, ClipboardList, Store, Bike, MapPin,
   Boxes, Link2, Map as MapIcon, FileBarChart, Settings, Menu, RefreshCw, Leaf,
+  Banknote,
 } from "lucide-react";
 
 const firebaseConfig = {
@@ -111,7 +112,7 @@ async function sbPost(action, params = {}) {
   return json.data !== undefined ? json.data : [];
 }
 
-const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config"]);
+const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config","rider-commission"]);
 
 // ── Brand Colors ──────────────────────────────────────────────
 const G = {
@@ -144,6 +145,7 @@ const NAV_ICONS = {
   areas:            { Icon: MapIcon,       color: "#00ACC1" },
   "rider-reports":  { Icon: FileBarChart,  color: "#3949AB" },
   "rider-config":   { Icon: Settings,      color: "#607D8B" },
+  "rider-commission":{ Icon: Banknote,     color: "#2E7D32" },
 };
 
 // Responsive helper — true on phone-width viewports.
@@ -766,6 +768,7 @@ function CrmApp({ user, onLogout }) {
       {id:"areas",          label:"Areas"},
       {id:"rider-reports",  label:"Rider Reports"},
       {id:"rider-config",   label:"Rider Config"},
+      {id:"rider-commission",label:"Commission"},
     ]},
   ];
 
@@ -2513,6 +2516,141 @@ function CrmApp({ user, onLogout }) {
     );
   };
 
+  // ── COMMISSION CALCULATOR ─────────────────────────────────
+  const COMMISSION_TIERS = [
+    { label: "First store order",      amount: 1000, color: "#2E7D32", bg: "#E8F5E9" },
+    { label: "Repeat order ≥ Rs.10k",  amount: 500,  color: "#1565C0", bg: "#E3F2FD" },
+    { label: "Repeat order < Rs.10k",  amount: 250,  color: "#FF8F00", bg: "#FFF8E1" },
+  ];
+
+  function calcOrderCommission(order, firstOrderIdByStore) {
+    if (firstOrderIdByStore[order.store_id] === order.id) return 1000;
+    return Number(order.total_value || 0) >= 10000 ? 500 : 250;
+  }
+
+  const RiderCommissionTab = () => {
+    const now = new Date();
+    const [from, setFrom] = useState(new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10));
+    const [to, setTo] = useState(now.toISOString().slice(0,10));
+    const [statusFilter, setStatusFilter] = useState("Delivered");
+    const [expandedRider, setExpandedRider] = useState(null);
+
+    // First-ever order id per store across all loaded orders
+    const firstOrderIdByStore = useMemo(() => {
+      const m = {};
+      const sorted = [...sbData.orders].sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
+      sorted.forEach(o => { if (o.store_id && !m[o.store_id]) m[o.store_id] = o.id; });
+      return m;
+    }, [sbData.orders]);
+
+    const filtered = useMemo(() => sbData.orders.filter(o => {
+      const d = (o.created_at || "").slice(0,10);
+      if (d < from || d > to) return false;
+      if (statusFilter !== "all" && o.status !== statusFilter) return false;
+      return true;
+    }), [sbData.orders, from, to, statusFilter]);
+
+    const byRider = useMemo(() => {
+      const m = {};
+      filtered.forEach(o => {
+        const name = o.profiles?.full_name || "Unassigned";
+        if (!m[name]) m[name] = { name, orders: [], total: 0, t1: 0, t2: 0, t3: 0 };
+        const comm = calcOrderCommission(o, firstOrderIdByStore);
+        m[name].orders.push({ ...o, _comm: comm });
+        m[name].total += comm;
+        if (comm === 1000) m[name].t1++;
+        else if (comm === 500) m[name].t2++;
+        else m[name].t3++;
+      });
+      return Object.values(m).sort((a,b) => b.total - a.total);
+    }, [filtered, firstOrderIdByStore]);
+
+    const grandTotal = byRider.reduce((s,r) => s + r.total, 0);
+    const tierCounts = { t1: byRider.reduce((s,r)=>s+r.t1,0), t2: byRider.reduce((s,r)=>s+r.t2,0), t3: byRider.reduce((s,r)=>s+r.t3,0) };
+
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        {/* Tier reference */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10}}>
+          {COMMISSION_TIERS.map(t=>(
+            <div key={t.label} style={{background:t.bg,borderRadius:10,padding:"12px 14px",borderLeft:`3px solid ${t.color}`}}>
+              <div style={{fontSize:9,fontWeight:800,color:t.color,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4}}>{t.label}</div>
+              <div style={{fontSize:20,fontWeight:800,color:G.ink}}>PKR {t.amount.toLocaleString()}</div>
+            </div>
+          ))}
+          <div style={{background:G.pale,borderRadius:10,padding:"12px 14px",borderLeft:`3px solid ${G.dark}`}}>
+            <div style={{fontSize:9,fontWeight:800,color:G.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4}}>No earnings cap</div>
+            <div style={{fontSize:13,fontWeight:700,color:G.muted}}>Unlimited commissions</div>
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div style={{background:G.card,borderRadius:12,padding:16,boxShadow:"0 2px 12px rgba(26,92,32,0.07)",display:"flex",flexWrap:"wrap",gap:12,alignItems:"flex-end"}}>
+          <Inp label="From" type="date" value={from} onChange={e=>setFrom(e.target.value)} style={{flex:"1 1 130px"}}/>
+          <Inp label="To" type="date" value={to} onChange={e=>setTo(e.target.value)} style={{flex:"1 1 130px"}}/>
+          <Sel label="Status" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{flex:"1 1 140px"}}>
+            <option value="all">All statuses</option>
+            <option value="Delivered">Delivered</option>
+            <option value="Approved">Approved</option>
+            <option value="Pending">Pending</option>
+          </Sel>
+        </div>
+
+        {/* Summary KPIs */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:10}}>
+          <Kpi label="Total Commission" value={fmt(grandTotal)} color={G.dark} icon={Banknote}/>
+          <Kpi label="Orders" value={filtered.length} color={G.mid} icon={ClipboardList}/>
+          <Kpi label="First-Store Bonuses" value={`${tierCounts.t1} × PKR 1,000`} color="#2E7D32" sub={fmt(tierCounts.t1*1000)} icon={Store}/>
+          <Kpi label="Repeat ≥10k" value={`${tierCounts.t2} × PKR 500`} color={G.blue} sub={fmt(tierCounts.t2*500)}/>
+          <Kpi label="Repeat <10k" value={`${tierCounts.t3} × PKR 250`} color={G.amber} sub={fmt(tierCounts.t3*250)}/>
+        </div>
+
+        {/* Per-rider breakdown */}
+        {byRider.length === 0 ? (
+          <div style={{background:G.card,borderRadius:12,padding:24,textAlign:"center",color:G.muted,fontSize:13}}>No orders found for the selected range and status.</div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {byRider.map(r => (
+              <div key={r.name} style={{background:G.card,borderRadius:12,boxShadow:"0 2px 12px rgba(26,92,32,0.07)",overflow:"hidden"}}>
+                {/* Rider header row */}
+                <div
+                  onClick={()=>setExpandedRider(expandedRider===r.name?null:r.name)}
+                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",cursor:"pointer",background:expandedRider===r.name?G.pale:"transparent",borderBottom:expandedRider===r.name?`1px solid ${G.border}`:"none"}}
+                >
+                  <div style={{display:"flex",alignItems:"center",gap:12}}>
+                    <div style={{width:34,height:34,borderRadius:"50%",background:G.mid,display:"flex",alignItems:"center",justifyContent:"center",color:G.white,fontWeight:800,fontSize:13}}>{r.name.charAt(0).toUpperCase()}</div>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13,color:G.ink}}>{r.name}</div>
+                      <div style={{fontSize:10,color:G.muted}}>{r.orders.length} order{r.orders.length!==1?"s":""} · {r.t1>0&&<span style={{color:"#2E7D32",fontWeight:700}}>{r.t1} first-store</span>}{r.t1>0&&(r.t2+r.t3)>0?" · ":""}{r.t2>0&&<span style={{color:G.blue}}>{r.t2} ≥10k</span>}{r.t2>0&&r.t3>0?" · ":""}{r.t3>0&&<span style={{color:G.amber}}>{r.t3} &lt;10k</span>}</div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{fontWeight:800,fontSize:16,color:G.dark}}>{fmt(r.total)}</div>
+                    <span style={{fontSize:14,color:G.muted}}>{expandedRider===r.name?"▲":"▼"}</span>
+                  </div>
+                </div>
+                {/* Order detail rows */}
+                {expandedRider===r.name&&(
+                  <TblWrap compact heads={["Date","Store","Order Total","Tier","Commission"]}
+                    rows={r.orders.map(o=>[
+                      <span style={{fontSize:10,color:G.muted}}>{(o.created_at||"").slice(0,10)}</span>,
+                      <span style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</span>,
+                      <span style={{fontSize:11}}>{fmt(o.total_value||0)}</span>,
+                      <span style={{fontSize:10,fontWeight:700,color:o._comm===1000?"#2E7D32":o._comm===500?G.blue:G.amber}}>
+                        {o._comm===1000?"First store":o._comm===500?"Repeat ≥10k":"Repeat <10k"}
+                      </span>,
+                      <span style={{fontWeight:800,fontSize:12,color:G.dark}}>{fmt(o._comm)}</span>,
+                    ])}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ── PAGES ─────────────────────────────────────────────────
   const PAGES={
     dashboard:<Dashboard/>,customers:<Customers/>,invoices:<Invoices/>,
@@ -2533,7 +2671,7 @@ function CrmApp({ user, onLogout }) {
     pnl:<PnL/>,arap:<ARAp/>,inventory:<Inventory/>,reports:<Reports/>,
     "rider-orders":<RiderOrdersTab/>,"rider-stores":<RiderStoresTab/>,
     riders:<RidersTab/>,locations:<LocationsTab/>,"rider-products":<RiderProductsTab/>,
-    "store-assign":<StoreAssignTab/>,areas:<AreasTab/>,"rider-reports":<RiderReportsTab/>,"rider-config":<RiderConfigTab/>,
+    "store-assign":<StoreAssignTab/>,areas:<AreasTab/>,"rider-reports":<RiderReportsTab/>,"rider-config":<RiderConfigTab/>,"rider-commission":<RiderCommissionTab/>,
   };
 
   return (
