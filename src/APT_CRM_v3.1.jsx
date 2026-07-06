@@ -112,7 +112,7 @@ async function sbPost(action, params = {}) {
   return json.data !== undefined ? json.data : [];
 }
 
-const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config","rider-commission","returns"]);
+const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config","rider-commission"]);
 
 // ── Brand Colors ──────────────────────────────────────────────
 const G = {
@@ -758,6 +758,7 @@ function CrmApp({ user, onLogout }) {
       {id:"arap",      label:"AR / AP"},
       {id:"inventory", label:"Inventory"},
       {id:"reports",   label:"Reports"},
+      {id:"returns",   label:"Returns"},
     ]},
     {group:"Rider Hub",items:[
       {id:"rider-orders",   label:"Rider Orders",  badge:pendingRiderOrders||null},
@@ -770,7 +771,6 @@ function CrmApp({ user, onLogout }) {
       {id:"rider-reports",  label:"Rider Reports"},
       {id:"rider-config",   label:"Rider Config"},
       {id:"rider-commission",label:"Commission"},
-      {id:"returns",         label:"Returns"},
     ]},
   ];
 
@@ -2528,7 +2528,7 @@ function CrmApp({ user, onLogout }) {
     const [q, setQ] = useState("");
 
     // New return form state
-    const [form, setForm] = useState({ store_id: "", order_id: "", reason: "" });
+    const [form, setForm] = useState({ store_id: "", gas_invoice_id: "", reason: "" });
     const [formItems, setFormItems] = useState([{ product_id: "", product_name: "", qty: 1, trade_price: 0 }]);
     const [submitting, setSubmitting] = useState(false);
 
@@ -2565,7 +2565,7 @@ function CrmApp({ user, onLogout }) {
         await sbPost("admin_create_return", { ...form, items: validItems });
         notify("✅ Return logged");
         setShowNew(false);
-        setForm({ store_id: "", order_id: "", reason: "" });
+        setForm({ store_id: "", gas_invoice_id: "", reason: "" });
         setFormItems([{ product_id: "", product_name: "", qty: 1, trade_price: 0 }]);
         await load();
       } catch(e) { notify("❌ "+e.message,"err"); }
@@ -2588,7 +2588,13 @@ function CrmApp({ user, onLogout }) {
       return (r.stores?.name||"").toLowerCase().includes(s)||(r.profiles?.full_name||"").toLowerCase().includes(s)||(r.reason||"").toLowerCase().includes(s)||(String(r.return_no||"")).includes(s);
     });
 
-    const storeOrders = form.store_id ? sbData.orders.filter(o => o.store_id === form.store_id && o.status === "Delivered") : [];
+    // GAS invoices for the selected customer/store (match by store name or show all)
+    const storeInvoices = useMemo(() => {
+      if (!form.store_id) return invoices;
+      const storeName = normTxt(sbData.stores.find(s => s.id === form.store_id)?.name || "");
+      if (!storeName) return invoices;
+      return invoices.filter(inv => normTxt(inv.custName || "").includes(storeName) || storeName.includes(normTxt(inv.custName || "")));
+    }, [form.store_id, invoices, sbData.stores]);
 
     return (
       <div style={{display:"flex",flexDirection:"column",gap:16}}>
@@ -2632,6 +2638,7 @@ function CrmApp({ user, onLogout }) {
               </div>
               <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
                 <span style={{fontWeight:800,fontSize:14,color:G.red}}>{fmt(r.total)}</span>
+                {r.gas_invoice_id&&<span style={{fontSize:9,background:"#E8F5E9",color:G.dark,borderRadius:5,padding:"2px 7px",fontWeight:700}}>INV: {r.gas_invoice_id}</span>}
                 {r.gas_credit_id&&<span style={{fontSize:9,background:G.sky,color:G.blue,borderRadius:5,padding:"2px 7px",fontWeight:700}}>CR: {r.gas_credit_id}</span>}
                 <span style={{fontSize:14,color:G.muted}}>{expanded===r.id?"▲":"▼"}</span>
               </div>
@@ -2640,11 +2647,16 @@ function CrmApp({ user, onLogout }) {
             {/* Expanded detail */}
             {expanded===r.id&&(
               <div style={{borderTop:`1px solid ${G.border}`,padding:14}}>
-                {/* Link GAS credit note */}
-                <div style={{display:"flex",gap:8,alignItems:"flex-end",marginBottom:12}}>
+                {/* Reference fields row */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                  {/* Linked GAS Invoice (set at creation) */}
+                  <div style={{background:G.sky,borderRadius:8,padding:"8px 12px"}}>
+                    <div style={{fontSize:9,fontWeight:800,color:G.blue,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:3}}>Linked GAS Invoice</div>
+                    <div style={{fontSize:13,fontWeight:700,color:r.gas_invoice_id?G.blue:G.muted}}>{r.gas_invoice_id||"—"}</div>
+                  </div>
+                  {/* Credit Note — editable */}
                   <Inp
-                    label="GAS Credit Note ID"
-                    style={{flex:1}}
+                    label="Credit Note ID"
                     defaultValue={r.gas_credit_id||""}
                     placeholder="e.g. CN-042"
                     onBlur={async e=>{
@@ -2680,13 +2692,13 @@ function CrmApp({ user, onLogout }) {
           <Modal title="Log New Return" onClose={()=>setShowNew(false)} wide>
             <form onSubmit={submitReturn} style={{display:"flex",flexDirection:"column",gap:14}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-                <Sel label="Store *" value={form.store_id} onChange={e=>setForm(f=>({...f,store_id:e.target.value,order_id:""}))}>
+                <Sel label="Store *" value={form.store_id} onChange={e=>setForm(f=>({...f,store_id:e.target.value,gas_invoice_id:""}))}>
                   <option value="">Select store…</option>
                   {sbData.stores.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
                 </Sel>
-                <Sel label="Linked Order (optional)" value={form.order_id} onChange={e=>setForm(f=>({...f,order_id:e.target.value}))} disabled={!form.store_id}>
-                  <option value="">No specific order</option>
-                  {storeOrders.map(o=><option key={o.id} value={o.id}>#{(o.id||"").slice(0,8)} — {fmt(o.total_value||0)} ({(o.created_at||"").slice(0,10)})</option>)}
+                <Sel label="Linked GAS Invoice (optional)" value={form.gas_invoice_id} onChange={e=>setForm(f=>({...f,gas_invoice_id:e.target.value}))}>
+                  <option value="">No specific invoice</option>
+                  {storeInvoices.map(inv=><option key={inv.id} value={inv.id}>{inv.id} — {inv.custName} — {fmt(inv.total)} ({inv.date})</option>)}
                 </Sel>
               </div>
               <Inp label="Reason" value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))} placeholder="e.g. Damaged goods, expired stock…"/>
