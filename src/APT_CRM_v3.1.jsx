@@ -19,7 +19,7 @@ import {
   LayoutDashboard, Users, FileText, CreditCard, ShoppingCart, Truck, Receipt,
   TrendingUp, Scale, Package, BarChart3, ClipboardList, Store, Bike, MapPin,
   Boxes, Link2, Map as MapIcon, FileBarChart, Settings, Menu, RefreshCw, Leaf,
-  Banknote,
+  Banknote, Undo2,
 } from "lucide-react";
 
 const firebaseConfig = {
@@ -112,7 +112,7 @@ async function sbPost(action, params = {}) {
   return json.data !== undefined ? json.data : [];
 }
 
-const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config","rider-commission"]);
+const RIDER_HUB_TABS = new Set(["rider-orders","rider-stores","riders","locations","rider-products","store-assign","areas","rider-reports","rider-config","rider-commission","returns"]);
 
 // ── Brand Colors ──────────────────────────────────────────────
 const G = {
@@ -146,6 +146,7 @@ const NAV_ICONS = {
   "rider-reports":  { Icon: FileBarChart,  color: "#3949AB" },
   "rider-config":   { Icon: Settings,      color: "#607D8B" },
   "rider-commission":{ Icon: Banknote,     color: "#2E7D32" },
+  "returns":         { Icon: Undo2,        color: "#C62828" },
 };
 
 // Responsive helper — true on phone-width viewports.
@@ -769,6 +770,7 @@ function CrmApp({ user, onLogout }) {
       {id:"rider-reports",  label:"Rider Reports"},
       {id:"rider-config",   label:"Rider Config"},
       {id:"rider-commission",label:"Commission"},
+      {id:"returns",         label:"Returns"},
     ]},
   ];
 
@@ -2516,6 +2518,207 @@ function CrmApp({ user, onLogout }) {
     );
   };
 
+  // ── RETURNS ───────────────────────────────────────────────
+  const ReturnsTab = () => {
+    const [returns, setReturns] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [expanded, setExpanded] = useState(null);
+    const [expandedItems, setExpandedItems] = useState({});
+    const [showNew, setShowNew] = useState(false);
+    const [q, setQ] = useState("");
+
+    // New return form state
+    const [form, setForm] = useState({ store_id: "", order_id: "", reason: "" });
+    const [formItems, setFormItems] = useState([{ product_id: "", product_name: "", qty: 1, trade_price: 0 }]);
+    const [submitting, setSubmitting] = useState(false);
+
+    const load = useCallback(async () => {
+      setLoading(true);
+      try { setReturns(await sbPost("returns")); }
+      catch(e) { notify("❌ "+e.message,"err"); }
+      finally { setLoading(false); }
+    }, []);
+
+    useEffect(() => { load(); }, [load]);
+
+    async function loadItems(returnId) {
+      if (expandedItems[returnId]) return;
+      try {
+        const items = await sbPost("return_items", { return_id: returnId });
+        setExpandedItems(prev => ({ ...prev, [returnId]: items }));
+      } catch(e) { notify("❌ "+e.message,"err"); }
+    }
+
+    function toggleExpand(id) {
+      const next = expanded === id ? null : id;
+      setExpanded(next);
+      if (next) loadItems(next);
+    }
+
+    async function submitReturn(e) {
+      e.preventDefault();
+      if (!form.store_id) return notify("Select a store","err");
+      const validItems = formItems.filter(it => it.product_id && it.qty > 0);
+      if (!validItems.length) return notify("Add at least one return item","err");
+      setSubmitting(true);
+      try {
+        await sbPost("admin_create_return", { ...form, items: validItems });
+        notify("✅ Return logged");
+        setShowNew(false);
+        setForm({ store_id: "", order_id: "", reason: "" });
+        setFormItems([{ product_id: "", product_name: "", qty: 1, trade_price: 0 }]);
+        await load();
+      } catch(e) { notify("❌ "+e.message,"err"); }
+      finally { setSubmitting(false); }
+    }
+
+    function updateItem(idx, key, val) {
+      setFormItems(prev => prev.map((it,i) => i===idx ? { ...it, [key]: val } : it));
+    }
+
+    function pickProduct(idx, pid) {
+      const p = sbData.products.find(x => x.id === pid);
+      if (!p) return;
+      setFormItems(prev => prev.map((it,i) => i===idx ? { ...it, product_id: p.id, product_name: p.name, trade_price: Number(p.trade_price||0) } : it));
+    }
+
+    const filtered = (returns||[]).filter(r => {
+      if (!q) return true;
+      const s = q.toLowerCase();
+      return (r.stores?.name||"").toLowerCase().includes(s)||(r.profiles?.full_name||"").toLowerCase().includes(s)||(r.reason||"").toLowerCase().includes(s)||(String(r.return_no||"")).includes(s);
+    });
+
+    const storeOrders = form.store_id ? sbData.orders.filter(o => o.store_id === form.store_id && o.status === "Delivered") : [];
+
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        {/* Header */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+          <div style={{display:"flex",gap:8,flex:1,minWidth:0}}>
+            <Inp style={{flex:1,minWidth:120}} label="" placeholder="Search store, rider, reason…" value={q} onChange={e=>setQ(e.target.value)}/>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Btn sm v="secondary" onClick={load}>{loading?"⏳ Loading…":"↻ Refresh"}</Btn>
+            <Btn sm onClick={()=>setShowNew(true)}>+ New Return</Btn>
+          </div>
+        </div>
+
+        {/* Summary KPIs */}
+        {returns&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:10}}>
+            <Kpi label="Total Returns" value={returns.length} color={G.red} icon={Undo2}/>
+            <Kpi label="Total Value Returned" value={fmt(returns.reduce((s,r)=>s+Number(r.total||0),0))} color={G.amber}/>
+            <Kpi label="Stores with Returns" value={new Set(returns.map(r=>r.store_id)).size} color={G.blue}/>
+          </div>
+        )}
+
+        {/* Returns list */}
+        {loading&&!returns&&<div style={{textAlign:"center",padding:32,color:G.muted,fontSize:13}}>⏳ Loading returns…</div>}
+        {returns&&filtered.length===0&&<div style={{textAlign:"center",padding:32,color:G.muted,fontSize:13}}>No returns found.</div>}
+        {filtered.map(r => (
+          <div key={r.id} style={{background:G.card,borderRadius:12,boxShadow:"0 2px 12px rgba(26,92,32,0.07)",overflow:"hidden"}}>
+            {/* Row */}
+            <div onClick={()=>toggleExpand(r.id)} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",cursor:"pointer",background:expanded===r.id?G.pale:"transparent"}}>
+              <div style={{width:36,height:36,borderRadius:9,background:G.pink,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                <Undo2 size={16} color={G.red}/>
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <span style={{fontWeight:700,fontSize:12,color:G.ink}}>#{r.return_no||"—"}</span>
+                  <span style={{fontWeight:600,fontSize:12,color:G.dark}}>{r.stores?.name||"Unknown store"}</span>
+                  {r.profiles?.full_name&&<span style={{fontSize:11,color:G.muted}}>· {r.profiles.full_name}</span>}
+                </div>
+                <div style={{fontSize:10,color:G.muted,marginTop:2}}>{(r.created_at||"").slice(0,10)} {r.reason?`· ${r.reason}`:""}</div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+                <span style={{fontWeight:800,fontSize:14,color:G.red}}>{fmt(r.total)}</span>
+                {r.gas_credit_id&&<span style={{fontSize:9,background:G.sky,color:G.blue,borderRadius:5,padding:"2px 7px",fontWeight:700}}>CR: {r.gas_credit_id}</span>}
+                <span style={{fontSize:14,color:G.muted}}>{expanded===r.id?"▲":"▼"}</span>
+              </div>
+            </div>
+
+            {/* Expanded detail */}
+            {expanded===r.id&&(
+              <div style={{borderTop:`1px solid ${G.border}`,padding:14}}>
+                {/* Link GAS credit note */}
+                <div style={{display:"flex",gap:8,alignItems:"flex-end",marginBottom:12}}>
+                  <Inp
+                    label="GAS Credit Note ID"
+                    style={{flex:1}}
+                    defaultValue={r.gas_credit_id||""}
+                    placeholder="e.g. CN-042"
+                    onBlur={async e=>{
+                      const v=e.target.value.trim();
+                      if(v===r.gas_credit_id) return;
+                      try { await sbPost("update_return",{id:r.id,gas_credit_id:v||null}); notify("✅ Credit note linked"); await load(); }
+                      catch(er){ notify("❌ "+er.message,"err"); }
+                    }}
+                  />
+                </div>
+
+                {/* Items */}
+                {!expandedItems[r.id]&&<div style={{fontSize:11,color:G.muted,padding:"4px 0"}}>⏳ Loading items…</div>}
+                {expandedItems[r.id]&&(
+                  expandedItems[r.id].length===0
+                    ? <div style={{fontSize:11,color:G.muted}}>No items recorded.</div>
+                    : <TblWrap compact heads={["Product","Qty","Trade Price","Line Total"]}
+                        rows={expandedItems[r.id].map(it=>[
+                          <span style={{fontWeight:600,fontSize:11}}>{it.product_name}</span>,
+                          <span style={{fontSize:11}}>{it.qty}</span>,
+                          <span style={{fontSize:11}}>{fmt(it.trade_price)}</span>,
+                          <span style={{fontWeight:700,fontSize:11,color:G.red}}>{fmt(it.qty*it.trade_price)}</span>,
+                        ])}
+                      />
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+
+        {/* New Return Modal */}
+        {showNew&&(
+          <Modal title="Log New Return" onClose={()=>setShowNew(false)} wide>
+            <form onSubmit={submitReturn} style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                <Sel label="Store *" value={form.store_id} onChange={e=>setForm(f=>({...f,store_id:e.target.value,order_id:""}))}>
+                  <option value="">Select store…</option>
+                  {sbData.stores.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                </Sel>
+                <Sel label="Linked Order (optional)" value={form.order_id} onChange={e=>setForm(f=>({...f,order_id:e.target.value}))} disabled={!form.store_id}>
+                  <option value="">No specific order</option>
+                  {storeOrders.map(o=><option key={o.id} value={o.id}>#{(o.id||"").slice(0,8)} — {fmt(o.total_value||0)} ({(o.created_at||"").slice(0,10)})</option>)}
+                </Sel>
+              </div>
+              <Inp label="Reason" value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))} placeholder="e.g. Damaged goods, expired stock…"/>
+
+              {/* Items */}
+              <div>
+                <div style={{fontWeight:700,fontSize:11,color:G.muted,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>Return Items</div>
+                {formItems.map((it,idx)=>(
+                  <div key={idx} style={{display:"grid",gridTemplateColumns:"2fr 80px 100px 32px",gap:8,marginBottom:8,alignItems:"end"}}>
+                    <Sel label={idx===0?"Product":""} value={it.product_id} onChange={e=>pickProduct(idx,e.target.value)}>
+                      <option value="">Select product…</option>
+                      {sbData.products.filter(p=>p.active!==false).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                    </Sel>
+                    <Inp label={idx===0?"Qty":""} type="number" min={1} value={it.qty} onChange={e=>updateItem(idx,"qty",Math.max(1,+e.target.value))}/>
+                    <Inp label={idx===0?"Trade Price":""} type="number" min={0} value={it.trade_price} onChange={e=>updateItem(idx,"trade_price",+e.target.value)}/>
+                    <button type="button" onClick={()=>setFormItems(prev=>prev.filter((_,i)=>i!==idx))} style={{background:G.pink,border:"none",borderRadius:7,padding:"6px 10px",color:G.red,cursor:"pointer",fontWeight:700,alignSelf:"flex-end"}}>✕</button>
+                  </div>
+                ))}
+                <Btn type="button" sm v="secondary" onClick={()=>setFormItems(prev=>[...prev,{product_id:"",product_name:"",qty:1,trade_price:0}])}>+ Add Item</Btn>
+              </div>
+
+              <div style={{display:"flex",justifyContent:"flex-end",gap:8,paddingTop:4}}>
+                <Btn type="button" v="ghost" onClick={()=>setShowNew(false)}>Cancel</Btn>
+                <Btn type="submit" v="danger" disabled={submitting}>{submitting?"Saving…":"Log Return"}</Btn>
+              </div>
+            </form>
+          </Modal>
+        )}
+      </div>
+    );
+  };
+
   // ── COMMISSION CALCULATOR ─────────────────────────────────
   const COMMISSION_TIERS = [
     { label: "First store order",      amount: 1000, color: "#2E7D32", bg: "#E8F5E9" },
@@ -2671,7 +2874,7 @@ function CrmApp({ user, onLogout }) {
     pnl:<PnL/>,arap:<ARAp/>,inventory:<Inventory/>,reports:<Reports/>,
     "rider-orders":<RiderOrdersTab/>,"rider-stores":<RiderStoresTab/>,
     riders:<RidersTab/>,locations:<LocationsTab/>,"rider-products":<RiderProductsTab/>,
-    "store-assign":<StoreAssignTab/>,areas:<AreasTab/>,"rider-reports":<RiderReportsTab/>,"rider-config":<RiderConfigTab/>,"rider-commission":<RiderCommissionTab/>,
+    "store-assign":<StoreAssignTab/>,areas:<AreasTab/>,"rider-reports":<RiderReportsTab/>,"rider-config":<RiderConfigTab/>,"rider-commission":<RiderCommissionTab/>,"returns":<ReturnsTab/>,
   };
 
   return (
