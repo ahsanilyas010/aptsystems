@@ -545,18 +545,9 @@ function CrmApp({ user, onLogout }) {
 
   const triggerPdfDownload = (url) => {
     if (!url) return;
-    let downloadUrl = url;
-    const m = url.match(/\/file\/d\/([^\/]+)/) || url.match(/id=([^&]+)/);
-    if (m && m[1]) {
-      downloadUrl = `https://drive.google.com/uc?export=download&id=${m[1]}`;
-    }
-    const a = document.createElement("a");
-    a.href = downloadUrl;
-    a.target = "_blank";
-    a.download = "";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    // window.open works cross-origin on both desktop and mobile;
+    // the anchor download attribute is silently ignored for cross-origin URLs on iOS/Android.
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   // Generic CSV export: rows is an array of plain objects; column order follows
@@ -652,10 +643,16 @@ function CrmApp({ user, onLogout }) {
       createdBy: user.email
     }, {createdBy: user.email});
     const finalInvId = formData.invId || result.id || invId;
-    if (result.pdfUrl) {
-      cachePdf(finalInvId, result.pdfUrl);
-      // Auto-download PDF immediately in browser
-      triggerPdfDownload(result.pdfUrl);
+    let pdfUrl = result.pdfUrl;
+    if (!pdfUrl) {
+      try {
+        const pdfRes = await gasPost("generate_pdf", null, { invId: finalInvId });
+        pdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
+      } catch { /* non-fatal */ }
+    }
+    if (pdfUrl) {
+      cachePdf(finalInvId, pdfUrl);
+      triggerPdfDownload(pdfUrl);
     }
     notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
     closeModal();
@@ -676,9 +673,16 @@ function CrmApp({ user, onLogout }) {
         items: enrichedItems,
         editedBy: user.email
       });
-      if (result.pdfUrl) {
-        cachePdf(formData.invId, result.pdfUrl);
-        triggerPdfDownload(result.pdfUrl);
+      let editPdfUrl = result.pdfUrl;
+      if (!editPdfUrl) {
+        try {
+          const pdfRes = await gasPost("generate_pdf", null, { invId: formData.invId });
+          editPdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
+        } catch { /* non-fatal */ }
+      }
+      if (editPdfUrl) {
+        cachePdf(formData.invId, editPdfUrl);
+        triggerPdfDownload(editPdfUrl);
       }
       notify(`✅ ${formData.invId} updated — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
       closeModal();
