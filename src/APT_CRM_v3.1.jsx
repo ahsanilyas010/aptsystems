@@ -2572,6 +2572,95 @@ function CrmApp({ user, onLogout }) {
         </div>
       );
     };
+    const DataMigrationSection = () => {
+      const [migStatus, setMigStatus] = useState(null);
+      const [migBusy, setMigBusy] = useState(false);
+
+      const runMigration = async () => {
+        if (!window.confirm("This will copy ALL financial data from Google Sheets to Supabase (customers, vendors, invoices, payments, expenses, purchases). Existing records will be updated in place. Proceed?")) return;
+        setMigBusy(true);
+        setMigStatus({ step: "Fetching GAS data…", error: null, counts: null });
+        try {
+          // 1. Fetch all master data in one request
+          const all = await gasGet("all", { limit: 2000 });
+          setMigStatus(s => ({ ...s, step: "Fetching invoice items…" }));
+
+          // 2. Fetch ALL invoice items via the bulk export endpoint
+          const allItems = await gasGet("all_invoice_items");
+          const items = Array.isArray(allItems) ? allItems : (allItems?.items ?? []);
+
+          // 3. Transform to Supabase schema
+          const customers = (all.customers ?? []).map(c => ({
+            id: c.id, name: c.name, city: c.city, area: c.area,
+            owner_name: c.contact, mobile: c.phone, open_bal: c.openBal ?? 0, notes: c.notes,
+          }));
+          const vendors = (all.vendors ?? []).map(v => ({
+            id: v.id, name: v.name, category: v.category,
+            contact: v.contact, mobile: v.phone, open_bal: v.openBal ?? 0, notes: v.notes,
+          }));
+          const invoices = (all.invoices ?? []).map(inv => ({
+            id: inv.id, date: inv.date, cust_id: inv.custId || null, cust_name: inv.custName,
+            total: inv.total ?? 0, status: inv.status ?? "Unpaid",
+            pay_terms: inv.payTerms, created_by: inv.createdBy, notes: inv.notes ?? null,
+          }));
+          // invoice_items keyed by invId
+          const invoice_items = items.map(it => ({
+            invoice_id: it.invId, product_id: it.pid, product_name: it.pname,
+            qty: it.qty ?? 0, rate: it.rate ?? 0, total: it.total ?? 0, notes: it.notes ?? null,
+          }));
+          const purchases = (all.purchases ?? []).map(p => ({
+            id: p.id, date: p.date, vendor_id: p.vendorId || null, total: p.total ?? 0, notes: p.notes ?? null,
+          }));
+          const payments = (all.payments ?? []).map(p => ({
+            id: p.id, date: p.date, type: p.type === "Received" ? "Received" : "Made",
+            party_id: p.partyId || null, ref_id: p.refId || null, amount: p.amount ?? 0, notes: p.notes ?? null,
+          }));
+          const expenses = (all.expenses ?? []).map(e => ({
+            id: e.id, date: e.date, category: e.category, amount: e.amount ?? 0, notes: e.notes ?? null,
+          }));
+
+          setMigStatus(s => ({ ...s, step: "Uploading to Supabase…" }));
+          const result = await sbPost("bulk_import_financial", {
+            customers, vendors, invoices, invoice_items, purchases, payments, expenses,
+          });
+          setMigStatus({ step: "Done ✅", error: null, counts: result?.counts ?? null });
+          notify("✅ Migration complete!");
+        } catch (e) {
+          setMigStatus(s => ({ ...s, step: "Failed ❌", error: e.message }));
+          notify("❌ Migration failed: " + e.message, "err");
+        } finally {
+          setMigBusy(false);
+        }
+      };
+
+      return (
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)",border:"1.5px solid #ffe0b2"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#e65100",marginBottom:8}}>GAS → Supabase Data Migration</div>
+          <div style={{fontSize:12,color:G.muted,marginBottom:14}}>
+            One-time migration. Copies customers, vendors, invoices, payments, purchases and expenses from Google Sheets into Supabase. Safe to re-run — uses upsert.
+          </div>
+          <Btn sm disabled={migBusy} onClick={runMigration} style={{background:"#e65100",color:"#fff",marginBottom:migStatus?12:0}}>
+            {migBusy?"Migrating…":"Run Migration Now"}
+          </Btn>
+          {migStatus && (
+            <div style={{fontSize:12,marginTop:8}}>
+              <div style={{color:migStatus.error?"#e53e3e":G.dark,fontWeight:600,marginBottom:4}}>{migStatus.step}</div>
+              {migStatus.error && <div style={{color:"#e53e3e",fontSize:11}}>{migStatus.error}</div>}
+              {migStatus.counts && (
+                <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:6}}>
+                  {Object.entries(migStatus.counts).map(([k,v])=>(
+                    <span key={k} style={{background:"#f0faf4",border:"1px solid #c8e6c9",borderRadius:6,padding:"2px 8px",color:G.dark,fontSize:11}}>
+                      {k}: <strong>{v}</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     return (
       <div style={{display:"flex",flexDirection:"column",gap:16}}>
         <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -2595,6 +2684,7 @@ function CrmApp({ user, onLogout }) {
           <SettingRow k="push_body_default" label="Default Push Body"/>
         </div>
         <EmailRecipientsSection/>
+        <DataMigrationSection/>
       </div>
     );
   };
