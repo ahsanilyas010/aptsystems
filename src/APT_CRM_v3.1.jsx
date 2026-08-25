@@ -2497,6 +2497,49 @@ function CrmApp({ user, onLogout }) {
         <Btn sm disabled={busy===k} onClick={()=>saveSetting(k,val)}>{busy===k?"Saving…":"Save"}</Btn>
       </div>;
     };
+    const EmailRecipientsSection = () => {
+      const raw = getVal("email_notification_recipients");
+      let initial = [];
+      try { const p = raw ? JSON.parse(raw) : []; initial = Array.isArray(p) ? p : []; } catch {}
+      const [emails, setEmails] = useState(initial);
+      const [newEmail, setNewEmail] = useState("");
+      const [emailBusy, setEmailBusy] = useState(false);
+      useEffect(()=>{
+        try { const p = raw ? JSON.parse(raw) : []; setEmails(Array.isArray(p) ? p : []); } catch {}
+      },[raw]);
+      const saveEmails = async (list) => {
+        setEmailBusy(true);
+        try { await saveSetting("email_notification_recipients", JSON.stringify(list)); setEmails(list); }
+        finally { setEmailBusy(false); }
+      };
+      const add = () => {
+        const e = newEmail.trim().toLowerCase();
+        if (!e || !e.includes("@")) return notify("Enter a valid email","err");
+        if (emails.includes(e)) return notify("Already in list","err");
+        saveEmails([...emails, e]);
+        setNewEmail("");
+      };
+      const remove = (e) => saveEmails(emails.filter(x=>x!==e));
+      return (
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{fontWeight:700,fontSize:13,color:G.dark,marginBottom:14}}>Order Email Notifications</div>
+          <div style={{marginBottom:12,display:"flex",flexDirection:"column",gap:6}}>
+            {emails.length===0&&<div style={{fontSize:12,color:G.muted,fontStyle:"italic"}}>No recipients — using system defaults</div>}
+            {emails.map(e=>(
+              <div key={e} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:"#f0faf4",borderRadius:8,fontSize:13}}>
+                <span style={{flex:1,color:G.dark}}>{e}</span>
+                <button onClick={()=>remove(e)} disabled={emailBusy} style={{background:"none",border:"none",cursor:"pointer",color:"#e53e3e",fontWeight:700,fontSize:18,lineHeight:1,padding:"0 4px"}}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Inp value={newEmail} onChange={ev=>setNewEmail(ev.target.value)} placeholder="name@example.com" style={{flex:1}} onKeyDown={ev=>ev.key==="Enter"&&add()}/>
+            <Btn sm disabled={emailBusy} onClick={add}>{emailBusy?"Saving…":"Add"}</Btn>
+          </div>
+          <div style={{fontSize:11,color:G.muted,marginTop:8}}>Notified when a rider submits an order.</div>
+        </div>
+      );
+    };
     return (
       <div style={{display:"flex",flexDirection:"column",gap:16}}>
         <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -2519,6 +2562,7 @@ function CrmApp({ user, onLogout }) {
           <SettingRow k="push_title_default" label="Default Push Title"/>
           <SettingRow k="push_body_default" label="Default Push Body"/>
         </div>
+        <EmailRecipientsSection/>
       </div>
     );
   };
