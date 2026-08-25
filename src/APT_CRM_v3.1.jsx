@@ -1959,35 +1959,67 @@ function CrmApp({ user, onLogout }) {
       catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
     };
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading rider orders…</div>;
+    const exportOrdersCsv = ()=>exportCsv("rider-orders.csv",filtered.map(o=>({id:o.id,date:(o.created_at||"").slice(0,10),store:o.stores?.name,rider:o.profiles?.full_name,total:o.total_value||o.total||0,status:o.status,gas_invoice_id:o.gas_invoice_id})),[["id","Order"],["date","Date"],["store","Store"],["rider","Rider"],["total","Total"],["status","Status"],["gas_invoice_id","GAS Invoice"]]);
     return (
-      <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {/* Status chips */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
           {["all","Pending","Approved","Packed","Dispatched","Delivered","Cancelled"].map(s=>(
-            <button key={s} onClick={()=>setStatusFilter(s)} style={{padding:"4px 13px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:statusFilter===s?G.dark:G.pale,color:statusFilter===s?G.white:G.dark,border:`1.5px solid ${statusFilter===s?G.dark:G.border}`}}>{s==="all"?"All":s}</button>
+            <button key={s} onClick={()=>setStatusFilter(s)} style={{padding:"5px 13px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:statusFilter===s?G.dark:G.pale,color:statusFilter===s?G.white:G.dark,border:`1.5px solid ${statusFilter===s?G.dark:G.border}`,minHeight:32}}>{s==="all"?"All":s}</button>
           ))}
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search order / store / rider…" style={{marginLeft:"auto",border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",minWidth:200}}/>
-          <Btn sm v="secondary" onClick={()=>exportCsv("rider-orders.csv",filtered.map(o=>({id:o.id,date:(o.created_at||"").slice(0,10),store:o.stores?.name,rider:o.profiles?.full_name,total:o.total_value||o.total||0,status:o.status,gas_invoice_id:o.gas_invoice_id})),[["id","Order"],["date","Date"],["store","Store"],["rider","Rider"],["total","Total"],["status","Status"],["gas_invoice_id","GAS Invoice"]])}>⬇ Export</Btn>
-          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
-        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Order","Date","Store","Rider","Total","Status","GAS","Actions"]}
-            rows={filtered.map(o=>[
-              <span style={{fontWeight:700,color:G.dark,fontSize:10,fontFamily:"monospace"}}>{(o.id||"").slice(0,8)}</span>,
-              <span style={{fontSize:10,color:G.muted,whiteSpace:"nowrap"}}>{(o.created_at||"").slice(0,10)||"—"}</span>,
-              <div><div style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</div><div style={{fontSize:9,color:G.muted}}>{o.stores?.area||""}</div></div>,
-              <span style={{fontSize:11}}>{o.profiles?.full_name||"—"}</span>,
-              <span style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</span>,
-              <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700}}>{o.status}</span>,
-              o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
-              <div style={{display:"flex",gap:4}}>
-                {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
-                {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾</Btn>}
-                {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+        {/* Search + actions */}
+        <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search order / store / rider…" style={{flex:"1 1 160px",border:`1.5px solid ${G.border}`,borderRadius:8,padding:"7px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none"}}/>
+          <Btn sm v="secondary" onClick={exportOrdersCsv}>⬇ Export</Btn>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻</Btn>
+        </div>
+        {/* Orders list */}
+        {isMobile ? (
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {filtered.map(o=>(
+              <div key={o.id} style={{background:G.card,borderRadius:12,padding:14,boxShadow:"0 2px 8px rgba(26,92,32,0.07)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,gap:8}}>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:14,color:G.ink,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.stores?.name||"—"}</div>
+                    <div style={{fontSize:10,color:G.muted,marginTop:2}}>{o.profiles?.full_name||"—"} · {(o.created_at||"").slice(0,10)}</div>
+                    {o.gas_invoice_id&&<div style={{fontSize:9,color:G.mid,marginTop:2,fontWeight:700}}>✓ {o.gas_invoice_id}</div>}
+                  </div>
+                  <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"3px 10px",borderRadius:20,fontSize:10,fontWeight:700,flexShrink:0}}>{o.status}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                  <span style={{fontWeight:800,fontSize:16,color:G.dark}}>{fmt(o.total_value||o.total||0)}</span>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                    {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
+                    {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾 Invoice</Btn>}
+                    {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+                  </div>
+                </div>
               </div>
-            ])}
-          />
-          {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
-        </div>
+            ))}
+            {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
+          </div>
+        ) : (
+          <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+            <TblWrap compact heads={["Order","Date","Store","Rider","Total","Status","GAS","Actions"]}
+              rows={filtered.map(o=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:10,fontFamily:"monospace"}}>{(o.id||"").slice(0,8)}</span>,
+                <span style={{fontSize:10,color:G.muted,whiteSpace:"nowrap"}}>{(o.created_at||"").slice(0,10)||"—"}</span>,
+                <div><div style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</div><div style={{fontSize:9,color:G.muted}}>{o.stores?.area||""}</div></div>,
+                <span style={{fontSize:11}}>{o.profiles?.full_name||"—"}</span>,
+                <span style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</span>,
+                <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700}}>{o.status}</span>,
+                o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
+                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                  {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
+                  {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾</Btn>}
+                  {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+                </div>
+              ])}
+            />
+            {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
+          </div>
+        )}
       </div>
     );
   };
