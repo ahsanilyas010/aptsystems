@@ -500,10 +500,30 @@ function CrmApp({ user, onLogout }) {
   const loadData = useCallback(async (showSync=false) => {
     if (showSync) setSyncing(true); else setLoading(true);
     try {
-      const all = await gasGet("all");
-      setData(all);
+      const [gasAll, sbCustomers, sbVendors, sbInvoices, sbPurchases, sbPayments, sbExpenses] = await Promise.all([
+        gasGet("all"),
+        sbPost("customers"),
+        sbPost("vendors"),
+        sbPost("invoices"),
+        sbPost("purchases"),
+        sbPost("payments"),
+        sbPost("expenses"),
+      ]);
+      const vMap = Object.fromEntries((sbVendors || []).map(v => [v.id, v]));
+      const normalizedPayments = (sbPayments || []).map(p => ({ ...p, partyId: p.party_id || p.partyId, refId: p.ref_id || p.refId }));
+      const paysByRef = {};
+      normalizedPayments.forEach(p => { if (p.refId && p.type === "Made") paysByRef[p.refId] = (paysByRef[p.refId] || 0) + Number(p.amount); });
+      setData({
+        ...gasAll,
+        customers: (sbCustomers || []).map(c => ({ ...c, phone: c.mobile || c.phone, contact: c.owner_name || c.contact, openBal: c.open_bal ?? c.openBal ?? 0 })),
+        vendors: (sbVendors || []).map(v => ({ ...v, openBal: v.open_bal ?? v.openBal ?? 0 })),
+        invoices: (sbInvoices || []).map(i => ({ ...i, custId: i.cust_id || i.custId, custName: i.cust_name || i.custName, payTerms: i.pay_terms || i.payTerms, createdBy: i.created_by || i.createdBy })),
+        purchases: (sbPurchases || []).map(p => ({ ...p, vendorId: p.vendor_id || p.vendorId, vendor: vMap[p.vendor_id]?.name || p.vendor || p.vendor_id || '', paid: paysByRef[p.id] || 0 })),
+        payments: normalizedPayments,
+        expenses: sbExpenses || [],
+      });
       setLastSync(new Date());
-      if (showSync) notify("✅ Synced from Google Sheet");
+      if (showSync) notify("✅ Synced");
     } catch(err) { notify("❌ "+err.message, "err"); }
     finally { setLoading(false); setSyncing(false); }
   }, [notify]);
@@ -519,26 +539,43 @@ function CrmApp({ user, onLogout }) {
   const purchases  = data?.purchases  || [];
   const payments   = data?.payments   || [];
   const expenses   = data?.expenses   || [];
-  const ar         = data?.ar         || [];
-  const ap         = data?.ap         || [];
   const inventory  = data?.inventory  || [];
-  const snap       = data?.dashboard  || {};
 
   const custMap = useMemo(()=>Object.fromEntries(customers.map(c=>[c.id,c])),[customers]);
   const vendMap = useMemo(()=>Object.fromEntries(vendors.map(v=>[v.id,v])),[vendors]);
   const prodMap = useMemo(()=>Object.fromEntries(products.map(p=>[p.id,p])),[products]);
 
-  const totalRevenue    = snap.totalInvoiced   || 0;
-  const totalReceived   = snap.totalReceived   || 0;
-  const totalPurchases  = snap.totalPurchases  || 0;
-  const totalExpenses   = snap.totalExpenses   || 0;
-  const netProfit       = snap.netProfit       || 0;
-  const totalAR         = snap.outstandingAR   || 0;
+  // Dashboard stats computed from Supabase data
+  const totalRevenue    = useMemo(()=>invoices.filter(i=>i.status!=="VOIDED").reduce((s,i)=>s+Number(i.total)||0,0),[invoices]);
+  const totalReceived   = useMemo(()=>payments.filter(p=>p.type==="Received").reduce((s,p)=>s+Number(p.amount)||0,0),[payments]);
+  const totalPurchases  = useMemo(()=>purchases.reduce((s,p)=>s+Number(p.total)||0,0),[purchases]);
+  const totalExpenses   = useMemo(()=>expenses.reduce((s,e)=>s+Number(e.amount)||0,0),[expenses]);
+  const netProfit       = totalRevenue - totalPurchases - totalExpenses;
+  const totalAR         = useMemo(()=>invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial").reduce((s,i)=>s+Number(i.total)||0,0),[invoices]);
   const grossProfit     = totalRevenue - totalPurchases;
   const gpMargin        = totalRevenue ? ((grossProfit/totalRevenue)*100).toFixed(1) : 0;
   const npMargin        = totalRevenue ? ((netProfit/totalRevenue)*100).toFixed(1)   : 0;
   const unpaidInv       = useMemo(()=>invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial"),[invoices]);
   const lowStock        = useMemo(()=>inventory.filter(p=>p.stock<=p.minStock&&p.stock>=0),[inventory]);
+
+  // AR/AP ledgers computed client-side from Supabase data
+  const ar = useMemo(()=>{
+    const byC={};
+    customers.forEach(c=>{byC[c.id]={custId:c.id,custName:c.name,totalBilled:0,totalPaid:0,balance:0};});
+    invoices.forEach(i=>{if(i.status==="VOIDED")return;const r=byC[i.custId];if(r)r.totalBilled+=Number(i.total)||0;});
+    payments.filter(p=>p.type==="Received").forEach(p=>{const r=byC[p.partyId];if(r)r.totalPaid+=Number(p.amount)||0;});
+    Object.values(byC).forEach(r=>{r.balance=r.totalBilled-r.totalPaid;});
+    return Object.values(byC).filter(r=>r.totalBilled>0||r.balance!==0);
+  },[customers,invoices,payments]);
+
+  const ap = useMemo(()=>{
+    const byV={};
+    vendors.forEach(v=>{byV[v.id]={vendorId:v.id,vendorName:v.name,totalOrdered:0,totalPaid:0,balance:0};});
+    purchases.forEach(p=>{if(!p.vendorId)return;const r=byV[p.vendorId];if(r)r.totalOrdered+=Number(p.total)||0;});
+    payments.filter(p=>p.type==="Made").forEach(p=>{const r=byV[p.partyId];if(r)r.totalPaid+=Number(p.amount)||0;});
+    Object.values(byV).forEach(r=>{r.balance=r.totalOrdered-r.totalPaid;});
+    return Object.values(byV).filter(r=>r.totalOrdered>0||r.balance!==0);
+  },[vendors,purchases,payments]);
 
   // ── PDF cache handler ─────────────────────────────────────
   const cachePdf = (invId, url) => setPdfCache(p=>({...p,[invId]:url}));
@@ -573,12 +610,12 @@ function CrmApp({ user, onLogout }) {
   const markPaid = async (invId) => {
     const prevStatus = invoices.find(i=>i.id===invId)?.status;
     try {
-      await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",invId})});
+      await sbPost("upsert_invoice", { invoice: { id: invId, status: "Paid" } });
       notify(`✅ ${invId} marked as Paid`);
       await loadData(true);
       if(prevStatus&&prevStatus!=="Paid"){
         pushUndo(`${invId} marked as Paid`, async () => {
-          await gasPost("set_invoice_fields",{invId,status:prevStatus});
+          await sbPost("upsert_invoice", { invoice: { id: invId, status: prevStatus } });
           await loadData(true);
         });
       }
@@ -589,13 +626,13 @@ function CrmApp({ user, onLogout }) {
     if(!confirm(`Void ${invId}? This will zero the total and reverse AR.`)) return;
     const prev = invoices.find(i=>i.id===invId);
     try {
-      await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",invId})});
+      await sbPost("upsert_invoice", { invoice: { id: invId, status: "VOIDED", total: 0 } });
       notify(`✅ ${invId} voided`);
       closeModal();
       await loadData(true);
       if(prev){
         pushUndo(`${invId} voided`, async () => {
-          await gasPost("set_invoice_fields",{invId,status:prev.status,total:prev.total});
+          await sbPost("upsert_invoice", { invoice: { id: invId, status: prev.status, total: prev.total } });
           await loadData(true);
         });
       }
@@ -603,14 +640,9 @@ function CrmApp({ user, onLogout }) {
   };
 
   const deleteInvoice = async (invId) => {
-    if(!confirm(`⚠️ WARNING: Are you sure you want to permanently DELETE ${invId}? This will completely remove it from the Google Sheet and cannot be undone.`)) return;
+    if(!confirm(`⚠️ WARNING: Are you sure you want to permanently DELETE ${invId}? This action cannot be undone.`)) return;
     try {
-      const json = await safeGasFetch("/api/gas", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete_invoice", invId })
-      });
-      if (!json.success) throw new Error(json.error || "Delete failed");
+      await sbPost("delete_invoice", { id: invId });
       notify(`✅ ${invId} permanently deleted`);
       closeModal();
       await loadData(true);
@@ -623,38 +655,38 @@ function CrmApp({ user, onLogout }) {
     const custName = cust ? cust.name : "";
     const enrichedItems = formData.items.map(item => {
       const pr = prodMap[item.pid];
-      // Drop synthetic/unknown ids (e.g. "x:" rider products) so the sheet stores a clean
-      // pid, but keep the product name so the invoice still shows what was ordered.
       return {
-        ...item,
-        pid: pr ? item.pid : "",
-        pname: pr ? pr.name : (item.pname || "")
+        product_id: pr ? item.pid : "",
+        product_name: pr ? pr.name : (item.pname || item.product_name || ""),
+        qty: Number(item.qty) || 0,
+        rate: Number(item.rate) || 0,
+        total: (Number(item.qty) || 0) * (Number(item.rate) || 0),
+        notes: item.notes || "",
       };
     });
-    // Generate a unique invoice ID if not provided
-    const invId = formData.invId || `INV-${Date.now()}`;
-    const result = await gasPost("save_invoice", {
-      ...formData,
-      invId,
-      custName,
-      customerName: custName,
-      customer: custName,
-      items: enrichedItems,
-      createdBy: user.email
-    }, {createdBy: user.email});
-    const finalInvId = formData.invId || result.id || invId;
-    let pdfUrl = result.pdfUrl;
-    if (!pdfUrl) {
-      try {
-        const pdfRes = await gasPost("generate_pdf", null, { invId: finalInvId });
-        pdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
-      } catch { /* non-fatal */ }
-    }
-    if (pdfUrl) {
-      cachePdf(finalInvId, pdfUrl);
-      triggerPdfDownload(pdfUrl);
-    }
-    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
+    const invId = formData.invId || formData.id || `INV-${Date.now()}`;
+    const invTotal = enrichedItems.reduce((s,i)=>s+i.total,0);
+    await sbPost("upsert_invoice", {
+      invoice: {
+        id: invId,
+        date: formData.date,
+        cust_id: formData.custId,
+        cust_name: custName,
+        total: invTotal,
+        status: formData.status || "Unpaid",
+        pay_terms: formData.payTerms,
+        created_by: user.email,
+        notes: formData.notes,
+        items: enrichedItems,
+      }
+    });
+    let pdfUrl = null;
+    try {
+      const pdfRes = await gasPost("generate_pdf", null, { invId });
+      pdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
+    } catch { /* non-fatal */ }
+    if (pdfUrl) { cachePdf(invId, pdfUrl); triggerPdfDownload(pdfUrl); }
+    notify(`✅ ${invId} saved — ${fmt(invTotal)}`);
     closeModal();
     await loadData(true);
   } catch(e) { notify("❌ "+e.message,"err"); throw e; }
@@ -665,26 +697,37 @@ function CrmApp({ user, onLogout }) {
       const custName = cust ? cust.name : "";
       const enrichedItems = formData.items.map(item => {
         const pr = prodMap[item.pid];
-        return { ...item, pid: pr ? item.pid : "", pname: pr ? pr.name : (item.pname || "") };
+        return {
+          product_id: pr ? item.pid : "",
+          product_name: pr ? pr.name : (item.pname || item.product_name || ""),
+          qty: Number(item.qty) || 0,
+          rate: Number(item.rate) || 0,
+          total: (Number(item.qty) || 0) * (Number(item.rate) || 0),
+          notes: item.notes || "",
+        };
       });
-      const result = await gasPost("edit_invoice", {
-        ...formData,
-        custName,
-        items: enrichedItems,
-        editedBy: user.email
+      const invTotal = enrichedItems.reduce((s,i)=>s+i.total,0);
+      const invId = formData.invId || formData.id;
+      await sbPost("upsert_invoice", {
+        invoice: {
+          id: invId,
+          date: formData.date,
+          cust_id: formData.custId,
+          cust_name: custName,
+          total: invTotal,
+          status: formData.status,
+          pay_terms: formData.payTerms,
+          notes: formData.notes,
+          items: enrichedItems,
+        }
       });
-      let editPdfUrl = result.pdfUrl;
-      if (!editPdfUrl) {
-        try {
-          const pdfRes = await gasPost("generate_pdf", null, { invId: formData.invId });
-          editPdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
-        } catch { /* non-fatal */ }
-      }
-      if (editPdfUrl) {
-        cachePdf(formData.invId, editPdfUrl);
-        triggerPdfDownload(editPdfUrl);
-      }
-      notify(`✅ ${formData.invId} updated — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
+      let editPdfUrl = null;
+      try {
+        const pdfRes = await gasPost("generate_pdf", null, { invId });
+        editPdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
+      } catch { /* non-fatal */ }
+      if (editPdfUrl) { cachePdf(invId, editPdfUrl); triggerPdfDownload(editPdfUrl); }
+      notify(`✅ ${invId} updated — ${fmt(invTotal)}`);
       closeModal();
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); throw e; }
@@ -692,7 +735,7 @@ function CrmApp({ user, onLogout }) {
 
   const updateCustomer = async (d) => {
     try {
-      await gasPost("edit_customer", d);
+      await sbPost("upsert_customer", { customer: { id: d.id, name: d.name, city: d.city, area: d.area, owner_name: d.contact || d.owner_name, mobile: d.phone || d.mobile, open_bal: d.openBal ?? d.open_bal ?? 0, notes: d.notes } });
       notify(`✅ ${d.id} updated`);
       closeModal();
       await loadData(true);
@@ -701,7 +744,7 @@ function CrmApp({ user, onLogout }) {
 
   const updateVendor = async (d) => {
     try {
-      await gasPost("edit_vendor", d);
+      await sbPost("upsert_vendor", { vendor: { id: d.id, name: d.name, category: d.category, contact: d.contact, mobile: d.mobile || d.phone, open_bal: d.openBal ?? d.open_bal ?? 0, notes: d.notes } });
       notify(`✅ ${d.id} updated`);
       closeModal();
       await loadData(true);
@@ -709,8 +752,12 @@ function CrmApp({ user, onLogout }) {
   };
 
   const saveExpense = async (d) => {
-    try { await gasPost("save_expense",{...d,by:user.email}); notify("✅ Expense saved"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
+    try {
+      await sbPost("upsert_expense", { expense: { id: d.id || `EXP-${Date.now()}`, date: d.date, category: d.category, amount: Number(d.amount) || 0, notes: d.notes } });
+      notify("✅ Expense saved");
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
   const adjustStock = async (d) => {
@@ -723,25 +770,36 @@ function CrmApp({ user, onLogout }) {
   };
 
   const savePayment = async (d) => {
-    try { await gasPost("save_payment",d); notify("✅ Payment recorded"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
-  };
-
-  const savePurchase = async (d) => {
-    try { await gasPost("save_purchase",d); notify("✅ Purchase saved"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
-  };
-
-  const addCustomer = async (d) => {
     try {
-      const r = await gasPost("add_customer", d);
-      notify(`✅ ${r.id} added`);
+      await sbPost("upsert_payment", { payment: { id: d.id || `PAY-${Date.now()}`, date: d.date, type: d.type || "Received", party_id: d.partyId || d.custId || d.vendorId, ref_id: d.refId || d.invId, amount: Number(d.amount) || 0, notes: d.notes } });
+      notify("✅ Payment recorded");
       closeModal();
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
-  if (loading) return <LoadingScreen msg="Loading APT ERP from Google Sheet…"/>;
+  const savePurchase = async (d) => {
+    try {
+      const poId = d.id || `PO-${Date.now()}`;
+      const items = (d.items || []).map(it => ({ product_id: it.pid || it.product_id || "", product_name: it.pname || it.product_name || "", qty: Number(it.qty) || 0, rate: Number(it.rate) || 0, total: (Number(it.qty) || 0) * (Number(it.rate) || 0), notes: it.notes || "" }));
+      await sbPost("upsert_purchase", { purchase: { id: poId, date: d.date, vendor_id: d.vendorId || d.vendor, total: Number(d.total) || items.reduce((s,i)=>s+i.total,0), notes: d.notes, items } });
+      notify("✅ Purchase saved");
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  const addCustomer = async (d) => {
+    try {
+      const id = d.id || `CUST-${Date.now()}`;
+      await sbPost("upsert_customer", { customer: { id, name: d.name, city: d.city, area: d.area, owner_name: d.contact || d.owner_name, mobile: d.phone || d.mobile, open_bal: d.openBal ?? 0, notes: d.notes } });
+      notify(`✅ ${id} added`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  if (loading) return <LoadingScreen msg="Loading APT ERP…"/>;
 
   // ── NAV ───────────────────────────────────────────────────
   const pendingRiderOrders = sbData.orders.filter(o => o.status === "Pending").length;
@@ -784,7 +842,7 @@ function CrmApp({ user, onLogout }) {
       <div style={{background:G.pale,borderRadius:8,padding:"9px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",border:`1px solid ${G.border}`}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:G.light,boxShadow:`0 0 6px ${G.light}`}}/>
-          <span style={{fontSize:11,color:G.muted,fontWeight:600}}>Live from Google Sheet{lastSync?` · ${lastSync.toLocaleTimeString()}`:" · Not synced"}</span>
+          <span style={{fontSize:11,color:G.muted,fontWeight:600}}>Live from Supabase{lastSync?` · ${lastSync.toLocaleTimeString()}`:" · Not synced"}</span>
         </div>
         <Btn sm v="secondary" onClick={()=>loadData(true)}>{syncing?"⏳ Syncing…":"↻ Sync"}</Btn>
       </div>
@@ -980,8 +1038,9 @@ function CrmApp({ user, onLogout }) {
             try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:existing.id}); }catch{/*non-fatal*/}
             linked++; continue;
           }
-          const r = await gasPost("add_customer",{name:s.name,area:s.area||"",city:s.city||"",contact:s.contact||"",phone:s.phone||"",notes:`supabase_id:${s._storeId}`});
-          if(r?.id){ try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:r.id}); }catch{/*non-fatal*/} }
+          const newId = `CUST-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+          await sbPost("upsert_customer", { customer: { id: newId, name: s.name, area: s.area||"", city: s.city||"", owner_name: s.contact||"", mobile: s.phone||"", open_bal: 0, notes: `supabase_id:${s._storeId}` } });
+          try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:newId}); }catch{/*non-fatal*/}
           created++;
         }catch(e){ fail++; }
       }
