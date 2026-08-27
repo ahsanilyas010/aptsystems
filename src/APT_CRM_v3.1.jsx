@@ -1053,7 +1053,7 @@ function CrmApp({ user, onLogout }) {
       if(!confirm(`Merge ${dupInfo.dupIds.size} duplicate customer row(s) into ${dupInfo.groups.length} record(s)?\n\nInvoices and payments on the duplicates will be moved to the kept record, and the duplicate Sheet rows will be removed.`)) return;
       setMerging(true);
       try {
-        const result = await gasPost("merge_customers",{groups:dupInfo.groups});
+        const result = await sbPost("merge_customers",{groups:dupInfo.groups});
         // Stores synced to a merged-away customer id need to point at the surviving one.
         const target={};
         dupInfo.groups.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
@@ -1068,7 +1068,7 @@ function CrmApp({ user, onLogout }) {
         await loadData(true); await loadSupabase(true);
         if(result?.snapshot?.groups?.length){
           pushUndo(`Merged ${dupInfo.dupIds.size} duplicate customer(s)`, async () => {
-            await gasPost("undo_merge_customers", result.snapshot);
+            await sbPost("undo_merge_customers", result.snapshot);
             for(const r of storeRepoints){
               try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
             }
@@ -1081,7 +1081,7 @@ function CrmApp({ user, onLogout }) {
       if(!confirm(`Remove 15 known duplicate customer rows?\n\nInvoices/payments on duplicates will be re-pointed to the kept records and the duplicate Sheet rows deleted. This action can be undone.`)) return;
       setMerging(true);
       try {
-        const result = await gasPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
+        const result = await sbPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
         const target={};
         KNOWN_DUPLICATE_GROUPS.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
         const storeRepoints=[];
@@ -1095,7 +1095,7 @@ function CrmApp({ user, onLogout }) {
         await loadData(true); await loadSupabase(true);
         if(result?.snapshot?.groups?.length){
           pushUndo(`Removed 15 duplicate customers`, async () => {
-            await gasPost("undo_merge_customers", result.snapshot);
+            await sbPost("undo_merge_customers", result.snapshot);
             for(const r of storeRepoints){
               try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
             }
