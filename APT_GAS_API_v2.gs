@@ -169,6 +169,11 @@ function doGet(e) {
         return _apiOk(_readInvoiceItems(ss, invId));
       }
 
+      case "all_invoice_items": {
+        // Bulk export: returns ALL invoice item rows for migration purposes
+        return _apiOk(_readInvoiceItems(ss, null));
+      }
+
       case "pdf_url": {
         var invId = e.parameter.id;
         if (!invId) return _apiErr("id required");
@@ -2120,11 +2125,12 @@ function _readInvoiceItems(ss, invId) {
   var items = [];
 
   data.forEach(function(r) {
-    if (!r[c.invId] || r[c.invId].toString().trim().toUpperCase() !== invId.toUpperCase()) {
-      return;
-    }
+    var rowId = r[c.invId] ? r[c.invId].toString().trim() : "";
+    if (!rowId) return;
+    // If invId provided, filter; if not (bulk export), return all rows
+    if (invId && rowId.toUpperCase() !== invId.toUpperCase()) return;
     items.push({
-      invId: r[c.invId].toString().trim(),
+      invId: rowId,
       pid: r[c.pid] ? r[c.pid].toString().trim() : "",
       pname: r[c.pname] ? r[c.pname].toString().trim() : "",
       qty: parseFloat(r[c.qty]) || 0,

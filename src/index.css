@@ -62,9 +62,40 @@ button:active:not(:disabled) {
   .crm-root [style*="grid-template-columns:1fr 1fr"] {
     grid-template-columns: 1fr !important;
   }
-  /* dense 3/4-column stat rows → two columns (kept compact, not cramped) */
+  /* dense 3/4/5-column stat rows → two columns (compact, not cramped) */
   .crm-root [style*="grid-template-columns:repeat(3,1fr)"],
-  .crm-root [style*="grid-template-columns:repeat(4,1fr)"] {
+  .crm-root [style*="grid-template-columns:repeat(4,1fr)"],
+  .crm-root [style*="grid-template-columns:repeat(5,1fr)"] {
     grid-template-columns: 1fr 1fr !important;
+  }
+
+  /* Modals — full width, full height on small screens */
+  .crm-root [style*="maxWidth:480"],
+  .crm-root [style*="maxWidth:720"] {
+    max-width: calc(100vw - 16px) !important;
+  }
+  .crm-root [style*="maxHeight:92vh"] {
+    max-height: 96vh !important;
+  }
+
+  /* Touch-friendly minimum tap targets for small buttons */
+  .crm-root button {
+    min-height: 34px;
+  }
+
+  /* Form rows inside modals — stack instead of side-by-side */
+  .crm-root [style*="display:flex"][style*="gap:12"] > div,
+  .crm-root [style*="display:flex"][style*="gap:10"] > div {
+    min-width: 0;
+  }
+
+  /* Prevent content from overflowing modal padding */
+  .crm-root [style*="padding:20"] {
+    padding: 14px !important;
+  }
+
+  /* KPI cards — smaller font on mobile */
+  .crm-root [style*="fontSize:20"] {
+    font-size: 17px !important;
   }
 }

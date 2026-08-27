@@ -500,10 +500,30 @@ function CrmApp({ user, onLogout }) {
   const loadData = useCallback(async (showSync=false) => {
     if (showSync) setSyncing(true); else setLoading(true);
     try {
-      const all = await gasGet("all");
-      setData(all);
+      const [gasAll, sbCustomers, sbVendors, sbInvoices, sbPurchases, sbPayments, sbExpenses] = await Promise.all([
+        gasGet("all"),
+        sbPost("customers"),
+        sbPost("vendors"),
+        sbPost("invoices"),
+        sbPost("purchases"),
+        sbPost("payments"),
+        sbPost("expenses"),
+      ]);
+      const vMap = Object.fromEntries((sbVendors || []).map(v => [v.id, v]));
+      const normalizedPayments = (sbPayments || []).map(p => ({ ...p, partyId: p.party_id || p.partyId, refId: p.ref_id || p.refId }));
+      const paysByRef = {};
+      normalizedPayments.forEach(p => { if (p.refId && p.type === "Made") paysByRef[p.refId] = (paysByRef[p.refId] || 0) + Number(p.amount); });
+      setData({
+        ...gasAll,
+        customers: (sbCustomers || []).map(c => ({ ...c, phone: c.mobile || c.phone, contact: c.owner_name || c.contact, openBal: c.open_bal ?? c.openBal ?? 0 })),
+        vendors: (sbVendors || []).map(v => ({ ...v, openBal: v.open_bal ?? v.openBal ?? 0 })),
+        invoices: (sbInvoices || []).map(i => ({ ...i, custId: i.cust_id || i.custId, custName: i.cust_name || i.custName, payTerms: i.pay_terms || i.payTerms, createdBy: i.created_by || i.createdBy })),
+        purchases: (sbPurchases || []).map(p => ({ ...p, vendorId: p.vendor_id || p.vendorId, vendor: vMap[p.vendor_id]?.name || p.vendor || p.vendor_id || '', paid: paysByRef[p.id] || 0 })),
+        payments: normalizedPayments,
+        expenses: sbExpenses || [],
+      });
       setLastSync(new Date());
-      if (showSync) notify("✅ Synced from Google Sheet");
+      if (showSync) notify("✅ Synced");
     } catch(err) { notify("❌ "+err.message, "err"); }
     finally { setLoading(false); setSyncing(false); }
   }, [notify]);
@@ -519,26 +539,43 @@ function CrmApp({ user, onLogout }) {
   const purchases  = data?.purchases  || [];
   const payments   = data?.payments   || [];
   const expenses   = data?.expenses   || [];
-  const ar         = data?.ar         || [];
-  const ap         = data?.ap         || [];
   const inventory  = data?.inventory  || [];
-  const snap       = data?.dashboard  || {};
 
   const custMap = useMemo(()=>Object.fromEntries(customers.map(c=>[c.id,c])),[customers]);
   const vendMap = useMemo(()=>Object.fromEntries(vendors.map(v=>[v.id,v])),[vendors]);
   const prodMap = useMemo(()=>Object.fromEntries(products.map(p=>[p.id,p])),[products]);
 
-  const totalRevenue    = snap.totalInvoiced   || 0;
-  const totalReceived   = snap.totalReceived   || 0;
-  const totalPurchases  = snap.totalPurchases  || 0;
-  const totalExpenses   = snap.totalExpenses   || 0;
-  const netProfit       = snap.netProfit       || 0;
-  const totalAR         = snap.outstandingAR   || 0;
+  // Dashboard stats computed from Supabase data
+  const totalRevenue    = useMemo(()=>invoices.filter(i=>i.status!=="VOIDED").reduce((s,i)=>s+Number(i.total)||0,0),[invoices]);
+  const totalReceived   = useMemo(()=>payments.filter(p=>p.type==="Received").reduce((s,p)=>s+Number(p.amount)||0,0),[payments]);
+  const totalPurchases  = useMemo(()=>purchases.reduce((s,p)=>s+Number(p.total)||0,0),[purchases]);
+  const totalExpenses   = useMemo(()=>expenses.reduce((s,e)=>s+Number(e.amount)||0,0),[expenses]);
+  const netProfit       = totalRevenue - totalPurchases - totalExpenses;
+  const totalAR         = useMemo(()=>invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial").reduce((s,i)=>s+Number(i.total)||0,0),[invoices]);
   const grossProfit     = totalRevenue - totalPurchases;
   const gpMargin        = totalRevenue ? ((grossProfit/totalRevenue)*100).toFixed(1) : 0;
   const npMargin        = totalRevenue ? ((netProfit/totalRevenue)*100).toFixed(1)   : 0;
   const unpaidInv       = useMemo(()=>invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial"),[invoices]);
   const lowStock        = useMemo(()=>inventory.filter(p=>p.stock<=p.minStock&&p.stock>=0),[inventory]);
+
+  // AR/AP ledgers computed client-side from Supabase data
+  const ar = useMemo(()=>{
+    const byC={};
+    customers.forEach(c=>{byC[c.id]={custId:c.id,custName:c.name,totalBilled:0,totalPaid:0,balance:0};});
+    invoices.forEach(i=>{if(i.status==="VOIDED")return;const r=byC[i.custId];if(r)r.totalBilled+=Number(i.total)||0;});
+    payments.filter(p=>p.type==="Received").forEach(p=>{const r=byC[p.partyId];if(r)r.totalPaid+=Number(p.amount)||0;});
+    Object.values(byC).forEach(r=>{r.balance=r.totalBilled-r.totalPaid;});
+    return Object.values(byC).filter(r=>r.totalBilled>0||r.balance!==0);
+  },[customers,invoices,payments]);
+
+  const ap = useMemo(()=>{
+    const byV={};
+    vendors.forEach(v=>{byV[v.id]={vendorId:v.id,vendorName:v.name,totalOrdered:0,totalPaid:0,balance:0};});
+    purchases.forEach(p=>{if(!p.vendorId)return;const r=byV[p.vendorId];if(r)r.totalOrdered+=Number(p.total)||0;});
+    payments.filter(p=>p.type==="Made").forEach(p=>{const r=byV[p.partyId];if(r)r.totalPaid+=Number(p.amount)||0;});
+    Object.values(byV).forEach(r=>{r.balance=r.totalOrdered-r.totalPaid;});
+    return Object.values(byV).filter(r=>r.totalOrdered>0||r.balance!==0);
+  },[vendors,purchases,payments]);
 
   // ── PDF cache handler ─────────────────────────────────────
   const cachePdf = (invId, url) => setPdfCache(p=>({...p,[invId]:url}));
@@ -573,12 +610,12 @@ function CrmApp({ user, onLogout }) {
   const markPaid = async (invId) => {
     const prevStatus = invoices.find(i=>i.id===invId)?.status;
     try {
-      await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"mark_paid",invId})});
+      await sbPost("upsert_invoice", { invoice: { id: invId, status: "Paid" } });
       notify(`✅ ${invId} marked as Paid`);
       await loadData(true);
       if(prevStatus&&prevStatus!=="Paid"){
         pushUndo(`${invId} marked as Paid`, async () => {
-          await gasPost("set_invoice_fields",{invId,status:prevStatus});
+          await sbPost("upsert_invoice", { invoice: { id: invId, status: prevStatus } });
           await loadData(true);
         });
       }
@@ -589,13 +626,13 @@ function CrmApp({ user, onLogout }) {
     if(!confirm(`Void ${invId}? This will zero the total and reverse AR.`)) return;
     const prev = invoices.find(i=>i.id===invId);
     try {
-      await safeGasFetch("/api/gas", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"void_invoice",invId})});
+      await sbPost("upsert_invoice", { invoice: { id: invId, status: "VOIDED", total: 0 } });
       notify(`✅ ${invId} voided`);
       closeModal();
       await loadData(true);
       if(prev){
         pushUndo(`${invId} voided`, async () => {
-          await gasPost("set_invoice_fields",{invId,status:prev.status,total:prev.total});
+          await sbPost("upsert_invoice", { invoice: { id: invId, status: prev.status, total: prev.total } });
           await loadData(true);
         });
       }
@@ -603,14 +640,9 @@ function CrmApp({ user, onLogout }) {
   };
 
   const deleteInvoice = async (invId) => {
-    if(!confirm(`⚠️ WARNING: Are you sure you want to permanently DELETE ${invId}? This will completely remove it from the Google Sheet and cannot be undone.`)) return;
+    if(!confirm(`⚠️ WARNING: Are you sure you want to permanently DELETE ${invId}? This action cannot be undone.`)) return;
     try {
-      const json = await safeGasFetch("/api/gas", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete_invoice", invId })
-      });
-      if (!json.success) throw new Error(json.error || "Delete failed");
+      await sbPost("delete_invoice", { id: invId });
       notify(`✅ ${invId} permanently deleted`);
       closeModal();
       await loadData(true);
@@ -623,38 +655,38 @@ function CrmApp({ user, onLogout }) {
     const custName = cust ? cust.name : "";
     const enrichedItems = formData.items.map(item => {
       const pr = prodMap[item.pid];
-      // Drop synthetic/unknown ids (e.g. "x:" rider products) so the sheet stores a clean
-      // pid, but keep the product name so the invoice still shows what was ordered.
       return {
-        ...item,
-        pid: pr ? item.pid : "",
-        pname: pr ? pr.name : (item.pname || "")
+        product_id: pr ? item.pid : "",
+        product_name: pr ? pr.name : (item.pname || item.product_name || ""),
+        qty: Number(item.qty) || 0,
+        rate: Number(item.rate) || 0,
+        total: (Number(item.qty) || 0) * (Number(item.rate) || 0),
+        notes: item.notes || "",
       };
     });
-    // Generate a unique invoice ID if not provided
-    const invId = formData.invId || `INV-${Date.now()}`;
-    const result = await gasPost("save_invoice", {
-      ...formData,
-      invId,
-      custName,
-      customerName: custName,
-      customer: custName,
-      items: enrichedItems,
-      createdBy: user.email
-    }, {createdBy: user.email});
-    const finalInvId = formData.invId || result.id || invId;
-    let pdfUrl = result.pdfUrl;
-    if (!pdfUrl) {
-      try {
-        const pdfRes = await gasPost("generate_pdf", null, { invId: finalInvId });
-        pdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
-      } catch { /* non-fatal */ }
-    }
-    if (pdfUrl) {
-      cachePdf(finalInvId, pdfUrl);
-      triggerPdfDownload(pdfUrl);
-    }
-    notify(`✅ ${finalInvId || "Invoice"} saved — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
+    const invId = formData.invId || formData.id || `INV-${Date.now()}`;
+    const invTotal = enrichedItems.reduce((s,i)=>s+i.total,0);
+    await sbPost("upsert_invoice", {
+      invoice: {
+        id: invId,
+        date: formData.date,
+        cust_id: formData.custId,
+        cust_name: custName,
+        total: invTotal,
+        status: formData.status || "Unpaid",
+        pay_terms: formData.payTerms,
+        created_by: user.email,
+        notes: formData.notes,
+        items: enrichedItems,
+      }
+    });
+    let pdfUrl = null;
+    try {
+      const pdfRes = await gasPost("generate_pdf", null, { invId });
+      pdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
+    } catch { /* non-fatal */ }
+    if (pdfUrl) { cachePdf(invId, pdfUrl); triggerPdfDownload(pdfUrl); }
+    notify(`✅ ${invId} saved — ${fmt(invTotal)}`);
     closeModal();
     await loadData(true);
   } catch(e) { notify("❌ "+e.message,"err"); throw e; }
@@ -665,26 +697,37 @@ function CrmApp({ user, onLogout }) {
       const custName = cust ? cust.name : "";
       const enrichedItems = formData.items.map(item => {
         const pr = prodMap[item.pid];
-        return { ...item, pid: pr ? item.pid : "", pname: pr ? pr.name : (item.pname || "") };
+        return {
+          product_id: pr ? item.pid : "",
+          product_name: pr ? pr.name : (item.pname || item.product_name || ""),
+          qty: Number(item.qty) || 0,
+          rate: Number(item.rate) || 0,
+          total: (Number(item.qty) || 0) * (Number(item.rate) || 0),
+          notes: item.notes || "",
+        };
       });
-      const result = await gasPost("edit_invoice", {
-        ...formData,
-        custName,
-        items: enrichedItems,
-        editedBy: user.email
+      const invTotal = enrichedItems.reduce((s,i)=>s+i.total,0);
+      const invId = formData.invId || formData.id;
+      await sbPost("upsert_invoice", {
+        invoice: {
+          id: invId,
+          date: formData.date,
+          cust_id: formData.custId,
+          cust_name: custName,
+          total: invTotal,
+          status: formData.status,
+          pay_terms: formData.payTerms,
+          notes: formData.notes,
+          items: enrichedItems,
+        }
       });
-      let editPdfUrl = result.pdfUrl;
-      if (!editPdfUrl) {
-        try {
-          const pdfRes = await gasPost("generate_pdf", null, { invId: formData.invId });
-          editPdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
-        } catch { /* non-fatal */ }
-      }
-      if (editPdfUrl) {
-        cachePdf(formData.invId, editPdfUrl);
-        triggerPdfDownload(editPdfUrl);
-      }
-      notify(`✅ ${formData.invId} updated — ${fmt(enrichedItems.reduce((s,i)=>s+(i.qty*i.rate),0))}`);
+      let editPdfUrl = null;
+      try {
+        const pdfRes = await gasPost("generate_pdf", null, { invId });
+        editPdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
+      } catch { /* non-fatal */ }
+      if (editPdfUrl) { cachePdf(invId, editPdfUrl); triggerPdfDownload(editPdfUrl); }
+      notify(`✅ ${invId} updated — ${fmt(invTotal)}`);
       closeModal();
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); throw e; }
@@ -692,7 +735,7 @@ function CrmApp({ user, onLogout }) {
 
   const updateCustomer = async (d) => {
     try {
-      await gasPost("edit_customer", d);
+      await sbPost("upsert_customer", { customer: { id: d.id, name: d.name, city: d.city, area: d.area, owner_name: d.contact || d.owner_name, mobile: d.phone || d.mobile, open_bal: d.openBal ?? d.open_bal ?? 0, notes: d.notes } });
       notify(`✅ ${d.id} updated`);
       closeModal();
       await loadData(true);
@@ -701,7 +744,7 @@ function CrmApp({ user, onLogout }) {
 
   const updateVendor = async (d) => {
     try {
-      await gasPost("edit_vendor", d);
+      await sbPost("upsert_vendor", { vendor: { id: d.id, name: d.name, category: d.category, contact: d.contact, mobile: d.mobile || d.phone, open_bal: d.openBal ?? d.open_bal ?? 0, notes: d.notes } });
       notify(`✅ ${d.id} updated`);
       closeModal();
       await loadData(true);
@@ -709,8 +752,12 @@ function CrmApp({ user, onLogout }) {
   };
 
   const saveExpense = async (d) => {
-    try { await gasPost("save_expense",{...d,by:user.email}); notify("✅ Expense saved"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
+    try {
+      await sbPost("upsert_expense", { expense: { id: d.id || `EXP-${Date.now()}`, date: d.date, category: d.category, amount: Number(d.amount) || 0, notes: d.notes } });
+      notify("✅ Expense saved");
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
   const adjustStock = async (d) => {
@@ -723,25 +770,36 @@ function CrmApp({ user, onLogout }) {
   };
 
   const savePayment = async (d) => {
-    try { await gasPost("save_payment",d); notify("✅ Payment recorded"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
-  };
-
-  const savePurchase = async (d) => {
-    try { await gasPost("save_purchase",d); notify("✅ Purchase saved"); closeModal(); await loadData(true); }
-    catch(e) { notify("❌ "+e.message,"err"); }
-  };
-
-  const addCustomer = async (d) => {
     try {
-      const r = await gasPost("add_customer", d);
-      notify(`✅ ${r.id} added`);
+      await sbPost("upsert_payment", { payment: { id: d.id || `PAY-${Date.now()}`, date: d.date, type: d.type || "Received", party_id: d.partyId || d.custId || d.vendorId, ref_id: d.refId || d.invId, amount: Number(d.amount) || 0, notes: d.notes } });
+      notify("✅ Payment recorded");
       closeModal();
       await loadData(true);
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
-  if (loading) return <LoadingScreen msg="Loading APT ERP from Google Sheet…"/>;
+  const savePurchase = async (d) => {
+    try {
+      const poId = d.id || `PO-${Date.now()}`;
+      const items = (d.items || []).map(it => ({ product_id: it.pid || it.product_id || "", product_name: it.pname || it.product_name || "", qty: Number(it.qty) || 0, rate: Number(it.rate) || 0, total: (Number(it.qty) || 0) * (Number(it.rate) || 0), notes: it.notes || "" }));
+      await sbPost("upsert_purchase", { purchase: { id: poId, date: d.date, vendor_id: d.vendorId || d.vendor, total: Number(d.total) || items.reduce((s,i)=>s+i.total,0), notes: d.notes, items } });
+      notify("✅ Purchase saved");
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  const addCustomer = async (d) => {
+    try {
+      const id = d.id || `CUST-${Date.now()}`;
+      await sbPost("upsert_customer", { customer: { id, name: d.name, city: d.city, area: d.area, owner_name: d.contact || d.owner_name, mobile: d.phone || d.mobile, open_bal: d.openBal ?? 0, notes: d.notes } });
+      notify(`✅ ${id} added`);
+      closeModal();
+      await loadData(true);
+    } catch(e) { notify("❌ "+e.message,"err"); }
+  };
+
+  if (loading) return <LoadingScreen msg="Loading APT ERP…"/>;
 
   // ── NAV ───────────────────────────────────────────────────
   const pendingRiderOrders = sbData.orders.filter(o => o.status === "Pending").length;
@@ -784,7 +842,7 @@ function CrmApp({ user, onLogout }) {
       <div style={{background:G.pale,borderRadius:8,padding:"9px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",border:`1px solid ${G.border}`}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:G.light,boxShadow:`0 0 6px ${G.light}`}}/>
-          <span style={{fontSize:11,color:G.muted,fontWeight:600}}>Live from Google Sheet{lastSync?` · ${lastSync.toLocaleTimeString()}`:" · Not synced"}</span>
+          <span style={{fontSize:11,color:G.muted,fontWeight:600}}>Live from Supabase{lastSync?` · ${lastSync.toLocaleTimeString()}`:" · Not synced"}</span>
         </div>
         <Btn sm v="secondary" onClick={()=>loadData(true)}>{syncing?"⏳ Syncing…":"↻ Sync"}</Btn>
       </div>
@@ -980,8 +1038,9 @@ function CrmApp({ user, onLogout }) {
             try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:existing.id}); }catch{/*non-fatal*/}
             linked++; continue;
           }
-          const r = await gasPost("add_customer",{name:s.name,area:s.area||"",city:s.city||"",contact:s.contact||"",phone:s.phone||"",notes:`supabase_id:${s._storeId}`});
-          if(r?.id){ try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:r.id}); }catch{/*non-fatal*/} }
+          const newId = `CUST-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+          await sbPost("upsert_customer", { customer: { id: newId, name: s.name, area: s.area||"", city: s.city||"", owner_name: s.contact||"", mobile: s.phone||"", open_bal: 0, notes: `supabase_id:${s._storeId}` } });
+          try{ await sbPost("update_store",{id:s._storeId,gas_customer_id:newId}); }catch{/*non-fatal*/}
           created++;
         }catch(e){ fail++; }
       }
@@ -994,7 +1053,7 @@ function CrmApp({ user, onLogout }) {
       if(!confirm(`Merge ${dupInfo.dupIds.size} duplicate customer row(s) into ${dupInfo.groups.length} record(s)?\n\nInvoices and payments on the duplicates will be moved to the kept record, and the duplicate Sheet rows will be removed.`)) return;
       setMerging(true);
       try {
-        const result = await gasPost("merge_customers",{groups:dupInfo.groups});
+        const result = await sbPost("merge_customers",{groups:dupInfo.groups});
         // Stores synced to a merged-away customer id need to point at the surviving one.
         const target={};
         dupInfo.groups.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
@@ -1009,7 +1068,7 @@ function CrmApp({ user, onLogout }) {
         await loadData(true); await loadSupabase(true);
         if(result?.snapshot?.groups?.length){
           pushUndo(`Merged ${dupInfo.dupIds.size} duplicate customer(s)`, async () => {
-            await gasPost("undo_merge_customers", result.snapshot);
+            await sbPost("undo_merge_customers", result.snapshot);
             for(const r of storeRepoints){
               try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
             }
@@ -1022,7 +1081,7 @@ function CrmApp({ user, onLogout }) {
       if(!confirm(`Remove 15 known duplicate customer rows?\n\nInvoices/payments on duplicates will be re-pointed to the kept records and the duplicate Sheet rows deleted. This action can be undone.`)) return;
       setMerging(true);
       try {
-        const result = await gasPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
+        const result = await sbPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
         const target={};
         KNOWN_DUPLICATE_GROUPS.forEach(g=>g.mergeIds.forEach(id=>{target[id]=g.keepId;}));
         const storeRepoints=[];
@@ -1036,7 +1095,7 @@ function CrmApp({ user, onLogout }) {
         await loadData(true); await loadSupabase(true);
         if(result?.snapshot?.groups?.length){
           pushUndo(`Removed 15 duplicate customers`, async () => {
-            await gasPost("undo_merge_customers", result.snapshot);
+            await sbPost("undo_merge_customers", result.snapshot);
             for(const r of storeRepoints){
               try{ await sbPost("update_store",{id:r.id,gas_customer_id:r.from}); }catch{/* non-fatal */}
             }
@@ -1959,35 +2018,67 @@ function CrmApp({ user, onLogout }) {
       catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(null); }
     };
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading rider orders…</div>;
+    const exportOrdersCsv = ()=>exportCsv("rider-orders.csv",filtered.map(o=>({id:o.id,date:(o.created_at||"").slice(0,10),store:o.stores?.name,rider:o.profiles?.full_name,total:o.total_value||o.total||0,status:o.status,gas_invoice_id:o.gas_invoice_id})),[["id","Order"],["date","Date"],["store","Store"],["rider","Rider"],["total","Total"],["status","Status"],["gas_invoice_id","GAS Invoice"]]);
     return (
-      <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {/* Status chips */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
           {["all","Pending","Approved","Packed","Dispatched","Delivered","Cancelled"].map(s=>(
-            <button key={s} onClick={()=>setStatusFilter(s)} style={{padding:"4px 13px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:statusFilter===s?G.dark:G.pale,color:statusFilter===s?G.white:G.dark,border:`1.5px solid ${statusFilter===s?G.dark:G.border}`}}>{s==="all"?"All":s}</button>
+            <button key={s} onClick={()=>setStatusFilter(s)} style={{padding:"5px 13px",borderRadius:20,fontSize:11,fontWeight:700,cursor:"pointer",background:statusFilter===s?G.dark:G.pale,color:statusFilter===s?G.white:G.dark,border:`1.5px solid ${statusFilter===s?G.dark:G.border}`,minHeight:32}}>{s==="all"?"All":s}</button>
           ))}
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search order / store / rider…" style={{marginLeft:"auto",border:`1.5px solid ${G.border}`,borderRadius:8,padding:"5px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none",minWidth:200}}/>
-          <Btn sm v="secondary" onClick={()=>exportCsv("rider-orders.csv",filtered.map(o=>({id:o.id,date:(o.created_at||"").slice(0,10),store:o.stores?.name,rider:o.profiles?.full_name,total:o.total_value||o.total||0,status:o.status,gas_invoice_id:o.gas_invoice_id})),[["id","Order"],["date","Date"],["store","Store"],["rider","Rider"],["total","Total"],["status","Status"],["gas_invoice_id","GAS Invoice"]])}>⬇ Export</Btn>
-          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
-        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Order","Date","Store","Rider","Total","Status","GAS","Actions"]}
-            rows={filtered.map(o=>[
-              <span style={{fontWeight:700,color:G.dark,fontSize:10,fontFamily:"monospace"}}>{(o.id||"").slice(0,8)}</span>,
-              <span style={{fontSize:10,color:G.muted,whiteSpace:"nowrap"}}>{(o.created_at||"").slice(0,10)||"—"}</span>,
-              <div><div style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</div><div style={{fontSize:9,color:G.muted}}>{o.stores?.area||""}</div></div>,
-              <span style={{fontSize:11}}>{o.profiles?.full_name||"—"}</span>,
-              <span style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</span>,
-              <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700}}>{o.status}</span>,
-              o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
-              <div style={{display:"flex",gap:4}}>
-                {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
-                {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾</Btn>}
-                {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+        {/* Search + actions */}
+        <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search order / store / rider…" style={{flex:"1 1 160px",border:`1.5px solid ${G.border}`,borderRadius:8,padding:"7px 11px",fontSize:12,color:G.ink,background:G.bg,outline:"none"}}/>
+          <Btn sm v="secondary" onClick={exportOrdersCsv}>⬇ Export</Btn>
+          <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻</Btn>
+        </div>
+        {/* Orders list */}
+        {isMobile ? (
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {filtered.map(o=>(
+              <div key={o.id} style={{background:G.card,borderRadius:12,padding:14,boxShadow:"0 2px 8px rgba(26,92,32,0.07)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,gap:8}}>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontWeight:700,fontSize:14,color:G.ink,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.stores?.name||"—"}</div>
+                    <div style={{fontSize:10,color:G.muted,marginTop:2}}>{o.profiles?.full_name||"—"} · {(o.created_at||"").slice(0,10)}</div>
+                    {o.gas_invoice_id&&<div style={{fontSize:9,color:G.mid,marginTop:2,fontWeight:700}}>✓ {o.gas_invoice_id}</div>}
+                  </div>
+                  <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"3px 10px",borderRadius:20,fontSize:10,fontWeight:700,flexShrink:0}}>{o.status}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                  <span style={{fontWeight:800,fontSize:16,color:G.dark}}>{fmt(o.total_value||o.total||0)}</span>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                    {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
+                    {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾 Invoice</Btn>}
+                    {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+                  </div>
+                </div>
               </div>
-            ])}
-          />
-          {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
-        </div>
+            ))}
+            {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
+          </div>
+        ) : (
+          <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+            <TblWrap compact heads={["Order","Date","Store","Rider","Total","Status","GAS","Actions"]}
+              rows={filtered.map(o=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:10,fontFamily:"monospace"}}>{(o.id||"").slice(0,8)}</span>,
+                <span style={{fontSize:10,color:G.muted,whiteSpace:"nowrap"}}>{(o.created_at||"").slice(0,10)||"—"}</span>,
+                <div><div style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</div><div style={{fontSize:9,color:G.muted}}>{o.stores?.area||""}</div></div>,
+                <span style={{fontSize:11}}>{o.profiles?.full_name||"—"}</span>,
+                <span style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</span>,
+                <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700}}>{o.status}</span>,
+                o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
+                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                  {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
+                  {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾</Btn>}
+                  {(o.status==="Pending"||o.status==="Approved")&&<Btn sm v="danger" disabled={!!busy} onClick={()=>cancel(o)}>✕</Btn>}
+                </div>
+              ])}
+            />
+            {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No orders match filter</div>}
+          </div>
+        )}
       </div>
     );
   };
@@ -2497,6 +2588,138 @@ function CrmApp({ user, onLogout }) {
         <Btn sm disabled={busy===k} onClick={()=>saveSetting(k,val)}>{busy===k?"Saving…":"Save"}</Btn>
       </div>;
     };
+    const EmailRecipientsSection = () => {
+      const raw = getVal("email_notification_recipients");
+      let initial = [];
+      try { const p = raw ? JSON.parse(raw) : []; initial = Array.isArray(p) ? p : []; } catch {}
+      const [emails, setEmails] = useState(initial);
+      const [newEmail, setNewEmail] = useState("");
+      const [emailBusy, setEmailBusy] = useState(false);
+      useEffect(()=>{
+        try { const p = raw ? JSON.parse(raw) : []; setEmails(Array.isArray(p) ? p : []); } catch {}
+      },[raw]);
+      const saveEmails = async (list) => {
+        setEmailBusy(true);
+        try { await saveSetting("email_notification_recipients", JSON.stringify(list)); setEmails(list); }
+        finally { setEmailBusy(false); }
+      };
+      const add = () => {
+        const e = newEmail.trim().toLowerCase();
+        if (!e || !e.includes("@")) return notify("Enter a valid email","err");
+        if (emails.includes(e)) return notify("Already in list","err");
+        saveEmails([...emails, e]);
+        setNewEmail("");
+      };
+      const remove = (e) => saveEmails(emails.filter(x=>x!==e));
+      return (
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+          <div style={{fontWeight:700,fontSize:13,color:G.dark,marginBottom:14}}>Order Email Notifications</div>
+          <div style={{marginBottom:12,display:"flex",flexDirection:"column",gap:6}}>
+            {emails.length===0&&<div style={{fontSize:12,color:G.muted,fontStyle:"italic"}}>No recipients — using system defaults</div>}
+            {emails.map(e=>(
+              <div key={e} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:"#f0faf4",borderRadius:8,fontSize:13}}>
+                <span style={{flex:1,color:G.dark}}>{e}</span>
+                <button onClick={()=>remove(e)} disabled={emailBusy} style={{background:"none",border:"none",cursor:"pointer",color:"#e53e3e",fontWeight:700,fontSize:18,lineHeight:1,padding:"0 4px"}}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Inp value={newEmail} onChange={ev=>setNewEmail(ev.target.value)} placeholder="name@example.com" style={{flex:1}} onKeyDown={ev=>ev.key==="Enter"&&add()}/>
+            <Btn sm disabled={emailBusy} onClick={add}>{emailBusy?"Saving…":"Add"}</Btn>
+          </div>
+          <div style={{fontSize:11,color:G.muted,marginTop:8}}>Notified when a rider submits an order.</div>
+        </div>
+      );
+    };
+    const DataMigrationSection = () => {
+      const [migStatus, setMigStatus] = useState(null);
+      const [migBusy, setMigBusy] = useState(false);
+
+      const runMigration = async () => {
+        if (!window.confirm("This will copy ALL financial data from Google Sheets to Supabase (customers, vendors, invoices, payments, expenses, purchases). Existing records will be updated in place. Proceed?")) return;
+        setMigBusy(true);
+        setMigStatus({ step: "Fetching GAS data…", error: null, counts: null });
+        try {
+          // 1. Fetch all master data in one request
+          const all = await gasGet("all", { limit: 2000 });
+          setMigStatus(s => ({ ...s, step: "Fetching invoice items…" }));
+
+          // 2. Fetch ALL invoice items via the bulk export endpoint
+          const allItems = await gasGet("all_invoice_items");
+          const items = Array.isArray(allItems) ? allItems : (allItems?.items ?? []);
+
+          // 3. Transform to Supabase schema
+          const customers = (all.customers ?? []).map(c => ({
+            id: c.id, name: c.name, city: c.city, area: c.area,
+            owner_name: c.contact, mobile: c.phone, open_bal: c.openBal ?? 0, notes: c.notes,
+          }));
+          const vendors = (all.vendors ?? []).map(v => ({
+            id: v.id, name: v.name, category: v.category,
+            contact: v.contact, mobile: v.phone, open_bal: v.openBal ?? 0, notes: v.notes,
+          }));
+          const invoices = (all.invoices ?? []).map(inv => ({
+            id: inv.id, date: inv.date, cust_id: inv.custId || null, cust_name: inv.custName,
+            total: inv.total ?? 0, status: inv.status ?? "Unpaid",
+            pay_terms: inv.payTerms, created_by: inv.createdBy, notes: inv.notes ?? null,
+          }));
+          // invoice_items keyed by invId
+          const invoice_items = items.map(it => ({
+            invoice_id: it.invId, product_id: it.pid, product_name: it.pname,
+            qty: it.qty ?? 0, rate: it.rate ?? 0, total: it.total ?? 0, notes: it.notes ?? null,
+          }));
+          const purchases = (all.purchases ?? []).map(p => ({
+            id: p.id, date: p.date, vendor_id: p.vendorId || null, total: p.total ?? 0, notes: p.notes ?? null,
+          }));
+          const payments = (all.payments ?? []).map(p => ({
+            id: p.id, date: p.date, type: p.type === "Received" ? "Received" : "Made",
+            party_id: p.partyId || null, ref_id: p.refId || null, amount: p.amount ?? 0, notes: p.notes ?? null,
+          }));
+          const expenses = (all.expenses ?? []).map(e => ({
+            id: e.id, date: e.date, category: e.category, amount: e.amount ?? 0, notes: e.notes ?? null,
+          }));
+
+          setMigStatus(s => ({ ...s, step: "Uploading to Supabase…" }));
+          const result = await sbPost("bulk_import_financial", {
+            customers, vendors, invoices, invoice_items, purchases, payments, expenses,
+          });
+          setMigStatus({ step: "Done ✅", error: null, counts: result?.counts ?? null });
+          notify("✅ Migration complete!");
+        } catch (e) {
+          setMigStatus(s => ({ ...s, step: "Failed ❌", error: e.message }));
+          notify("❌ Migration failed: " + e.message, "err");
+        } finally {
+          setMigBusy(false);
+        }
+      };
+
+      return (
+        <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)",border:"1.5px solid #ffe0b2"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#e65100",marginBottom:8}}>GAS → Supabase Data Migration</div>
+          <div style={{fontSize:12,color:G.muted,marginBottom:14}}>
+            One-time migration. Copies customers, vendors, invoices, payments, purchases and expenses from Google Sheets into Supabase. Safe to re-run — uses upsert.
+          </div>
+          <Btn sm disabled={migBusy} onClick={runMigration} style={{background:"#e65100",color:"#fff",marginBottom:migStatus?12:0}}>
+            {migBusy?"Migrating…":"Run Migration Now"}
+          </Btn>
+          {migStatus && (
+            <div style={{fontSize:12,marginTop:8}}>
+              <div style={{color:migStatus.error?"#e53e3e":G.dark,fontWeight:600,marginBottom:4}}>{migStatus.step}</div>
+              {migStatus.error && <div style={{color:"#e53e3e",fontSize:11}}>{migStatus.error}</div>}
+              {migStatus.counts && (
+                <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:6}}>
+                  {Object.entries(migStatus.counts).map(([k,v])=>(
+                    <span key={k} style={{background:"#f0faf4",border:"1px solid #c8e6c9",borderRadius:6,padding:"2px 8px",color:G.dark,fontSize:11}}>
+                      {k}: <strong>{v}</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
     return (
       <div style={{display:"flex",flexDirection:"column",gap:16}}>
         <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
@@ -2519,6 +2742,8 @@ function CrmApp({ user, onLogout }) {
           <SettingRow k="push_title_default" label="Default Push Title"/>
           <SettingRow k="push_body_default" label="Default Push Body"/>
         </div>
+        <EmailRecipientsSection/>
+        <DataMigrationSection/>
       </div>
     );
   };
