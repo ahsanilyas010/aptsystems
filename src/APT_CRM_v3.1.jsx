@@ -2640,8 +2640,22 @@ function CrmApp({ user, onLogout }) {
         setMigBusy(true);
         setMigStatus({ step: "Fetching GAS data…", error: null, counts: null });
         try {
-          // 1. Fetch all master data in one request
-          const all = await gasGet("all", { limit: 2000 });
+          // 1. Fetch master data (customers/vendors/purchases/payments/expenses) + recent invoices
+          // Use default limit (300) to avoid Vercel's 10s serverless timeout on large GAS reads
+          setMigStatus(s => ({ ...s, step: "Fetching master data…" }));
+          const all = await gasGet("all");
+
+          // 1b. Fetch full invoice list separately in one dedicated call
+          setMigStatus(s => ({ ...s, step: "Fetching all invoices…" }));
+          let allInvoices = all.invoices ?? [];
+          try {
+            const moreInvoices = await gasGet("invoices", { limit: 5000 });
+            allInvoices = Array.isArray(moreInvoices) ? moreInvoices : allInvoices;
+          } catch (invErr) {
+            console.warn("invoices fetch failed, using all.invoices:", invErr.message);
+          }
+          all.invoices = allInvoices;
+
           setMigStatus(s => ({ ...s, step: "Fetching invoice items…" }));
 
           // 2. Fetch ALL invoice items via the bulk export endpoint
