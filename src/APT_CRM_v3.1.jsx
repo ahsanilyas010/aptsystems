@@ -2645,8 +2645,15 @@ function CrmApp({ user, onLogout }) {
           setMigStatus(s => ({ ...s, step: "Fetching invoice items…" }));
 
           // 2. Fetch ALL invoice items via the bulk export endpoint
-          const allItems = await gasGet("all_invoice_items");
-          const items = Array.isArray(allItems) ? allItems : (allItems?.items ?? []);
+          // Falls back to empty array if GAS deployment is older and lacks this action
+          let items = [];
+          try {
+            const allItems = await gasGet("all_invoice_items");
+            items = Array.isArray(allItems) ? allItems : (allItems?.items ?? []);
+          } catch (itemErr) {
+            console.warn("all_invoice_items not available in deployed GAS version — invoice line items skipped:", itemErr.message);
+            setMigStatus(s => ({ ...s, step: "Fetching invoice items… (skipped — redeploy GAS to include them)" }));
+          }
 
           // 3. Transform to Supabase schema
           const customers = (all.customers ?? []).map(c => ({
