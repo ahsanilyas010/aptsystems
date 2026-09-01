@@ -2685,11 +2685,24 @@ function CrmApp({ user, onLogout }) {
             id: e.id, date: e.date, category: e.category, amount: e.amount ?? 0, notes: e.notes ?? null,
           }));
 
-          setMigStatus(s => ({ ...s, step: "Uploading to Supabase…" }));
-          const result = await sbPost("bulk_import_financial", {
-            customers, vendors, invoices, invoice_items, purchases, payments, expenses,
-          });
-          setMigStatus({ step: "Done ✅", error: null, counts: result?.counts ?? null });
+          // 4. Upload each table separately to avoid Vercel's 10s serverless timeout
+          const counts = {};
+          const tables = [
+            { label: "customers", action: "bulk_import_financial", key: "customers", rows: customers },
+            { label: "vendors",   action: "bulk_import_financial", key: "vendors",   rows: vendors },
+            { label: "invoices",  action: "bulk_import_financial", key: "invoices",  rows: invoices },
+            { label: "payments",  action: "bulk_import_financial", key: "payments",  rows: payments },
+            { label: "expenses",  action: "bulk_import_financial", key: "expenses",  rows: expenses },
+            { label: "purchases", action: "bulk_import_financial", key: "purchases", rows: purchases },
+            ...(invoice_items.length ? [{ label: "invoice_items", action: "bulk_import_financial", key: "invoice_items", rows: invoice_items }] : []),
+          ];
+          for (const t of tables) {
+            if (!t.rows.length) { counts[t.key] = 0; continue; }
+            setMigStatus(s => ({ ...s, step: `Uploading ${t.label} (${t.rows.length})…` }));
+            const result = await sbPost(t.action, { [t.key]: t.rows });
+            counts[t.key] = result?.counts?.[t.key] ?? t.rows.length;
+          }
+          setMigStatus({ step: "Done ✅", error: null, counts });
           notify("✅ Migration complete!");
         } catch (e) {
           setMigStatus(s => ({ ...s, step: "Failed ❌", error: e.message }));
