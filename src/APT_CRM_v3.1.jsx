@@ -82,12 +82,19 @@ async function safeGasFetch(url, options) {
   }
 }
 
+function _errMsg(val, fallback) {
+  if (!val) return fallback;
+  if (typeof val === "string") return val;
+  if (typeof val === "object") return val.message || JSON.stringify(val);
+  return String(val);
+}
+
 async function gasGet(action, params = {}) {
   const url = new URL("/api/gas", window.location.origin);
   url.searchParams.set("action", action);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const json = await safeGasFetch(url.toString());
-  if (!json.success) throw new Error(json.error || "API error");
+  if (!json.success) throw new Error(_errMsg(json.error, "API error"));
   return json.data;
 }
 
@@ -97,7 +104,7 @@ async function gasPost(action, data, extra = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, data, ...extra }),
   });
-  if (!json.success) throw new Error(json.error || "API error");
+  if (!json.success) throw new Error(_errMsg(json.error, "API error"));
   return json.data;
 }
 
@@ -108,7 +115,7 @@ async function sbPost(action, params = {}) {
     body: JSON.stringify({ action, ...params }),
   });
   const json = await res.json();
-  if (!json.success) throw new Error(json.error || "Supabase error");
+  if (!json.success) throw new Error(_errMsg(json.error, "Supabase error"));
   return json.data !== undefined ? json.data : [];
 }
 
