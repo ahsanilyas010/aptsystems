@@ -291,8 +291,8 @@ const InvoiceItems = ({ invId }) => {
   useEffect(() => {
     let on = true;
     setItems(null); setErr("");
-    gasGet("invoice_items", { id: invId })
-      .then(d => { if (on) setItems(Array.isArray(d) ? d : []); })
+    sbPost("invoice_items", { invoice_id: invId })
+      .then(d => { if (on) setItems(Array.isArray(d) ? d.map(it => ({ pid: it.product_id, pname: it.product_name, qty: it.qty, rate: it.rate, total: it.total })) : []); })
       .catch(e => { if (on) setErr(e.message); });
     return () => { on = false; };
   }, [invId]);
@@ -507,28 +507,35 @@ function CrmApp({ user, onLogout }) {
   const loadData = useCallback(async (showSync=false) => {
     if (showSync) setSyncing(true); else setLoading(true);
     try {
-      const [gasAll, sbCustomers, sbVendors, sbInvoices, sbPurchases, sbPayments, sbExpenses] = await Promise.all([
-        gasGet("all"),
+      // All financial data loads from Supabase — fast, no GAS dependency
+      const [sbCustomers, sbVendors, sbInvoices, sbPurchases, sbPayments, sbExpenses, sbProducts] = await Promise.all([
         sbPost("customers"),
         sbPost("vendors"),
         sbPost("invoices"),
         sbPost("purchases"),
         sbPost("payments"),
         sbPost("expenses"),
+        sbPost("products"),
       ]);
       const vMap = Object.fromEntries((sbVendors || []).map(v => [v.id, v]));
       const normalizedPayments = (sbPayments || []).map(p => ({ ...p, partyId: p.party_id || p.partyId, refId: p.ref_id || p.refId }));
       const paysByRef = {};
       normalizedPayments.forEach(p => { if (p.refId && p.type === "Made") paysByRef[p.refId] = (paysByRef[p.refId] || 0) + Number(p.amount); });
-      setData({
-        ...gasAll,
+      // Map Supabase products to CRM inventory format
+      const sbProductList = sbProducts || [];
+      const products = sbProductList.map(p => ({ id: p.id, name: p.name, category: p.category, tradePrice: Number(p.trade_price) || 0, currentStock: p.current_stock ?? 0 }));
+      const inventory = sbProductList.map(p => ({ pid: p.id, pname: p.name, category: p.category, cost: Number(p.trade_price) || 0, stock: p.current_stock ?? 0, minStock: p.min_stock ?? 0, purchased: 0, sold: 0 }));
+      setData(prev => ({
+        ...prev,
+        products,
+        inventory,
         customers: (sbCustomers || []).map(c => ({ ...c, phone: c.mobile || c.phone, contact: c.owner_name || c.contact, openBal: c.open_bal ?? c.openBal ?? 0 })),
         vendors: (sbVendors || []).map(v => ({ ...v, openBal: v.open_bal ?? v.openBal ?? 0 })),
         invoices: (sbInvoices || []).map(i => ({ ...i, custId: i.cust_id || i.custId, custName: i.cust_name || i.custName, payTerms: i.pay_terms || i.payTerms, createdBy: i.created_by || i.createdBy, pdfUrl: i.pdf_url || i.pdfUrl || "" })),
         purchases: (sbPurchases || []).map(p => ({ ...p, vendorId: p.vendor_id || p.vendorId, vendor: vMap[p.vendor_id]?.name || p.vendor || p.vendor_id || '', paid: paysByRef[p.id] || 0 })),
         payments: normalizedPayments,
         expenses: sbExpenses || [],
-      });
+      }));
       setLastSync(new Date());
       if (showSync) notify("✅ Synced");
     } catch(err) { notify("❌ "+err.message, "err"); }
@@ -780,10 +787,12 @@ function CrmApp({ user, onLogout }) {
 
   const adjustStock = async (d) => {
     try {
-      const r = await gasPost("adjust_stock",{pid:d.pid,delta:d.delta,reason:d.reason||""});
+      const r = await sbPost("adjust_stock", { pid: d.pid, delta: d.delta });
       notify(`✅ ${d.pid} stock → ${r.stock}`);
       closeModal();
       await loadData(true);
+      // Sync to GAS in background (non-blocking)
+      gasPost("adjust_stock", { pid: d.pid, delta: d.delta, reason: d.reason || "" }).catch(() => {});
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
@@ -1489,10 +1498,10 @@ function CrmApp({ user, onLogout }) {
         useEffect(()=>{
           if(!editing) return;
           let on=true;
-          gasGet("invoice_items",{id:editing.id})
+          sbPost("invoice_items",{invoice_id:editing.id})
             .then(d=>{
               if(!on) return;
-              const items=(Array.isArray(d)&&d.length)?d.map(it=>({pid:it.pid,pname:it.pname,qty:it.qty,rate:it.rate})):[{pid:"",qty:1,rate:0}];
+              const items=(Array.isArray(d)&&d.length)?d.map(it=>({pid:it.product_id||it.pid,pname:it.product_name||it.pname,qty:it.qty,rate:it.rate})):[{pid:"",qty:1,rate:0}];
               setF(p=>({...p,items}));
               setItemsLoading(false);
             })
@@ -1817,7 +1826,7 @@ function CrmApp({ user, onLogout }) {
         const [f,setF]=useState({name:"",category:"",contact:"",phone:"",openBal:"0",notes:""});
         const save=async()=>{
           if(!f.name){notify("Enter vendor name","err");return;}
-          try{await gasPost("save_vendor",{...f});notify("✅ Vendor added");closeModal();await loadData(true);}
+          try{await sbPost("upsert_vendor",{vendor:{id:`VEN-${Date.now()}`,name:f.name,category:f.category,contact:f.contact,mobile:f.phone,open_bal:Number(f.openBal)||0,notes:f.notes}});notify("✅ Vendor added");closeModal();await loadData(true);}
           catch(e){notify("❌ "+e.message,"err");}
         };
         return(
@@ -2696,7 +2705,8 @@ function CrmApp({ user, onLogout }) {
             id: v.id, name: v.name, category: v.category,
             contact: v.contact, mobile: v.phone, open_bal: v.openBal ?? 0, notes: v.notes,
           }));
-          const invoices = (all.invoices ?? []).map(inv => ({
+          const validDate = d => d && String(d).trim().length >= 6;
+          const invoices = (all.invoices ?? []).filter(inv => validDate(inv.date)).map(inv => ({
             id: inv.id, date: inv.date, cust_id: inv.custId || null, cust_name: inv.custName,
             total: inv.total ?? 0, status: ["Unpaid","Paid","VOIDED"].includes(inv.status) ? inv.status : "Unpaid",
             pay_terms: inv.payTerms, created_by: inv.createdBy, notes: inv.notes ?? null,
@@ -2706,14 +2716,14 @@ function CrmApp({ user, onLogout }) {
             invoice_id: it.invId, product_id: it.pid, product_name: it.pname,
             qty: it.qty ?? 0, rate: it.rate ?? 0, total: it.total ?? 0, notes: it.notes ?? null,
           }));
-          const purchases = (all.purchases ?? []).map(p => ({
+          const purchases = (all.purchases ?? []).filter(p => validDate(p.date)).map(p => ({
             id: p.id, date: p.date, vendor_id: p.vendorId || null, total: p.total ?? 0, notes: p.notes ?? null,
           }));
-          const payments = (all.payments ?? []).map(p => ({
+          const payments = (all.payments ?? []).filter(p => validDate(p.date)).map(p => ({
             id: p.id, date: p.date, type: p.type === "Received" ? "Received" : "Made",
             party_id: p.partyId || null, ref_id: p.refId || null, amount: p.amount ?? 0, notes: p.notes ?? null,
           }));
-          const expenses = (all.expenses ?? []).map(e => ({
+          const expenses = (all.expenses ?? []).filter(e => validDate(e.date)).map(e => ({
             id: e.id, date: e.date, category: e.category, amount: e.amount ?? 0, notes: e.notes ?? null,
           }));
 
