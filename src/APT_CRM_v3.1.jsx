@@ -2687,7 +2687,7 @@ function CrmApp({ user, onLogout }) {
           }));
           const invoices = (all.invoices ?? []).map(inv => ({
             id: inv.id, date: inv.date, cust_id: inv.custId || null, cust_name: inv.custName,
-            total: inv.total ?? 0, status: inv.status ?? "Unpaid",
+            total: inv.total ?? 0, status: ["Unpaid","Paid","VOIDED"].includes(inv.status) ? inv.status : "Unpaid",
             pay_terms: inv.payTerms, created_by: inv.createdBy, notes: inv.notes ?? null,
           }));
           // invoice_items keyed by invId
