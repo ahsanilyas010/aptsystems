@@ -294,6 +294,11 @@ export default async function handler(req, res) {
         if (error) throw error;
         return ok(res, { success: true });
       }
+      case "save_pdf_url": {
+        const { error } = await db.from("invoices").update({ pdf_url: params.pdf_url }).eq("id", params.inv_id);
+        if (error) throw error;
+        return ok(res, { success: true });
+      }
       case "purchases": {
         const days = params.days ? Number(params.days) : null;
         let q = db.from("vendors_purchases").select("*").order("date", { ascending: false });
