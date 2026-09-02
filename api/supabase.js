@@ -365,47 +365,70 @@ export default async function handler(req, res) {
       }
       case "bulk_import_financial": {
         const { customers, vendors, invoices, invoice_items, purchases, purchase_items, payments, expenses } = params;
-        if (customers?.length) {
-          const { error } = await db.from("customers").upsert(customers, { onConflict: "id" });
-          if (error) throw new Error(`customers: ${error.message}`);
-        }
-        if (vendors?.length) {
-          const { error } = await db.from("vendors").upsert(vendors, { onConflict: "id" });
-          if (error) throw new Error(`vendors: ${error.message}`);
-        }
-        if (invoices?.length) {
-          const { error } = await db.from("invoices").upsert(invoices, { onConflict: "id" });
-          if (error) throw new Error(`invoices: ${error.message}`);
-        }
-        if (invoice_items?.length) {
-          const { error } = await db.from("invoice_items").upsert(
-            invoice_items.map((it, i) => ({ ...it, id: it.id ?? i + 1 })), { onConflict: "id" }
-          );
-          if (error) throw new Error(`invoice_items: ${error.message}`);
-        }
-        if (purchases?.length) {
-          const { error } = await db.from("vendors_purchases").upsert(purchases, { onConflict: "id" });
-          if (error) throw new Error(`purchases: ${error.message}`);
-        }
-        if (purchase_items?.length) {
-          const { error } = await db.from("purchase_items").upsert(
-            purchase_items.map((it, i) => ({ ...it, id: it.id ?? i + 1 })), { onConflict: "id" }
-          );
-          if (error) throw new Error(`purchase_items: ${error.message}`);
-        }
-        if (payments?.length) {
-          const { error } = await db.from("payments").upsert(payments, { onConflict: "id" });
-          if (error) throw new Error(`payments: ${error.message}`);
-        }
-        if (expenses?.length) {
-          const { error } = await db.from("expenses").upsert(expenses, { onConflict: "id" });
-          if (error) throw new Error(`expenses: ${error.message}`);
-        }
+        // Deduplicate by id — GAS can produce duplicate rows with the same id
+        const dedupById = (rows) => {
+          if (!rows?.length) return rows ?? [];
+          const seen = new Set();
+          return rows.filter(r => { if (seen.has(r.id)) return false; seen.add(r.id); return true; });
+        };
+        // invoice_items / purchase_items: deduplicate by fk+product to avoid duplicate line items
+        const dedupItems = (rows, fkField) => {
+          if (!rows?.length) return [];
+          const seen = new Set();
+          return rows.filter(r => {
+            const k = `${r[fkField]}:${r.product_id}:${r.product_name}`;
+            if (seen.has(k)) return false; seen.add(k); return true;
+          });
+        };
+
+        const upsertTable = async (table, rows) => {
+          if (!rows?.length) return;
+          const CHUNK = 500;
+          for (let i = 0; i < rows.length; i += CHUNK) {
+            const { error } = await db.from(table).upsert(rows.slice(i, i + CHUNK), { onConflict: "id" });
+            if (error) throw new Error(`${table}: ${error.message}`);
+          }
+        };
+        // invoice_items / purchase_items use bigint serial ids — delete+insert per batch
+        const replaceItems = async (table, fkField, rows) => {
+          if (!rows?.length) return;
+          const parentIds = [...new Set(rows.map(r => r[fkField]).filter(Boolean))];
+          if (parentIds.length) {
+            const { error: delErr } = await db.from(table).delete().in(fkField, parentIds);
+            if (delErr) throw new Error(`${table} delete: ${delErr.message}`);
+          }
+          // Strip id so the serial auto-increments
+          const clean = rows.map(({ id: _id, ...rest }) => rest);
+          const CHUNK = 500;
+          for (let i = 0; i < clean.length; i += CHUNK) {
+            const { error } = await db.from(table).insert(clean.slice(i, i + CHUNK));
+            if (error) throw new Error(`${table}: ${error.message}`);
+          }
+        };
+
+        const dedupedCustomers = dedupById(customers);
+        const dedupedVendors   = dedupById(vendors);
+        const dedupedInvoices  = dedupById(invoices);
+        const dedupedPurchases = dedupById(purchases);
+        const dedupedPayments  = dedupById(payments);
+        const dedupedExpenses  = dedupById(expenses);
+        const dedupedInvItems  = dedupItems(invoice_items ?? [], "invoice_id");
+        const dedupedPurItems  = dedupItems(purchase_items ?? [], "purchase_id");
+
+        await upsertTable("customers",         dedupedCustomers);
+        await upsertTable("vendors",           dedupedVendors);
+        await upsertTable("invoices",          dedupedInvoices);
+        await upsertTable("vendors_purchases", dedupedPurchases);
+        await upsertTable("payments",          dedupedPayments);
+        await upsertTable("expenses",          dedupedExpenses);
+        await replaceItems("invoice_items",  "invoice_id",  dedupedInvItems);
+        await replaceItems("purchase_items", "purchase_id", dedupedPurItems);
+
         return ok(res, { success: true, counts: {
-          customers: customers?.length ?? 0, vendors: vendors?.length ?? 0,
-          invoices: invoices?.length ?? 0, invoice_items: invoice_items?.length ?? 0,
-          purchases: purchases?.length ?? 0, purchase_items: purchase_items?.length ?? 0,
-          payments: payments?.length ?? 0, expenses: expenses?.length ?? 0,
+          customers: dedupedCustomers.length, vendors: dedupedVendors.length,
+          invoices: dedupedInvoices.length, invoice_items: dedupedInvItems.length,
+          purchases: dedupedPurchases.length, purchase_items: dedupedPurItems.length,
+          payments: dedupedPayments.length, expenses: dedupedExpenses.length,
         }});
       }
       case "merge_customers": {
