@@ -299,6 +299,14 @@ export default async function handler(req, res) {
         if (error) throw error;
         return ok(res, { success: true });
       }
+      case "adjust_stock": {
+        const { data: prod, error: pErr } = await db.from("products").select("current_stock").eq("id", params.pid).single();
+        if (pErr) throw pErr;
+        const newStock = (prod.current_stock ?? 0) + Number(params.delta);
+        const { error } = await db.from("products").update({ current_stock: newStock }).eq("id", params.pid);
+        if (error) throw error;
+        return ok(res, { success: true, stock: newStock });
+      }
       case "purchases": {
         const days = params.days ? Number(params.days) : null;
         let q = db.from("vendors_purchases").select("*").order("date", { ascending: false });
