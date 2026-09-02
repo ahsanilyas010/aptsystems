@@ -524,7 +524,7 @@ function CrmApp({ user, onLogout }) {
         ...gasAll,
         customers: (sbCustomers || []).map(c => ({ ...c, phone: c.mobile || c.phone, contact: c.owner_name || c.contact, openBal: c.open_bal ?? c.openBal ?? 0 })),
         vendors: (sbVendors || []).map(v => ({ ...v, openBal: v.open_bal ?? v.openBal ?? 0 })),
-        invoices: (sbInvoices || []).map(i => ({ ...i, custId: i.cust_id || i.custId, custName: i.cust_name || i.custName, payTerms: i.pay_terms || i.payTerms, createdBy: i.created_by || i.createdBy })),
+        invoices: (sbInvoices || []).map(i => ({ ...i, custId: i.cust_id || i.custId, custName: i.cust_name || i.custName, payTerms: i.pay_terms || i.payTerms, createdBy: i.created_by || i.createdBy, pdfUrl: i.pdf_url || i.pdfUrl || "" })),
         purchases: (sbPurchases || []).map(p => ({ ...p, vendorId: p.vendor_id || p.vendorId, vendor: vMap[p.vendor_id]?.name || p.vendor || p.vendor_id || '', paid: paysByRef[p.id] || 0 })),
         payments: normalizedPayments,
         expenses: sbExpenses || [],
@@ -585,7 +585,18 @@ function CrmApp({ user, onLogout }) {
   },[vendors,purchases,payments]);
 
   // ── PDF cache handler ─────────────────────────────────────
-  const cachePdf = (invId, url) => setPdfCache(p=>({...p,[invId]:url}));
+  // Pre-populate from Supabase pdf_url on invoice load
+  useEffect(() => {
+    const entries = {};
+    invoices.forEach(i => { if (i.pdfUrl) entries[i.id] = i.pdfUrl; });
+    if (Object.keys(entries).length) setPdfCache(c => ({ ...c, ...entries }));
+  }, [invoices]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const cachePdf = (invId, url) => {
+    setPdfCache(p => ({ ...p, [invId]: url }));
+    // Persist to Supabase so the URL survives page refresh
+    sbPost("save_pdf_url", { inv_id: invId, pdf_url: url }).catch(() => {});
+  };
 
   const triggerPdfDownload = (url) => {
     if (!url) return;
