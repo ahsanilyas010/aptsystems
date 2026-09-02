@@ -2705,7 +2705,8 @@ function CrmApp({ user, onLogout }) {
             id: v.id, name: v.name, category: v.category,
             contact: v.contact, mobile: v.phone, open_bal: v.openBal ?? 0, notes: v.notes,
           }));
-          const invoices = (all.invoices ?? []).map(inv => ({
+          const validDate = d => d && String(d).trim().length >= 6;
+          const invoices = (all.invoices ?? []).filter(inv => validDate(inv.date)).map(inv => ({
             id: inv.id, date: inv.date, cust_id: inv.custId || null, cust_name: inv.custName,
             total: inv.total ?? 0, status: ["Unpaid","Paid","VOIDED"].includes(inv.status) ? inv.status : "Unpaid",
             pay_terms: inv.payTerms, created_by: inv.createdBy, notes: inv.notes ?? null,
@@ -2715,14 +2716,14 @@ function CrmApp({ user, onLogout }) {
             invoice_id: it.invId, product_id: it.pid, product_name: it.pname,
             qty: it.qty ?? 0, rate: it.rate ?? 0, total: it.total ?? 0, notes: it.notes ?? null,
           }));
-          const purchases = (all.purchases ?? []).map(p => ({
+          const purchases = (all.purchases ?? []).filter(p => validDate(p.date)).map(p => ({
             id: p.id, date: p.date, vendor_id: p.vendorId || null, total: p.total ?? 0, notes: p.notes ?? null,
           }));
-          const payments = (all.payments ?? []).map(p => ({
+          const payments = (all.payments ?? []).filter(p => validDate(p.date)).map(p => ({
             id: p.id, date: p.date, type: p.type === "Received" ? "Received" : "Made",
             party_id: p.partyId || null, ref_id: p.refId || null, amount: p.amount ?? 0, notes: p.notes ?? null,
           }));
-          const expenses = (all.expenses ?? []).map(e => ({
+          const expenses = (all.expenses ?? []).filter(e => validDate(e.date)).map(e => ({
             id: e.id, date: e.date, category: e.category, amount: e.amount ?? 0, notes: e.notes ?? null,
           }));
 
