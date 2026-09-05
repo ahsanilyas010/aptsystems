@@ -50,10 +50,19 @@ export default async function handler(req, res) {
     const logoUrl = process.env.BUSINESS_LOGO_URL ||
       (process.env.VERCEL_PROJECT_PRODUCTION_URL
         ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}/logo.png`
-        : null);
+        : process.env.VERCEL_URL
+          ? `https://${process.env.VERCEL_URL}/logo.png`
+          : null);
+
+    const fromLines = process.env.BUSINESS_FROM ||
+      [
+        process.env.BUSINESS_NAME || "Kamai Distribution",
+        process.env.BUSINESS_ADDRESS,
+        process.env.BUSINESS_PHONE,
+      ].filter(Boolean).join("\n");
 
     const invoiceBody = {
-      from: process.env.BUSINESS_NAME || "Kamai Distribution",
+      from: fromLines,
       to: [inv.cust_name || inv.cust_id, custAddress].filter(Boolean).join("\n"),
       number: invId,
       date: inv.date || new Date().toLocaleDateString("en-GB"),
@@ -65,7 +74,7 @@ export default async function handler(req, res) {
       })),
       ...(logoUrl ? { logo: logoUrl } : {}),
       ...(inv.notes ? { notes: inv.notes } : {}),
-      ...(inv.pay_terms ? { terms: inv.pay_terms } : {}),
+      ...(inv.pay_terms ? { payment_terms: inv.pay_terms } : {}),
     };
 
     console.log("[invoice]", invId, "→ invoice-generator.com, items:", invoiceBody.items.length);
