@@ -55,59 +55,6 @@ const KNOWN_DUPLICATE_GROUPS = [
   { keepId: "C-068", mergeIds: ["C-089"] },
 ];
 
-// Robust fetch helper that handles HTML/non-JSON responses gracefully
-async function safeGasFetch(url, options) {
-  const res = await fetch(url, options);
-  const text = await res.text();
-  
-  if (!res.ok) {
-    try {
-      const errJson = JSON.parse(text);
-      throw new Error(errJson.error || errJson.message || `HTTP status ${res.status}`);
-    } catch(e) {
-      if (text.trim().startsWith("<")) {
-        throw new Error("Vercel Serverless Function or upstream Apps Script returned HTML. Check API deployment and logs.");
-      }
-      throw new Error(text.substring(0, 100) || `HTTP status ${res.status}`);
-    }
-  }
-  
-  try {
-    return JSON.parse(text);
-  } catch(e) {
-    if (text.trim().startsWith("<")) {
-      throw new Error("Server returned HTML page instead of JSON. Ensure Web App is deployed and 'Anyone' can access it.");
-    }
-    throw new Error(`Invalid JSON response: ${e.message} (${text.substring(0, 50)})`);
-  }
-}
-
-function _errMsg(val, fallback) {
-  if (!val) return fallback;
-  if (typeof val === "string") return val;
-  if (typeof val === "object") return val.message || JSON.stringify(val);
-  return String(val);
-}
-
-async function gasGet(action, params = {}) {
-  const url = new URL("/api/gas", window.location.origin);
-  url.searchParams.set("action", action);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const json = await safeGasFetch(url.toString());
-  if (!json.success) throw new Error(_errMsg(json.error, "API error"));
-  return json.data;
-}
-
-async function gasPost(action, data, extra = {}) {
-  const json = await safeGasFetch("/api/gas", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, data, ...extra }),
-  });
-  if (!json.success) throw new Error(_errMsg(json.error, "API error"));
-  return json.data;
-}
-
 async function invoicePost(invId) {
   const res = await fetch("/api/invoice", {
     method: "POST",
@@ -802,8 +749,6 @@ function CrmApp({ user, onLogout }) {
       notify(`✅ ${d.pid} stock → ${r.stock}`);
       closeModal();
       await loadData(true);
-      // Sync to GAS in background (non-blocking)
-      gasPost("adjust_stock", { pid: d.pid, delta: d.delta, reason: d.reason || "" }).catch(() => {});
     } catch(e) { notify("❌ "+e.message,"err"); }
   };
 
@@ -1062,7 +1007,7 @@ function CrmApp({ user, onLogout }) {
     const [importingSb, setImportingSb] = useState(false);
     const importRiderStores = async (stores) => {
       if(!stores.length){ notify("No unsynced rider stores to import","err"); return; }
-      if(!confirm(`Import ${stores.length} rider store(s) into the Customers list in Google Sheet?\n(already-synced stores are skipped; stores matching an existing customer by name+phone are linked, not duplicated)`)) return;
+      if(!confirm(`Import ${stores.length} rider store(s) into the Customers list in Supabase?\n(already-synced stores are skipped; stores matching an existing customer by name+phone are linked, not duplicated)`)) return;
       setImportingSb(true);
       const custByKey={}, custByName={};
       customers.forEach(c=>{ const n=normTxt(c.name); if(!n) return; custByName[n]=c; custByKey[n+"|"+digitsOnly(c.phone)]=c; });
@@ -1116,7 +1061,7 @@ function CrmApp({ user, onLogout }) {
       } catch(e) { notify("❌ "+e.message,"err"); } finally { setMerging(false); }
     };
     const removeKnownDuplicates = async () => {
-      if(!confirm(`Remove 15 known duplicate customer rows?\n\nInvoices/payments on duplicates will be re-pointed to the kept records and the duplicate Sheet rows deleted. This action can be undone.`)) return;
+      if(!confirm(`Remove 15 known duplicate customer rows?\n\nInvoices/payments on duplicates will be re-pointed to the kept records and the duplicates deleted from Supabase. This action can be undone.`)) return;
       setMerging(true);
       try {
         const result = await sbPost("merge_customers",{groups:KNOWN_DUPLICATE_GROUPS});
@@ -1586,7 +1531,7 @@ function CrmApp({ user, onLogout }) {
               <span style={{fontWeight:800,fontSize:15,color:G.ink}}>Total: {fmt(total)}</span>
             </div>
             <div style={{background:"#E8F0FE",borderRadius:8,padding:"9px 12px",fontSize:11,color:G.blue,fontWeight:600}}>
-              💾 Saves to Sheet · 🖨 PDF generated via invoice-generator.com · 📂 Saved to Drive
+              🖨 PDF generated via invoice-generator.com · 📂 Saved to Supabase Storage
             </div>
              <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6,paddingTop:10,borderTop:`1px solid ${G.pale}`}}>
               <Btn v="secondary" onClick={closeModal} disabled={loading}>Cancel</Btn>
@@ -1597,7 +1542,7 @@ function CrmApp({ user, onLogout }) {
           </div>
         );
       };
-      return <Modal title={editing?`✏️ Edit Invoice — ${editing.id}`:"🧾 New Invoice → Sheet + PDF + Drive"} onClose={closeModal} wide><InvForm/></Modal>;
+      return <Modal title={editing?`✏️ Edit Invoice — ${editing.id}`:"🧾 New Invoice"} onClose={closeModal} wide><InvForm/></Modal>;
     }
 
     // ── View Invoice (with PDF download + Void) ──────────────
@@ -1619,7 +1564,7 @@ function CrmApp({ user, onLogout }) {
           <div style={{background:"#E3F2FD",borderRadius:10,padding:"12px 14px",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div>
               <div style={{fontSize:11,fontWeight:700,color:G.blue,marginBottom:2}}>📄 Invoice PDF</div>
-              <div style={{fontSize:10,color:G.muted}}>Generated via invoice-generator.com · Saved to Drive</div>
+              <div style={{fontSize:10,color:G.muted}}>Generated via invoice-generator.com · Saved to Supabase Storage</div>
             </div>
             <PdfBtn invId={inv.id} pdfUrl={pdfCache[inv.id]} onGenerate={u=>cachePdf(inv.id,u)}/>
           </div>
@@ -2204,7 +2149,7 @@ function CrmApp({ user, onLogout }) {
         return true;
       });
       if(!candidates.length){ notify("Nothing to sync — all stores are already synced, duplicates, or excluded","err"); return; }
-      if(!confirm(`Sync ${candidates.length} store(s) to the Customers list?\n(test/sample, duplicate and already-synced stores are skipped; stores that already exist as a customer are linked, not duplicated)`)) return;
+      if(!confirm(`Add ${candidates.length} store(s) to the Customers list in Supabase?\n(test/sample, duplicate and already-synced stores are skipped; stores that already exist as a customer are linked, not duplicated)`)) return;
       setSyncing(true);
       // Cross-check: index existing Sheets customers by name+phone (and name alone).
       const custByKey={}, custByName={};
@@ -2220,8 +2165,9 @@ function CrmApp({ user, onLogout }) {
             linked++;
             continue;
           }
-          const r = await gasPost("add_customer",{name:s.name,area:s.area||"",city:"",contact:s.owner_name||"",phone:s.mobile||"",notes:`supabase_id:${s.id}`});
-          if(r?.id){ try{ await sbPost("update_store",{id:s.id,gas_customer_id:r.id}); }catch{/* non-fatal */} }
+          const newId = `CUST-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+          await sbPost("upsert_customer", { customer: { id: newId, name: s.name, area: s.area||"", city: "", owner_name: s.owner_name||"", mobile: s.mobile||"", open_bal: 0, notes: `supabase_id:${s.id}` } });
+          try{ await sbPost("update_store",{id:s.id,gas_customer_id:newId}); }catch{/* non-fatal */}
           created++;
         }catch(e){ fail++; }
       }
@@ -2674,38 +2620,14 @@ function CrmApp({ user, onLogout }) {
       const [migBusy, setMigBusy] = useState(false);
 
       const runMigration = async () => {
-        if (!window.confirm("This will copy ALL financial data from Google Sheets to Supabase (customers, vendors, invoices, payments, expenses, purchases). Existing records will be updated in place. Proceed?")) return;
+        notify("Migration already complete — all data is live in Supabase.", "err");
+      };
+      const _unusedMigration = async () => {
         setMigBusy(true);
-        setMigStatus({ step: "Fetching GAS data…", error: null, counts: null });
+        setMigStatus({ step: "Fetching data…", error: null, counts: null });
         try {
-          // 1. Fetch master data (customers/vendors/purchases/payments/expenses) + recent invoices
-          // Use default limit (300) to avoid Vercel's 10s serverless timeout on large GAS reads
-          setMigStatus(s => ({ ...s, step: "Fetching master data…" }));
-          const all = await gasGet("all");
-
-          // 1b. Fetch full invoice list separately in one dedicated call
-          setMigStatus(s => ({ ...s, step: "Fetching all invoices…" }));
-          let allInvoices = all.invoices ?? [];
-          try {
-            const moreInvoices = await gasGet("invoices", { limit: 5000 });
-            allInvoices = Array.isArray(moreInvoices) ? moreInvoices : allInvoices;
-          } catch (invErr) {
-            console.warn("invoices fetch failed, using all.invoices:", invErr.message);
-          }
-          all.invoices = allInvoices;
-
-          setMigStatus(s => ({ ...s, step: "Fetching invoice items…" }));
-
-          // 2. Fetch ALL invoice items via the bulk export endpoint
-          // Falls back to empty array if GAS deployment is older and lacks this action
+          const all = { customers: [], vendors: [], invoices: [], purchases: [], payments: [], expenses: [] };
           let items = [];
-          try {
-            const allItems = await gasGet("all_invoice_items");
-            items = Array.isArray(allItems) ? allItems : (allItems?.items ?? []);
-          } catch (itemErr) {
-            console.warn("all_invoice_items not available in deployed GAS version — invoice line items skipped:", itemErr.message);
-            setMigStatus(s => ({ ...s, step: "Fetching invoice items… (skipped — redeploy GAS to include them)" }));
-          }
 
           // 3. Transform to Supabase schema
           const customers = (all.customers ?? []).map(c => ({
@@ -2767,13 +2689,11 @@ function CrmApp({ user, onLogout }) {
 
       return (
         <div style={{background:G.card,borderRadius:12,padding:18,boxShadow:"0 2px 12px rgba(26,92,32,0.07)",border:"1.5px solid #ffe0b2"}}>
-          <div style={{fontWeight:700,fontSize:13,color:"#e65100",marginBottom:8}}>GAS → Supabase Data Migration</div>
+          <div style={{fontWeight:700,fontSize:13,color:G.dark,marginBottom:8}}>Data Migration</div>
           <div style={{fontSize:12,color:G.muted,marginBottom:14}}>
-            One-time migration. Copies customers, vendors, invoices, payments, purchases and expenses from Google Sheets into Supabase. Safe to re-run — uses upsert.
+            Migration from Google Sheets to Supabase is complete. All financial data (customers, vendors, invoices, payments, purchases, expenses) is now live in Supabase.
           </div>
-          <Btn sm disabled={migBusy} onClick={runMigration} style={{background:"#e65100",color:"#fff",marginBottom:migStatus?12:0}}>
-            {migBusy?"Migrating…":"Run Migration Now"}
-          </Btn>
+          <div style={{fontSize:12,color:"#2e7d32",fontWeight:600,background:"#f0faf4",border:"1px solid #c8e6c9",borderRadius:8,padding:"8px 12px"}}>✅ Migration complete — data is in Supabase</div>
           {migStatus && (
             <div style={{fontSize:12,marginTop:8}}>
               <div style={{color:migStatus.error?"#e53e3e":G.dark,fontWeight:600,marginBottom:4}}>{migStatus.step}</div>
