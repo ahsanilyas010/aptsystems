@@ -108,6 +108,17 @@ async function gasPost(action, data, extra = {}) {
   return json.data;
 }
 
+async function invoicePost(invId) {
+  const res = await fetch("/api/invoice", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ invId }),
+  });
+  const json = await res.json().catch(() => ({ success: false, error: "Failed to parse response" }));
+  if (!json.success) throw new Error(json.error || "PDF generation failed");
+  return json;
+}
+
 async function sbPost(action, params = {}) {
   const res = await fetch("/api/supabase", {
     method: "POST",
@@ -256,7 +267,7 @@ const PdfBtn = ({ invId, pdfUrl, onGenerate, sm }) => {
     if (url) { window.open(url, "_blank"); return; }
     setLoading(true);
     try {
-      const result = await gasPost("generate_pdf", null, { invId });
+      const result = await invoicePost(invId);
       setUrl(result.url);
       window.open(result.url, "_blank");
       if (onGenerate) onGenerate(result.url);
@@ -707,7 +718,7 @@ function CrmApp({ user, onLogout }) {
     });
     let pdfUrl = null;
     try {
-      const pdfRes = await gasPost("generate_pdf", null, { invId });
+      const pdfRes = await invoicePost(invId);
       pdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
     } catch { /* non-fatal */ }
     if (pdfUrl) { cachePdf(invId, pdfUrl); triggerPdfDownload(pdfUrl); }
@@ -748,7 +759,7 @@ function CrmApp({ user, onLogout }) {
       });
       let editPdfUrl = null;
       try {
-        const pdfRes = await gasPost("generate_pdf", null, { invId });
+        const pdfRes = await invoicePost(invId);
         editPdfUrl = pdfRes?.pdfUrl || pdfRes?.url;
       } catch { /* non-fatal */ }
       if (editPdfUrl) { cachePdf(invId, editPdfUrl); triggerPdfDownload(editPdfUrl); }
