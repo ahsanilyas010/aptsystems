@@ -47,6 +47,11 @@ export default async function handler(req, res) {
       }
     }
 
+    const logoUrl = process.env.BUSINESS_LOGO_URL ||
+      (process.env.VERCEL_PROJECT_PRODUCTION_URL
+        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}/logo.png`
+        : null);
+
     const invoiceBody = {
       from: process.env.BUSINESS_NAME || "Kamai Distribution",
       to: [inv.cust_name || inv.cust_id, custAddress].filter(Boolean).join("\n"),
@@ -58,6 +63,7 @@ export default async function handler(req, res) {
         quantity: Number(it.qty) || 1,
         unit_cost: Number(it.rate) || 0,
       })),
+      ...(logoUrl ? { logo: logoUrl } : {}),
       ...(inv.notes ? { notes: inv.notes } : {}),
       ...(inv.pay_terms ? { terms: inv.pay_terms } : {}),
     };
