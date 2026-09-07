@@ -41,9 +41,9 @@ export default async function handler(req, res) {
     // Optionally fetch customer for address details
     let custAddress = "";
     if (inv.cust_id) {
-      const { data: cust } = await db.from("customers").select("name,phone,address,city").eq("id", inv.cust_id).maybeSingle();
+      const { data: cust } = await db.from("customers").select("name,owner_name,mobile,area,city").eq("id", inv.cust_id).maybeSingle();
       if (cust) {
-        custAddress = [cust.phone, cust.address, cust.city].filter(Boolean).join("\n");
+        custAddress = [cust.owner_name, cust.mobile, cust.area, cust.city].filter(Boolean).join("\n");
       }
     }
 
