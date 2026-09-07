@@ -56,7 +56,7 @@ export default async function handler(req, res) {
 
     const fromLines = process.env.BUSINESS_FROM ||
       [
-        process.env.BUSINESS_NAME || "Kamai Distribution",
+        process.env.BUSINESS_NAME || "Assorted Produce Traders",
         process.env.BUSINESS_ADDRESS,
         process.env.BUSINESS_PHONE,
       ].filter(Boolean).join("\n");
