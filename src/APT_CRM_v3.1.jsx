@@ -1484,7 +1484,7 @@ function CrmApp({ user, onLogout }) {
           if(k==="pid"){
             const pr=prodMap[v];
             if(pr){
-              it[i].rate=pr.price;
+              it[i].rate=pr.tradePrice;
               it[i].pname=pr.name;
             }
           }
