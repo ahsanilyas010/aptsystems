@@ -1,7 +1,9 @@
 // Vercel Serverless Function — /api/invoice
-// Generates a PDF invoice via invoice-generator.com and stores it in Supabase storage.
-// Replaces the old GAS proxy flow which required a Google Apps Script deployment.
+// Generates a PDF invoice via invoice-generator.com, stores it in Supabase storage,
+// and mirrors it to Google Drive (non-blocking — invoice succeeds even if Drive fails).
 import { createClient } from "@supabase/supabase-js";
+import { google } from "googleapis";
+import { Readable } from "stream";
 
 const INVOICE_API = "https://invoice-generator.com";
 const BUCKET = "order-invoices"; // shared Supabase storage bucket
@@ -11,6 +13,30 @@ function getSupabase() {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error(`Missing env: ${[!url && "SUPABASE_URL", !key && "SUPABASE_SERVICE_ROLE_KEY"].filter(Boolean).join(", ")}`);
   return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+}
+
+const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "1cCU3BBUbHE1YeTTxxOGJztMtpqplQ8sk";
+
+async function uploadToDrive(pdfBuffer, invId) {
+  const saJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!saJson) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var not set");
+  const auth = new google.auth.GoogleAuth({
+    credentials: JSON.parse(saJson),
+    scopes: ["https://www.googleapis.com/auth/drive.file"],
+  });
+  const drive = google.drive({ version: "v3", auth });
+  const stream = Readable.from(pdfBuffer);
+  const { data } = await drive.files.create({
+    requestBody: {
+      name: `Invoice-${invId}.pdf`,
+      mimeType: "application/pdf",
+      parents: [DRIVE_FOLDER_ID],
+    },
+    media: { mimeType: "application/pdf", body: stream },
+    fields: "id,webViewLink",
+  });
+  console.log("[invoice] Drive upload ✓", data.webViewLink);
+  return data;
 }
 
 export default async function handler(req, res) {
@@ -106,6 +132,11 @@ export default async function handler(req, res) {
     const pdfUrl = urlData.publicUrl;
 
     await db.from("invoices").update({ pdf_url: pdfUrl }).eq("id", invId);
+
+    // Mirror to Google Drive (non-blocking — don't fail invoice if this errors)
+    uploadToDrive(pdfBuffer, invId).catch(err =>
+      console.error("[invoice] Drive upload failed:", err.message)
+    );
 
     console.log("[invoice]", invId, "✓", pdfUrl);
     return res.status(200).json({ success: true, pdfUrl, url: pdfUrl });
