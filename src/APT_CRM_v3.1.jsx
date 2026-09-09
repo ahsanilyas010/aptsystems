@@ -15,6 +15,7 @@ import {
   getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
   signInWithEmailAndPassword
 } from "firebase/auth";
+import { getFirestore, doc, getDoc } from "firebase/firestore";
 import {
   LayoutDashboard, Users, FileText, CreditCard, ShoppingCart, Truck, Receipt,
   TrendingUp, Scale, Package, BarChart3, ClipboardList, Store, Bike, MapPin,
@@ -29,13 +30,25 @@ const firebaseConfig = {
 };
 const firebaseApp    = initializeApp(firebaseConfig);
 const auth           = getAuth(firebaseApp);
+const db             = getFirestore(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
 
-const ALLOWED_EMAILS = [
+// Fallback list used if Firestore is unreachable; primary source is
+// Firestore at crm_config/allowed_emails → { emails: [...] }
+const FALLBACK_EMAILS = [
   "ahsanilyas35@gmail.com",
   "tahafayyazlp@gmail.com",
   "mamoonaasim01@gmail.com",
+  "raheeelaa.03@gmail.com",
 ];
+
+async function fetchAllowedEmails() {
+  try {
+    const snap = await getDoc(doc(db, "crm_config", "allowed_emails"));
+    if (snap.exists()) return snap.data().emails ?? FALLBACK_EMAILS;
+  } catch (_) { /* network / permissions — fall through */ }
+  return FALLBACK_EMAILS;
+}
 
 const KNOWN_DUPLICATE_GROUPS = [
   { keepId: "C-004", mergeIds: ["C-072"] },
@@ -3207,9 +3220,10 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, u => {
+    const unsub = onAuthStateChanged(auth, async u => {
       if (!u) { setAuthState("login"); setUser(null); return; }
-      if (!ALLOWED_EMAILS.includes(u.email)) { setUser(u); setAuthState("denied"); signOut(auth); return; }
+      const allowed = await fetchAllowedEmails();
+      if (!allowed.includes(u.email)) { setUser(u); setAuthState("denied"); signOut(auth); return; }
       setUser(u); setAuthState("app");
     });
     return unsub;
