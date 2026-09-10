@@ -18,13 +18,16 @@ function getSupabase() {
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "1cCU3BBUbHE1YeTTxxOGJztMtpqplQ8sk";
 
 async function uploadToDrive(pdfBuffer, invId) {
-  const saJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!saJson) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var not set");
-  const auth = new google.auth.GoogleAuth({
-    credentials: JSON.parse(saJson),
-    scopes: ["https://www.googleapis.com/auth/drive.file"],
-  });
-  const drive = google.drive({ version: "v3", auth });
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken)
+    throw new Error("Missing Google OAuth env vars: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN");
+
+  const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2.setCredentials({ refresh_token: refreshToken });
+
+  const drive = google.drive({ version: "v3", auth: oauth2 });
   const stream = Readable.from(pdfBuffer);
   const { data } = await drive.files.create({
     requestBody: {
@@ -133,8 +136,8 @@ export default async function handler(req, res) {
 
     await db.from("invoices").update({ pdf_url: pdfUrl }).eq("id", invId);
 
-    // Mirror to Google Drive (non-blocking — don't fail invoice if this errors)
-    uploadToDrive(pdfBuffer, invId).catch(err =>
+    // Mirror to Google Drive — awaited so the serverless fn doesn't terminate early
+    await uploadToDrive(pdfBuffer, invId).catch(err =>
       console.error("[invoice] Drive upload failed:", err.message)
     );
 
