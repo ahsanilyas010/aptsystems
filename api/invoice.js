@@ -133,8 +133,8 @@ export default async function handler(req, res) {
 
     await db.from("invoices").update({ pdf_url: pdfUrl }).eq("id", invId);
 
-    // Mirror to Google Drive (non-blocking — don't fail invoice if this errors)
-    uploadToDrive(pdfBuffer, invId).catch(err =>
+    // Mirror to Google Drive — awaited so the serverless fn doesn't terminate early
+    await uploadToDrive(pdfBuffer, invId).catch(err =>
       console.error("[invoice] Drive upload failed:", err.message)
     );
 
