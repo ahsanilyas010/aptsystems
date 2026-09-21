@@ -40,7 +40,9 @@ const FALLBACK_EMAILS = [
   "tahafayyazlp@gmail.com",
   "mamoonaasim01@gmail.com",
   "raheeelaa.03@gmail.com",
+  "rehmanismail920@gmail.com"
 ];
+
 
 async function fetchAllowedEmails() {
   try {

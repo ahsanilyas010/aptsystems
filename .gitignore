@@ -3,3 +3,5 @@ dist/
 .env.local
 .env
 .env.*.local
+.vercel
+.env*
