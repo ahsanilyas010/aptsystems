@@ -154,7 +154,7 @@ const ageDaysOf = inv => {
   const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
   return diff < 0 ? 0 : diff;
 };
-const ageColor = a => a == null ? G.muted : a > 60 ? G.red : a > 30 ? G.amber : G.light;
+const ageColor = a => a == null ? G.muted : a > 45 ? G.red : a > 30 ? G.amber : a > 15 ? G.blue : G.light;
 // Normalizers for fuzzy matching store/customer/product names across systems.
 const normTxt = s => (s || "").toString().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const digitsOnly = s => (s || "").toString().replace(/\D+/g, "");
@@ -925,6 +925,7 @@ function CrmApp({ user, onLogout }) {
           ))}
           <Btn sm onClick={()=>setModal({t:"newInvoice"})}>+ New Invoice</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 Payment</Btn>
+          <Btn sm v="secondary" onClick={()=>setModal({t:"agingReport"})}>📊 Aging Report</Btn>
           <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
@@ -938,8 +939,8 @@ function CrmApp({ user, onLogout }) {
         {(()=>{
           const open=invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial");
           if(!open.length) return null;
-          const buckets=[{l:"Current (0–30d)",c:G.light,v:0},{l:"31–60 days",c:G.amber,v:0},{l:"61–90 days",c:G.red,v:0},{l:"90+ days",c:G.dark,v:0}];
-          open.forEach(i=>{const a=ageDaysOf(i)||0; if(a<=30)buckets[0].v+=i.total; else if(a<=60)buckets[1].v+=i.total; else if(a<=90)buckets[2].v+=i.total; else buckets[3].v+=i.total;});
+          const buckets=[{l:"Current (0–15d)",c:G.light,v:0},{l:"Caution (16–30d)",c:G.blue,v:0},{l:"Overdue (31–45d)",c:G.amber,v:0},{l:"Critical (45+d)",c:G.red,v:0}];
+          open.forEach(i=>{const a=ageDaysOf(i)||0; if(a<=15)buckets[0].v+=i.total; else if(a<=30)buckets[1].v+=i.total; else if(a<=45)buckets[2].v+=i.total; else buckets[3].v+=i.total;});
           return(
             <div style={{marginBottom:12}}>
               <div style={{fontSize:9,color:G.muted,fontWeight:800,textTransform:"uppercase",marginBottom:6,letterSpacing:0.5}}>Outstanding by Age</div>
@@ -1593,6 +1594,58 @@ function CrmApp({ user, onLogout }) {
               {(inv.status==="Unpaid"||inv.status==="Partial")&&<Btn v="secondary" onClick={()=>{closeModal();setModal({t:"recordPayment",d:{custId:inv.custId,invId:inv.id}});}}>💳 Partial</Btn>}
               {inv.status!=="VOIDED"&&<Btn v="danger" onClick={()=>voidInvoice(inv.id)}>🗑 Void</Btn>}
             </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ── AR Aging Report ───────────────────────────────────────
+    if(modal.t==="agingReport"){
+      const open=invoices.filter(i=>i.status==="Unpaid"||i.status==="Partial");
+      const sorted=[...open].sort((a,b)=>(ageDaysOf(b)||0)-(ageDaysOf(a)||0));
+      const ageBuckets=[
+        {label:"Critical — 45+ days",  c:G.red,   items:sorted.filter(i=>(ageDaysOf(i)||0)>45)},
+        {label:"Overdue — 31–45 days", c:G.amber, items:sorted.filter(i=>{const a=ageDaysOf(i)||0;return a>30&&a<=45;})},
+        {label:"Caution — 16–30 days", c:G.blue,  items:sorted.filter(i=>{const a=ageDaysOf(i)||0;return a>15&&a<=30;})},
+        {label:"Current — 0–15 days",  c:G.light, items:sorted.filter(i=>(ageDaysOf(i)||0)<=15)},
+      ];
+      const totalOpen=open.reduce((s,i)=>s+i.total,0);
+      return(
+        <Modal title="📊 AR Aging Report" onClose={closeModal} wide>
+          <div style={{marginBottom:14}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+              {ageBuckets.map(b=>(
+                <div key={b.label} style={{background:G.card,borderRadius:9,padding:"10px 14px",boxShadow:"0 1px 8px rgba(26,92,32,0.07)",borderLeft:`4px solid ${b.c}`}}>
+                  <div style={{fontSize:9,color:G.muted,fontWeight:700,textTransform:"uppercase",marginBottom:4}}>{b.label}</div>
+                  <div style={{fontSize:15,fontWeight:800,color:b.c}}>{fmt(b.items.reduce((s,i)=>s+i.total,0))}</div>
+                  <div style={{fontSize:9,color:G.muted,marginTop:2}}>{b.items.length} invoice{b.items.length!==1?"s":""}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:11,color:G.muted,fontWeight:600,marginBottom:10}}>Total Outstanding: <span style={{color:G.ink,fontWeight:800}}>{fmt(totalOpen)}</span> across <b>{open.length}</b> open invoices</div>
+            {ageBuckets.map(b=>b.items.length>0&&(
+              <div key={b.label} style={{marginBottom:16}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <div style={{fontSize:10,fontWeight:800,color:b.c,textTransform:"uppercase",letterSpacing:0.5}}>{b.label}</div>
+                  <div style={{fontSize:10,fontWeight:700,color:b.c}}>{fmt(b.items.reduce((s,i)=>s+i.total,0))}</div>
+                </div>
+                <TblWrap compact heads={["Invoice","Customer","Date","Total","Status","Days"]}
+                  rows={b.items.map(inv=>[
+                    <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{inv.id}</span>,
+                    <span style={{fontSize:11}}>{inv.custName}</span>,
+                    <span style={{fontSize:10,color:G.muted}}>{inv.date}</span>,
+                    <span style={{fontWeight:700,fontSize:11}}>{fmt(inv.total)}</span>,
+                    <Badge text={inv.status}/>,
+                    <span style={{fontSize:11,fontWeight:800,color:b.c}}>{ageDaysOf(inv)}d</span>,
+                  ])}
+                />
+              </div>
+            ))}
+            {open.length===0&&<div style={{textAlign:"center",padding:"32px 0",color:G.mid,fontWeight:700}}>🎉 No outstanding invoices</div>}
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+            <Btn v="secondary" onClick={closeModal}>Close</Btn>
+            <Btn v="secondary" onClick={()=>exportCsv("aging_report.csv",sorted,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
           </div>
         </Modal>
       );
