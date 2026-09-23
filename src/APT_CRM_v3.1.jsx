@@ -926,7 +926,7 @@ function CrmApp({ user, onLogout }) {
           <Btn sm onClick={()=>setModal({t:"newInvoice"})}>+ New Invoice</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"recordPayment"})}>💳 Payment</Btn>
           <Btn sm v="secondary" onClick={()=>setModal({t:"agingReport"})}>📊 Aging Report</Btn>
-          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
+          <Btn sm v="secondary" onClick={()=>exportCsv("invoices.csv",fil.map(i=>({...i,ageDays:ageDaysOf(i)??''})),[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["payTerms","Terms"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
           {[{l:"Total Invoiced",v:fmt(totalRevenue),c:G.mid},{l:"Collected",v:fmt(totalReceived),c:G.light},{l:"Outstanding",v:fmt(totalAR),c:G.amber},{l:"Invoices",v:invoices.length,c:G.dark}].map(s=>(
@@ -1645,7 +1645,7 @@ function CrmApp({ user, onLogout }) {
           </div>
           <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
             <Btn v="secondary" onClick={closeModal}>Close</Btn>
-            <Btn v="secondary" onClick={()=>exportCsv("aging_report.csv",sorted,[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
+            <Btn v="secondary" onClick={()=>exportCsv("aging_report.csv",sorted.map(i=>({...i,ageDays:ageDaysOf(i)??''})),[["id","Invoice"],["date","Date"],["custName","Customer"],["total","Total"],["status","Status"],["ageDays","Age (days)"]])}>⬇ Export</Btn>
           </div>
         </Modal>
       );
