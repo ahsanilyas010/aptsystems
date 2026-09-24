@@ -280,7 +280,13 @@ export default async function handler(req, res) {
       }
       case "upsert_invoice": {
         const { items, ...header } = params.invoice;
-        const { error: hErr } = await db.from("invoices").upsert(header, { onConflict: "id" });
+        // Partial updates (e.g. mark Paid sends only id + status) must UPDATE:
+        // an upsert still validates NOT NULL columns like `date` on the insert row.
+        const { data: existing, error: exErr } = await db.from("invoices").select("id").eq("id", header.id).maybeSingle();
+        if (exErr) throw exErr;
+        const { error: hErr } = existing
+          ? await db.from("invoices").update(header).eq("id", header.id)
+          : await db.from("invoices").insert(header);
         if (hErr) throw hErr;
         if (items?.length) {
           await db.from("invoice_items").delete().eq("invoice_id", header.id);
