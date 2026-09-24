@@ -81,6 +81,14 @@ async function invoicePost(invId) {
   return json;
 }
 
+// API error fields may be strings or objects — always turn them into readable text.
+function _errMsg(val, fallback) {
+  if (!val) return fallback;
+  if (typeof val === "string") return val;
+  if (typeof val === "object") return val.message || JSON.stringify(val);
+  return String(val);
+}
+
 async function sbPost(action, params = {}) {
   const res = await fetch("/api/supabase", {
     method: "POST",
@@ -431,6 +439,7 @@ function CrmApp({ user, onLogout }) {
   const [syncing, setSyncing] = useState(false);
   const [modal, setModal]     = useState(null);
   const [search, setSearch]   = useState("");
+  const [invSf, setInvSf]     = useState("All"); // Invoices status filter — lives here so it survives re-renders
   const [toast, setToast]     = useState(null);
   const [lastSync, setLastSync] = useState(null);
   // PDF url cache: invId → url
@@ -909,8 +918,11 @@ function CrmApp({ user, onLogout }) {
   );
 
   // ── INVOICES PAGE ─────────────────────────────────────────
+  // Called as Invoices(), not <Invoices/>: a component defined inside App gets a
+  // new identity every render, so React would remount it and the search input
+  // would lose focus after each keystroke.
   const Invoices = () => {
-    const [sf,setSf] = useState("All");
+    const sf = invSf, setSf = setInvSf;
     const fil = invoices.filter(i=>(sf==="All"||i.status===sf)&&(!search||i.id?.includes(search.toUpperCase())||i.custName?.toLowerCase().includes(search.toLowerCase())));
     return (
       <div>
@@ -3159,7 +3171,7 @@ function CrmApp({ user, onLogout }) {
 
   // ── PAGES ─────────────────────────────────────────────────
   const PAGES={
-    dashboard:<Dashboard/>,customers:<Customers/>,invoices:<Invoices/>,
+    dashboard:<Dashboard/>,customers:<Customers/>,invoices:Invoices(),
     payments:(
       <div>
         <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
