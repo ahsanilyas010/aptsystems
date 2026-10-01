@@ -1144,9 +1144,9 @@ function CrmApp({ user, onLogout }) {
           <Btn sm onClick={()=>setModal({t:"addCustomer"})}>+ Add Store</Btn>
           {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
           {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
-          {user?.email==="ahsanilyas35@gmail.com"&&<Btn sm v="danger" disabled={merging} onClick={removeKnownDuplicates}>{merging?"⏳ Removing…":"🗑 Remove 15 Known Duplicates"}</Btn>}
+          {FALLBACK_EMAILS.includes(user?.email)&&<Btn sm v="danger" disabled={merging} onClick={removeKnownDuplicates}>{merging?"⏳ Removing…":"🗑 Remove 15 Known Duplicates"}</Btn>}
           <Btn sm v="secondary" onClick={()=>exportCsv("customers.csv",fil,[["id","ID"],["name","Name"],["area","Area"],["city","City"],["phone","Phone"]])}>⬇ Export</Btn>
-          {virtualStores.length>0&&<Btn sm v="secondary" disabled={importingSb} onClick={()=>importRiderStores(virtualStores)}>{importingSb?"⏳ Importing…":`⬆ Import ${virtualStores.length} Rider Store${virtualStores.length===1?"":"s"} to Sheet`}</Btn>}
+          {virtualStores.length>0&&<Btn sm v="secondary" disabled={importingSb} onClick={()=>importRiderStores(virtualStores)}>{importingSb?"⏳ Importing…":`⬆ Import ${virtualStores.length} Rider Store${virtualStores.length===1?"":"s"} to Supabase`}</Btn>}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
           {fil.map(c=>{
@@ -1700,12 +1700,12 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>{if(!f.custId){notify("Select a customer","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Received"});}}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>{if(!f.custId){notify("Select a customer","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Received"});}}>💾 Save Payment</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="💳 Collect Payment (AR) → Google Sheet" onClose={closeModal}><PayForm/></Modal>;
+      return <Modal title="💳 Collect Payment (AR)" onClose={closeModal}><PayForm/></Modal>;
     }
 
     // ── Vendor Payment (AP — vendor payments only) ────────────
@@ -1741,12 +1741,12 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Paid",vendorId:f.vendorId});}}>💾 Save to Sheet</Btn>
+              <Btn v="success" onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Paid",vendorId:f.vendorId});}}>💾 Save Payment</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="💳 Vendor Payment (AP) → Google Sheet" onClose={closeModal}><VenPayForm/></Modal>;
+      return <Modal title="💳 Vendor Payment (AP)" onClose={closeModal}><VenPayForm/></Modal>;
     }
 
     // ── Add Expense ───────────────────────────────────────────
@@ -1765,12 +1765,12 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="What is this for?"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>{if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}saveExpense(f);}}>💾 Save to Sheet</Btn>
+              <Btn onClick={()=>{if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}saveExpense(f);}}>💾 Save Expense</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="💸 Add Expense → Google Sheet" onClose={closeModal}><ExpForm/></Modal>;
+      return <Modal title="💸 Add Expense" onClose={closeModal}><ExpForm/></Modal>;
     }
 
     // ── Adjust Stock (goods receipt / correction) ─────────────
@@ -1824,12 +1824,12 @@ function CrmApp({ user, onLogout }) {
             </div>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.total)||+f.total<=0){notify("Enter a valid total","err");return;}if(!validNum(f.paid)){notify("Paid amount is invalid","err");return;}if(+f.paid>+f.total){notify("Paid cannot exceed total","err");return;}savePurchase(f);}}>💾 Save to Sheet</Btn>
+              <Btn onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.total)||+f.total<=0){notify("Enter a valid total","err");return;}if(!validNum(f.paid)){notify("Paid amount is invalid","err");return;}if(+f.paid>+f.total){notify("Paid cannot exceed total","err");return;}savePurchase(f);}}>💾 Save Purchase</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="🛒 New Purchase → Google Sheet" onClose={closeModal}><PurForm/></Modal>;
+      return <Modal title="🛒 New Purchase" onClose={closeModal}><PurForm/></Modal>;
     }
 
     // ── Add Customer ──────────────────────────────────────────
@@ -1848,12 +1848,12 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={()=>{if(!f.name.trim()){notify("Enter store name","err");return;}addCustomer(f);}}>💾 Add to Sheet</Btn>
+              <Btn onClick={()=>{if(!f.name.trim()){notify("Enter store name","err");return;}addCustomer(f);}}>💾 Add Store</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="➕ Add Store → Google Sheet" onClose={closeModal}><CustForm/></Modal>;
+      return <Modal title="➕ Add Store" onClose={closeModal}><CustForm/></Modal>;
     }
 
     // ── Add Vendor ────────────────────────────────────────────
@@ -1877,12 +1877,12 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn onClick={save}>💾 Add Vendor to Sheet</Btn>
+              <Btn onClick={save}>💾 Add Vendor</Btn>
             </div>
           </div>
         );
       };
-      return <Modal title="🏭 Add Vendor → Google Sheet" onClose={closeModal}><VenForm/></Modal>;
+      return <Modal title="🏭 Add Vendor" onClose={closeModal}><VenForm/></Modal>;
     }
 
     // ── Edit Customer ─────────────────────────────────────────
@@ -1987,7 +1987,7 @@ function CrmApp({ user, onLogout }) {
           </div>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
             <Btn sm v="secondary" onClick={()=>{closeModal();setTab("rider-stores");}}>Go to Rider Stores →</Btn>
-            <Btn sm v="success" onClick={()=>{closeModal();importRiderStores([s]);}}>⬆ Import to Sheet</Btn>
+            <Btn sm v="success" onClick={()=>{closeModal();importRiderStores([s]);}}>⬆ Import to Supabase</Btn>
           </div>
         </Modal>
       );
@@ -3207,7 +3207,7 @@ function CrmApp({ user, onLogout }) {
               <div style={{color:G.white,fontWeight:800,fontSize:12}}>APT CRM</div>
               <div style={{display:"flex",alignItems:"center",gap:4,marginTop:1}}>
                 <div style={{width:5,height:5,borderRadius:"50%",background:G.light,boxShadow:`0 0 4px ${G.light}`}}/>
-                <span style={{color:"rgba(255,255,255,0.35)",fontSize:8,letterSpacing:"0.1em",fontWeight:600}}>LIVE · SHEET + PDF</span>
+                <span style={{color:"rgba(255,255,255,0.35)",fontSize:8,letterSpacing:"0.1em",fontWeight:600}}>LIVE · SUPABASE + PDF</span>
               </div>
             </div>
           </div>
