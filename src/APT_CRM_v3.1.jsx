@@ -445,7 +445,7 @@ function CrmApp({ user, onLogout }) {
   // PDF url cache: invId → url
   const [pdfCache, setPdfCache] = useState({});
   // ── Rider Hub (Supabase data) ──────────────────────────────
-  const [sbData, setSbData] = useState({orders:[],stores:[],riders:[],locations:[],products:[],areas:[],assignments:[],riderAreas:[],riderPermissions:[]});
+  const [sbData, setSbData] = useState({orders:[],stores:[],riders:[],locations:[],products:[],areas:[],assignments:[],riderAreas:[],riderPermissions:[],riderCollections:[]});
   const [sbLoading, setSbLoading] = useState(false);
   const [sbSyncing, setSbSyncing] = useState(false);
 
@@ -453,12 +453,12 @@ function CrmApp({ user, onLogout }) {
     if (!silent) setSbLoading(true);
     setSbSyncing(true);
     try {
-      const [orders, stores, riders, locs, products, areas, assignments, riderAreas, riderPerms] = await Promise.all([
+      const [orders, stores, riders, locs, products, areas, assignments, riderAreas, riderPerms, riderCols] = await Promise.all([
         sbPost("orders"), sbPost("stores"), sbPost("riders"), sbPost("locations"),
         sbPost("products"), sbPost("areas"), sbPost("store_assignments"), sbPost("rider_areas"),
-        sbPost("rider_permissions"),
+        sbPost("rider_permissions"), sbPost("rider_payment_collections"),
       ]);
-      setSbData({ orders:orders||[], stores:stores||[], riders:riders||[], locations:locs||[], products:products||[], areas:areas||[], assignments:assignments||[], riderAreas:riderAreas||[], riderPermissions:riderPerms||[] });
+      setSbData({ orders:orders||[], stores:stores||[], riders:riders||[], locations:locs||[], products:products||[], areas:areas||[], assignments:assignments||[], riderAreas:riderAreas||[], riderPermissions:riderPerms||[], riderCollections:riderCols||[] });
     } catch(e) { /* notify set in effect below — capture lazily */ console.error("Supabase load:", e); }
     finally { setSbLoading(false); setSbSyncing(false); }
   }, []);
@@ -526,7 +526,7 @@ function CrmApp({ user, onLogout }) {
   }, [notify]);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useEffect(() => { if (tab === "customers" || RIDER_HUB_TABS.has(tab)) loadSupabase(true); }, [tab, loadSupabase]);
+  useEffect(() => { if (tab === "customers" || tab === "payments" || RIDER_HUB_TABS.has(tab)) loadSupabase(true); }, [tab, loadSupabase]);
 
   // ── Maps ──────────────────────────────────────────────────
   const customers  = data?.customers  || [];
@@ -3229,19 +3229,44 @@ function CrmApp({ user, onLogout }) {
   // ── PAGES ─────────────────────────────────────────────────
   const PAGES={
     dashboard:<Dashboard/>,customers:<Customers/>,invoices:Invoices(),
-    payments:(
-      <div>
-        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
-          <Btn sm onClick={()=>setModal({t:"recordPayment"})}>+ Record Payment</Btn>
-          <Btn sm v="secondary" onClick={()=>exportCsv("payments.csv",payments,[["id","Pay ID"],["date","Date"],["type","Type"],["partyName","Party"],["refId","Invoice"],["amount","Amount"],["notes","Notes"]])}>⬇ Export</Btn>
+    payments:(()=>{
+      const riderCols = (sbData.riderCollections||[]).map(c=>({
+        _isRider:true,
+        id:"RC-"+c.id.slice(0,8),
+        date:(c.collected_at||"").slice(0,10),
+        type:"Rider Collection",
+        partyName:c.profiles?.full_name||c.rider_id,
+        refId:c.orders?.order_no?"#"+c.orders.order_no:null,
+        amount:c.amount,
+        notes:[c.payment_method,c.notes].filter(Boolean).join(" · ")||null,
+        _sortKey:c.collected_at||"",
+      }));
+      const allPays = [...payments.map(p=>({...p,_sortKey:p.date||"",_isRider:false})),...riderCols]
+        .sort((a,b)=>b._sortKey.localeCompare(a._sortKey));
+      return (
+        <div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12,gap:8}}>
+            <Btn sm onClick={()=>setModal({t:"recordPayment"})}>+ Record Payment</Btn>
+            <Btn sm v="secondary" onClick={()=>exportCsv("payments.csv",allPays,[["id","Pay ID"],["date","Date"],["type","Type"],["partyName","Party"],["refId","Invoice"],["amount","Amount"],["notes","Notes"]])}>⬇ Export</Btn>
+          </div>
+          <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
+            <TblWrap compact heads={["Pay ID","Date","Type","Party","Invoice","Amount","Notes"]}
+              rows={allPays.map(p=>[
+                <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.id}</span>,
+                <span style={{fontSize:10,color:G.muted}}>{p.date}</span>,
+                p._isRider
+                  ? <span style={{background:"#E3F2FD",color:"#1565C0",borderRadius:6,padding:"2px 7px",fontSize:10,fontWeight:700}}>Rider Collection</span>
+                  : <Badge text={p.type}/>,
+                <span style={{fontWeight:600,fontSize:11}}>{p.partyName||p.partyId}</span>,
+                <span style={{fontSize:10,color:G.muted}}>{p.refId||"—"}</span>,
+                <span style={{fontWeight:800,color:p._isRider?"#1565C0":p.type==="Received"?G.mid:G.red,fontSize:11}}>{fmt(p.amount)}</span>,
+                <span style={{fontSize:10,color:G.muted}}>{p.notes||"—"}</span>,
+              ])}
+            />
+          </div>
         </div>
-        <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Pay ID","Date","Type","Party","Invoice","Amount","Notes"]}
-            rows={payments.map(p=>[<span style={{fontWeight:700,color:G.dark,fontSize:11}}>{p.id}</span>,<span style={{fontSize:10,color:G.muted}}>{p.date}</span>,<Badge text={p.type}/>,<span style={{fontWeight:600,fontSize:11}}>{p.partyName||p.partyId}</span>,<span style={{fontSize:10,color:G.muted}}>{p.refId||"—"}</span>,<span style={{fontWeight:800,color:p.type==="Received"?G.mid:G.red,fontSize:11}}>{fmt(p.amount)}</span>,<span style={{fontSize:10,color:G.muted}}>{p.notes||"—"}</span>])}
-          />
-        </div>
-      </div>
-    ),
+      );
+    })(),
     purchases:<Purchases/>,vendors:<Vendors/>,expenses:<Expenses/>,
     pnl:<PnL/>,arap:<ARAp/>,inventory:<Inventory/>,reports:<Reports/>,
     "rider-orders":<RiderOrdersTab/>,"rider-stores":<RiderStoresTab/>,
