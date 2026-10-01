@@ -445,7 +445,7 @@ function CrmApp({ user, onLogout }) {
   // PDF url cache: invId → url
   const [pdfCache, setPdfCache] = useState({});
   // ── Rider Hub (Supabase data) ──────────────────────────────
-  const [sbData, setSbData] = useState({orders:[],stores:[],riders:[],locations:[],products:[],areas:[],assignments:[],riderAreas:[]});
+  const [sbData, setSbData] = useState({orders:[],stores:[],riders:[],locations:[],products:[],areas:[],assignments:[],riderAreas:[],riderPermissions:[]});
   const [sbLoading, setSbLoading] = useState(false);
   const [sbSyncing, setSbSyncing] = useState(false);
 
@@ -453,11 +453,12 @@ function CrmApp({ user, onLogout }) {
     if (!silent) setSbLoading(true);
     setSbSyncing(true);
     try {
-      const [orders, stores, riders, locs, products, areas, assignments, riderAreas] = await Promise.all([
+      const [orders, stores, riders, locs, products, areas, assignments, riderAreas, riderPerms] = await Promise.all([
         sbPost("orders"), sbPost("stores"), sbPost("riders"), sbPost("locations"),
         sbPost("products"), sbPost("areas"), sbPost("store_assignments"), sbPost("rider_areas"),
+        sbPost("rider_permissions"),
       ]);
-      setSbData({ orders:orders||[], stores:stores||[], riders:riders||[], locations:locs||[], products:products||[], areas:areas||[], assignments:assignments||[], riderAreas:riderAreas||[] });
+      setSbData({ orders:orders||[], stores:stores||[], riders:riders||[], locations:locs||[], products:products||[], areas:areas||[], assignments:assignments||[], riderAreas:riderAreas||[], riderPermissions:riderPerms||[] });
     } catch(e) { /* notify set in effect below — capture lazily */ console.error("Supabase load:", e); }
     finally { setSbLoading(false); setSbSyncing(false); }
   }, []);
@@ -2110,7 +2111,10 @@ function CrmApp({ user, onLogout }) {
                   <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"3px 10px",borderRadius:20,fontSize:10,fontWeight:700,flexShrink:0}}>{o.status}</span>
                 </div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-                  <span style={{fontWeight:800,fontSize:16,color:G.dark}}>{fmt(o.total_value||o.total||0)}</span>
+                  <div>
+                    <span style={{fontWeight:800,fontSize:16,color:G.dark}}>{fmt(o.total_value||o.total||0)}</span>
+                    <span style={{marginLeft:6,fontSize:9,padding:"2px 7px",borderRadius:20,fontWeight:700,background:o.payment_status==="paid"?"#E8F5E9":"#FFF8E1",color:o.payment_status==="paid"?G.mid:"#E65100"}}>{o.payment_status==="paid"?"💵 Paid":"Unpaid"}</span>
+                  </div>
                   <div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"flex-end"}}>
                     {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
                     {o.status!=="Pending"&&o.status!=="Cancelled"&&o.status!=="Rejected"&&!o.gas_invoice_id&&<Btn sm v="secondary" disabled={!!busy} onClick={()=>startInvoice(o)}>🧾 Invoice</Btn>}
@@ -2123,14 +2127,18 @@ function CrmApp({ user, onLogout }) {
           </div>
         ) : (
           <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-            <TblWrap compact heads={["Order","Date","Store","Rider","Total","Status","GAS","Actions"]}
+            <TblWrap compact heads={["Order","Date","Store","Rider","Total","Status","Payment","GAS","Actions"]}
               rows={filtered.map(o=>[
                 <span style={{fontWeight:700,color:G.dark,fontSize:10,fontFamily:"monospace"}}>{(o.id||"").slice(0,8)}</span>,
                 <span style={{fontSize:10,color:G.muted,whiteSpace:"nowrap"}}>{(o.created_at||"").slice(0,10)||"—"}</span>,
                 <div><div style={{fontWeight:600,fontSize:11}}>{o.stores?.name||"—"}</div><div style={{fontSize:9,color:G.muted}}>{o.stores?.area||""}</div></div>,
                 <span style={{fontSize:11}}>{o.profiles?.full_name||"—"}</span>,
-                <span style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</span>,
+                <div>
+                  <div style={{fontWeight:700,fontSize:11}}>{fmt(o.total_value||o.total||0)}</div>
+                  {o.payment_status==="paid"&&o.amount_paid>0&&<div style={{fontSize:9,color:G.mid,fontWeight:600}}>Coll: {fmt(o.amount_paid)}</div>}
+                </div>,
                 <span style={{background:(STATUS_CLR[o.status]||G.muted)+"22",color:STATUS_CLR[o.status]||G.muted,padding:"2px 9px",borderRadius:20,fontSize:10,fontWeight:700}}>{o.status}</span>,
+                <span style={{fontSize:9,padding:"2px 7px",borderRadius:20,fontWeight:700,background:o.payment_status==="paid"?"#E8F5E9":"#FFF8E1",color:o.payment_status==="paid"?G.mid:"#E65100"}}>{o.payment_status==="paid"?"💵 Paid":"Unpaid"}</span>,
                 o.gas_invoice_id?<span style={{fontSize:9,color:G.mid,fontWeight:700}}>✓ {o.gas_invoice_id}</span>:<span style={{fontSize:9,color:G.muted}}>—</span>,
                 <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
                   {STATUS_NEXT[o.status]&&<Btn sm v="primary" disabled={busy===o.id} onClick={()=>advance(o)}>{busy===o.id?"…":"→ "+STATUS_NEXT[o.status]}</Btn>}
@@ -2308,11 +2316,27 @@ function CrmApp({ user, onLogout }) {
     const [editingId, setEditingId] = useState(null);
     const [form, setForm] = useState({});
     const [busy, setBusy] = useState(false);
+    const [permRiderId, setPermRiderId] = useState(null);
+    const [permEnabled, setPermEnabled] = useState(false);
+    const [permBusy, setPermBusy] = useState(false);
+
+    const permMap = Object.fromEntries(sbData.riderPermissions.map(p=>[p.rider_id,p]));
+
     const save = async () => {
       setBusy(true);
       try { await sbPost("update_rider",{id:editingId,full_name:form.full_name,mobile:form.mobile,cnic:form.cnic,city:form.city,area:form.area,bike_available:form.bike_available}); notify("✅ Rider updated"); setEditingId(null); await loadSupabase(true); }
       catch(e) { notify("❌ "+e.message,"err"); } finally { setBusy(false); }
     };
+    const openPerms = (r) => {
+      setPermEnabled(permMap[r.id]?.payment_collection_enabled ?? false);
+      setPermRiderId(r.id);
+    };
+    const savePerms = async () => {
+      setPermBusy(true);
+      try { await sbPost("set_rider_permission",{rider_id:permRiderId,payment_collection_enabled:permEnabled}); notify("✅ Permission updated"); setPermRiderId(null); await loadSupabase(true); }
+      catch(e) { notify("❌ "+e.message,"err"); } finally { setPermBusy(false); }
+    };
+
     if (sbLoading) return <div style={{padding:40,textAlign:"center",color:G.muted}}>⏳ Loading riders…</div>;
     return (
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -2321,16 +2345,23 @@ function CrmApp({ user, onLogout }) {
           <Btn sm v="secondary" onClick={()=>loadSupabase()}>↻ Refresh</Btn>
         </div>
         <div style={{background:G.card,borderRadius:12,overflow:"hidden",boxShadow:"0 2px 12px rgba(26,92,32,0.07)"}}>
-          <TblWrap compact heads={["Name","Mobile","CNIC","City","Area","Bike","Action"]}
-            rows={sbData.riders.map(r=>[
-              <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{r.full_name||"—"}</span>,
-              <span style={{fontSize:11}}>{r.mobile||"—"}</span>,
-              <span style={{fontSize:10,color:G.muted,fontFamily:"monospace"}}>{r.cnic||"—"}</span>,
-              <span style={{fontSize:11}}>{r.city||"—"}</span>,
-              <span style={{fontSize:11}}>{r.area||"—"}</span>,
-              <span style={{fontSize:10,padding:"2px 8px",borderRadius:20,background:r.bike_available?"#E8F5E9":G.pink,color:r.bike_available?G.mid:G.red,fontWeight:700}}>{r.bike_available?"Yes":"No"}</span>,
-              <Btn sm v="secondary" onClick={()=>{setEditingId(r.id);setForm({...r});}}>✏ Edit</Btn>
-            ])}
+          <TblWrap compact heads={["Name","Mobile","CNIC","City","Area","Bike","Pay Perm","Actions"]}
+            rows={sbData.riders.map(r=>{
+              const perm = permMap[r.id];
+              return [
+                <span style={{fontWeight:700,color:G.dark,fontSize:11}}>{r.full_name||"—"}</span>,
+                <span style={{fontSize:11}}>{r.mobile||"—"}</span>,
+                <span style={{fontSize:10,color:G.muted,fontFamily:"monospace"}}>{r.cnic||"—"}</span>,
+                <span style={{fontSize:11}}>{r.city||"—"}</span>,
+                <span style={{fontSize:11}}>{r.area||"—"}</span>,
+                <span style={{fontSize:10,padding:"2px 8px",borderRadius:20,background:r.bike_available?"#E8F5E9":G.pink,color:r.bike_available?G.mid:G.red,fontWeight:700}}>{r.bike_available?"Yes":"No"}</span>,
+                <span style={{fontSize:10,padding:"2px 8px",borderRadius:20,background:perm?.payment_collection_enabled?"#E8F5E9":"#FFF3E0",color:perm?.payment_collection_enabled?G.mid:"#E65100",fontWeight:700}}>{perm?.payment_collection_enabled?"✓ On":"✗ Off"}</span>,
+                <div style={{display:"flex",gap:4}}>
+                  <Btn sm v="secondary" onClick={()=>{setEditingId(r.id);setForm({...r});}}>✏ Edit</Btn>
+                  <Btn sm v="secondary" onClick={()=>openPerms(r)}>🔐 Perms</Btn>
+                </div>
+              ];
+            })}
           />
           {sbData.riders.length===0&&<div style={{padding:32,textAlign:"center",color:G.muted,fontSize:12}}>No riders found</div>}
         </div>
@@ -2354,6 +2385,32 @@ function CrmApp({ user, onLogout }) {
             </div>
           </Modal>
         )}
+        {permRiderId&&(()=>{
+          const rider = sbData.riders.find(r=>r.id===permRiderId);
+          return (
+            <Modal title={`Permissions — ${rider?.full_name||"Rider"}`} onClose={()=>setPermRiderId(null)}>
+              <div style={{display:"flex",flexDirection:"column",gap:16}}>
+                <div style={{background:G.pale,borderRadius:10,padding:"14px 16px",border:`1.5px solid ${G.border}`}}>
+                  <div style={{fontWeight:700,fontSize:13,color:G.ink,marginBottom:6}}>💳 Payment Collection</div>
+                  <div style={{fontSize:12,color:G.muted,marginBottom:10}}>When enabled, this rider can collect cash/card payments on delivered orders from the Kamai app. The backend enforces this — disabling it blocks collection even if the app is bypassed.</div>
+                  <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+                    <div
+                      onClick={()=>setPermEnabled(v=>!v)}
+                      style={{width:44,height:24,borderRadius:12,background:permEnabled?G.mid:"#ccc",position:"relative",cursor:"pointer",transition:"background 0.2s",flexShrink:0}}
+                    >
+                      <div style={{position:"absolute",top:3,left:permEnabled?22:3,width:18,height:18,borderRadius:"50%",background:"#fff",transition:"left 0.2s",boxShadow:"0 1px 4px rgba(0,0,0,0.2)"}}/>
+                    </div>
+                    <span style={{fontSize:13,fontWeight:700,color:permEnabled?G.mid:G.muted}}>{permEnabled?"Enabled":"Disabled"}</span>
+                  </label>
+                </div>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                  <Btn v="secondary" onClick={()=>setPermRiderId(null)}>Cancel</Btn>
+                  <Btn disabled={permBusy} onClick={savePerms}>{permBusy?"Saving…":"Save Permissions"}</Btn>
+                </div>
+              </div>
+            </Modal>
+          );
+        })()}
       </div>
     );
   };
