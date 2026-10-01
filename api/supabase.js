@@ -480,6 +480,32 @@ export default async function handler(req, res) {
         }
         return ok(res, { success: true, data: { snapshot: { groups: snapshotGroups } } });
       }
+      // ── Rider payment permissions ──
+      case "rider_permissions": {
+        const { data, error } = await db.from("rider_payment_permissions").select("*");
+        if (error) throw error;
+        return ok(res, { success: true, data: data ?? [] });
+      }
+      case "set_rider_permission": {
+        const { rider_id, payment_collection_enabled } = params;
+        const { error } = await db.from("rider_payment_permissions").upsert(
+          { rider_id, payment_collection_enabled, updated_at: new Date().toISOString() },
+          { onConflict: "rider_id" }
+        );
+        if (error) throw error;
+        return ok(res, { success: true });
+      }
+      case "rider_payment_collections": {
+        const [colRes, ordRes, profRes] = await Promise.all([
+          db.from("order_payment_collections").select("*").order("collected_at", { ascending: false }).limit(500),
+          db.from("orders").select("id,order_no,total_value,store_id"),
+          db.from("profiles").select("id,full_name,mobile"),
+        ]);
+        if (colRes.error) throw colRes.error;
+        const orderMap = Object.fromEntries((ordRes.data ?? []).map(o => [o.id, o]));
+        const profileMap = Object.fromEntries((profRes.data ?? []).map(p => [p.id, p]));
+        return ok(res, { success: true, data: (colRes.data ?? []).map(c => ({ ...c, orders: orderMap[c.order_id] ?? null, profiles: profileMap[c.rider_id] ?? null })) });
+      }
       case "undo_merge_customers": {
         const { groups } = params;
         for (const group of groups) {
