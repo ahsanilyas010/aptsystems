@@ -440,6 +440,14 @@ function CrmApp({ user, onLogout }) {
   const [modal, setModal]     = useState(null);
   const [search, setSearch]   = useState("");
   const [invSf, setInvSf]     = useState("All"); // Invoices status filter — lives here so it survives re-renders
+  const [storeAssignRider, setStoreAssignRider] = useState(""); // Store Assign tab's selected rider — lives here so it survives the re-render triggered by loadSupabase() after each assignment
+  const [areaAssignRider, setAreaAssignRider] = useState(""); // Areas tab's selected rider — same reason
+  // Customers() is called as a plain function (see note above it), so it must have zero hooks of
+  // its own — otherwise it registers new hooks on CrmApp the first render after the loading
+  // screen's early return, which React rejects. Its local state lives here instead.
+  const [custHideDupes, setCustHideDupes] = useState(true);
+  const [custMerging, setCustMerging] = useState(false);
+  const [custImportingSb, setCustImportingSb] = useState(false);
   const [toast, setToast]     = useState(null);
   const [lastSync, setLastSync] = useState(null);
   // PDF url cache: invId → url
@@ -1006,13 +1014,15 @@ function CrmApp({ user, onLogout }) {
   };
 
   // ── CUSTOMERS ─────────────────────────────────────────────
+  // Called as Customers(), not <Customers/>: see the note above Invoices() — otherwise
+  // the search input loses focus after each keystroke.
   const Customers = () => {
-    const [hideDupes, setHideDupes] = useState(true);
+    const hideDupes = custHideDupes, setHideDupes = setCustHideDupes;
     // Two riders syncing the same shop (or repeated manual adds) can leave duplicate Sheets rows.
     // We only collapse them in this view — nothing is deleted from the sheet, so existing invoices
     // / AR balances tied to either row stay intact. Group key = name + phone (fallback name + area).
     const custKey = (c)=>{ const n=normTxt(c.name), p=digitsOnly(c.phone); return p ? n+"|"+p : n+"|"+normTxt(c.area); };
-    const dupInfo = useMemo(()=>{
+    const dupInfo = (()=>{
       const byKey={};
       customers.forEach(c=>{ const k=custKey(c); if(!normTxt(c.name)) return; (byKey[k]=byKey[k]||[]).push(c); });
       const dupIds=new Set(), groupSize={}, groups=[];
@@ -1031,9 +1041,9 @@ function CrmApp({ user, onLogout }) {
         groups.push({ keepId: rep.id, mergeIds });
       });
       return { dupIds, groupSize, groups };
-    },[customers, invoices]);
-    const [merging, setMerging] = useState(false);
-    const [importingSb, setImportingSb] = useState(false);
+    })();
+    const merging = custMerging, setMerging = setCustMerging;
+    const importingSb = custImportingSb, setImportingSb = setCustImportingSb;
     const importRiderStores = async (stores) => {
       if(!stores.length){ notify("No unsynced rider stores to import","err"); return; }
       if(!confirm(`Import ${stores.length} rider store(s) into the Customers list in Supabase?\n(already-synced stores are skipped; stores matching an existing customer by name+phone are linked, not duplicated)`)) return;
@@ -1122,18 +1132,16 @@ function CrmApp({ user, onLogout }) {
     });
 
     // Rider stores not yet linked to any Sheets customer row — shown as read-only cards
-    const linkedStoreIds = useMemo(() => {
+    const linkedStoreIds = (() => {
       const ids = new Set();
       customers.forEach(c => { const m = c.notes?.match(/supabase_id:([^\s,]+)/); if (m) ids.add(m[1]); });
       sbData.stores.forEach(s => { if (s.gas_customer_id) ids.add(s.id); });
       return ids;
-    }, [customers, sbData.stores]);
-    const virtualStores = useMemo(() =>
-      sbData.stores
-        .filter(s => s.name && !linkedStoreIds.has(s.id))
-        .map(s => ({ _storeId: s.id, _isRiderStore: true, name: s.name, area: s.area||"", city: s.city||"", phone: s.mobile||"", contact: s.owner_name||"" }))
-        .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.area.toLowerCase().includes(search.toLowerCase()))
-    , [sbData.stores, linkedStoreIds, search]);
+    })();
+    const virtualStores = sbData.stores
+      .filter(s => s.name && !linkedStoreIds.has(s.id))
+      .map(s => ({ _storeId: s.id, _isRiderStore: true, name: s.name, area: s.area||"", city: s.city||"", phone: s.mobile||"", contact: s.owner_name||"" }))
+      .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.area.toLowerCase().includes(search.toLowerCase()));
 
     return (
       <div>
@@ -1742,7 +1750,7 @@ function CrmApp({ user, onLogout }) {
             <Inp label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))} placeholder="Reference or memo"/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}>
               <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
-              <Btn v="success" onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Paid",vendorId:f.vendorId});}}>💾 Save Payment</Btn>
+              <Btn v="success" onClick={()=>{if(!f.vendorId){notify("Select a vendor","err");return;}if(!validNum(f.amount)||+f.amount<=0){notify("Enter a valid amount","err");return;}savePayment({...f,type:"Made",vendorId:f.vendorId});}}>💾 Save Payment</Btn>
             </div>
           </div>
         );
@@ -2514,7 +2522,7 @@ function CrmApp({ user, onLogout }) {
   };
 
   const StoreAssignTab = () => {
-    const [selRider, setSelRider] = useState("");
+    const selRider = storeAssignRider, setSelRider = setStoreAssignRider;
     const [busy, setBusy] = useState(null);
     const assigned = new Set(sbData.assignments.filter(a=>a.rider_id===selRider).map(a=>a.store_id));
     const toggle = async (storeId, on) => {
@@ -2550,7 +2558,7 @@ function CrmApp({ user, onLogout }) {
   const AreasTab = () => {
     const [addForm, setAddForm] = useState({city:"",name:""});
     const [busy, setBusy] = useState(false);
-    const [selRider, setSelRider] = useState("");
+    const selRider = areaAssignRider, setSelRider = setAreaAssignRider;
     const [areaBusy, setAreaBusy] = useState(null);
     const assignedAreas = new Set(sbData.riderAreas.filter(a=>a.rider_id===selRider).map(a=>a.area_id));
     const addArea = async () => {
@@ -3228,7 +3236,7 @@ function CrmApp({ user, onLogout }) {
 
   // ── PAGES ─────────────────────────────────────────────────
   const PAGES={
-    dashboard:<Dashboard/>,customers:<Customers/>,invoices:Invoices(),
+    dashboard:<Dashboard/>,customers:Customers(),invoices:Invoices(),
     payments:(()=>{
       const riderCols = (sbData.riderCollections||[]).map(c=>({
         _isRider:true,
