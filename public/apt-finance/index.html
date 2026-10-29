@@ -726,9 +726,11 @@ function maybeShowInstallBanner() {
   const sub = document.getElementById('install-sub');
   const btn = document.getElementById('install-action-btn');
   if (deferredPrompt) {
+    // Android / Chrome — native install
     sub.textContent = 'Tap Install to add to your home screen.';
     btn.style.display = '';
   } else if (isIOS()) {
+    // iOS Safari — manual steps
     sub.innerHTML = 'Tap the <strong>Share</strong> button (⬆️) in Safari, then "Add to Home Screen".';
     btn.style.display = 'none';
   } else {
@@ -750,6 +752,7 @@ function dismissInstallBanner() {
   try { localStorage.setItem('apt-finance-install-dismissed', '1'); } catch(e) {}
 }
 
+// Show iOS banner after 1.5 s
 setTimeout(maybeShowInstallBanner, 1500);
 
 // ── AUTH ──
