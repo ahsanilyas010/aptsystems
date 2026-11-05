@@ -9,7 +9,7 @@
 //  + Rider sync indicator
 // ============================================================
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
@@ -229,21 +229,41 @@ const TblWrap = ({heads,rows,compact}) => (
 );
 
 // ── PDF Download Button ───────────────────────────────────────
+// The cached URL is owned by the parent (pdfCache) and passed in as `pdfUrl`.
+// Local state only bridges the gap until the parent's cache catches up, and is
+// reset whenever this button instance is reused for a different invoice
+// (table rows are keyed by index, so React reuses the same instance when the
+// list is re-sorted, filtered or a new invoice is inserted at the top).
 const PdfBtn = ({ invId, pdfUrl, onGenerate, sm }) => {
   const [loading, setLoading] = useState(false);
-  const [url, setUrl] = useState(pdfUrl || "");
+  const [localUrl, setLocalUrl] = useState("");
+  const currentInv = useRef(invId);
+
+  useEffect(() => {
+    currentInv.current = invId;
+    setLocalUrl("");
+    setLoading(false);
+  }, [invId]);
+
+  const url = pdfUrl || localUrl;
 
   const handle = async () => {
-    if (url) { window.open(url, "_blank"); return; }
+    if (url) { window.open(url, "_blank", "noopener,noreferrer"); return; }
+    const requestedInv = invId;
     setLoading(true);
     try {
-      const result = await invoicePost(invId);
-      setUrl(result.url);
-      window.open(result.url, "_blank");
-      if (onGenerate) onGenerate(result.url);
+      const result = await invoicePost(requestedInv);
+      const newUrl = result.pdfUrl || result.url;
+      // Ignore the response if this button has since been reused for another invoice
+      if (currentInv.current !== requestedInv) return;
+      setLocalUrl(newUrl);
+      window.open(newUrl, "_blank", "noopener,noreferrer");
+      if (onGenerate) onGenerate(newUrl);
     } catch(e) {
-      alert("PDF error: " + e.message);
-    } finally { setLoading(false); }
+      if (currentInv.current === requestedInv) alert("PDF error: " + e.message);
+    } finally {
+      if (currentInv.current === requestedInv) setLoading(false);
+    }
   };
 
   return (
