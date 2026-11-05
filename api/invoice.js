@@ -132,7 +132,10 @@ export default async function handler(req, res) {
     if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`);
 
     const { data: urlData } = db.storage.from(BUCKET).getPublicUrl(fileName);
-    const pdfUrl = urlData.publicUrl;
+    // The object path is the same on every regeneration (upsert), so append a
+    // version stamp: otherwise the browser / Supabase CDN can keep serving the
+    // previous PDF after an invoice has been edited and regenerated.
+    const pdfUrl = `${urlData.publicUrl}?v=${Date.now()}`;
 
     await db.from("invoices").update({ pdf_url: pdfUrl }).eq("id", invId);
 
