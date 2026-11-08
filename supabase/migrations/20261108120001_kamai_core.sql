@@ -228,6 +228,42 @@ drop trigger if exists kamai_memberships_audit on public.kamai_memberships;
 create trigger kamai_memberships_audit after insert or update or delete on public.kamai_memberships
   for each row execute function public.kamai_audit_trigger();
 
+-- Owners may edit display/legal/operational fields of their tenant, never the platform-controlled ones:
+-- status, type, slug and the credit pause switches (settings.credit_paused*). invoice_prefix is frozen once invoices exist.
+create or replace function public.kamai_tenants_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare
+  k text;
+begin
+  if (select private.kamai_is_platform_admin()) or (select private.kamai_is_server()) then
+    return new;
+  end if;
+  if new.status is distinct from old.status or new.type is distinct from old.type
+     or new.slug is distinct from old.slug or new.created_by is distinct from old.created_by then
+    raise exception 'kamai: status, type and slug are platform-controlled' using errcode = '42501';
+  end if;
+  foreach k in array array['credit_paused','credit_paused_by','credit_paused_at'] loop
+    if (new.settings -> k) is distinct from (old.settings -> k) then
+      raise exception 'kamai: settings.% is platform-controlled', k using errcode = '42501';
+    end if;
+  end loop;
+  if new.invoice_prefix is distinct from old.invoice_prefix and old.invoice_prefix is not null
+     and to_regclass('public.kamai_invoices') is not null then
+    if exists (select 1 from public.kamai_invoices i where i.tenant_id = old.id) then
+      raise exception 'kamai: invoice_prefix cannot change once invoices exist' using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+revoke execute on function public.kamai_tenants_guard() from public, anon, authenticated;
+drop trigger if exists kamai_tenants_guard on public.kamai_tenants;
+create trigger kamai_tenants_guard before update on public.kamai_tenants
+  for each row execute function public.kamai_tenants_guard();
+
 -- ---------------------------------------------------------------------------
 -- private helpers (SECURITY DEFINER, STABLE, search_path '', owned by postgres)
 -- ---------------------------------------------------------------------------
@@ -250,12 +286,15 @@ as $$
      and coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role', '') not in ('authenticated','anon');
 $$;
 
+-- All membership helpers ignore memberships of tenants that are not 'active' (suspended/archived tenants lose access;
+-- platform admins and the server are unaffected).
 create or replace function private.kamai_user_tenants()
 returns setof uuid
 language sql stable security definer
 set search_path = ''
 as $$
   select m.tenant_id from public.kamai_memberships m
+  join public.kamai_tenants t on t.id = m.tenant_id and t.status = 'active'
   where m.user_id = (select auth.uid()) and m.status = 'active';
 $$;
 
@@ -265,6 +304,7 @@ language sql stable security definer
 set search_path = ''
 as $$
   select exists (select 1 from public.kamai_memberships m
+                 join public.kamai_tenants tt on tt.id = m.tenant_id and tt.status = 'active'
                  where m.tenant_id = t and m.user_id = (select auth.uid()) and m.status = 'active');
 $$;
 
@@ -274,22 +314,40 @@ language sql stable security definer
 set search_path = ''
 as $$
   select exists (select 1 from public.kamai_memberships m
+                 join public.kamai_tenants tt on tt.id = m.tenant_id and tt.status = 'active'
                  where m.tenant_id = t and m.user_id = (select auth.uid())
                    and m.status = 'active' and m.role = any(roles));
 $$;
 
+-- Tenants reachable through an active cross-tenant link of one of the given kinds. Only privileged roles of the
+-- GRANTEE tenant (owner, manager, finance, viewer) benefit: store, rider and booker members of the grantee never read
+-- the grantor's data. link.scope is reserved and not enforced in v1.
+create or replace function private.kamai_linked_tenants(p_kinds text[])
+returns setof uuid
+language sql stable security definer
+set search_path = ''
+as $$
+  select l.grantor_tenant_id from public.kamai_tenant_links l
+  join public.kamai_tenants g on g.id = l.grantor_tenant_id and g.status = 'active'
+  where l.active and l.kind = any(p_kinds)
+    and l.grantee_tenant_id in (select m.tenant_id from public.kamai_memberships m
+                                join public.kamai_tenants gt on gt.id = m.tenant_id and gt.status = 'active'
+                                where m.user_id = (select auth.uid()) and m.status = 'active'
+                                  and m.role in ('owner','manager','finance','viewer'));
+$$;
+
+-- Generic read set used by the tenant-scoped select policies: own tenants plus grantors of a LENDER link
+-- (lender_view = loan-book data: stores, orders, invoices, credit, payments). brand_view and supplier links are NOT in this
+-- set: a brand reads only its own products (brand_tenant_id) and sell-through through kamai_brand_sellthrough() (009);
+-- a supplier reads catalog and prices through kamai_linked_tenants(array['supplier']) in the catalog policies (002).
 create or replace function private.kamai_readable_tenants()
 returns setof uuid
 language sql stable security definer
 set search_path = ''
 as $$
-  select m.tenant_id from public.kamai_memberships m
-  where m.user_id = (select auth.uid()) and m.status = 'active'
+  select private.kamai_user_tenants()
   union
-  select l.grantor_tenant_id from public.kamai_tenant_links l
-  where l.active
-    and l.grantee_tenant_id in (select m2.tenant_id from public.kamai_memberships m2
-                                where m2.user_id = (select auth.uid()) and m2.status = 'active');
+  select private.kamai_linked_tenants(array['lender_view']);
 $$;
 
 -- private.kamai_store_scope(uuid) is defined in 002 (needs kamai_stores).
@@ -300,18 +358,19 @@ language sql stable security definer
 set search_path = ''
 as $$
   select m.role from public.kamai_memberships m
+  join public.kamai_tenants tt on tt.id = m.tenant_id and tt.status = 'active'
   where m.tenant_id = t and m.user_id = (select auth.uid()) and m.status = 'active';
 $$;
 
 revoke execute on function
   private.kamai_is_platform_admin(), private.kamai_is_server(), private.kamai_user_tenants(),
   private.kamai_is_member(uuid), private.kamai_has_role(uuid, text[]), private.kamai_readable_tenants(),
-  private.kamai_my_role(uuid)
+  private.kamai_my_role(uuid), private.kamai_linked_tenants(text[])
 from public, anon;
 grant execute on function
   private.kamai_is_platform_admin(), private.kamai_is_server(), private.kamai_user_tenants(),
   private.kamai_is_member(uuid), private.kamai_has_role(uuid, text[]), private.kamai_readable_tenants(),
-  private.kamai_my_role(uuid)
+  private.kamai_my_role(uuid), private.kamai_linked_tenants(text[])
 to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
@@ -319,7 +378,8 @@ to authenticated, service_role;
 -- ---------------------------------------------------------------------------
 drop policy if exists kamai_tenants_select on public.kamai_tenants;
 create policy kamai_tenants_select on public.kamai_tenants for select to authenticated
-  using ((select private.kamai_is_platform_admin()) or id in (select private.kamai_readable_tenants()));
+  using ((select private.kamai_is_platform_admin()) or id in (select private.kamai_readable_tenants())
+         or id in (select private.kamai_linked_tenants(array['brand_view','supplier'])));
 drop policy if exists kamai_tenants_insert on public.kamai_tenants;
 create policy kamai_tenants_insert on public.kamai_tenants for insert to authenticated
   with check ((select private.kamai_is_platform_admin()));
@@ -444,7 +504,7 @@ as $$
                'role', m.role,
                'store_id', m.store_id,
                'status', m.status,
-               'tenant', jsonb_build_object('id', t.id, 'slug', t.slug, 'name', t.name, 'type', t.type)
+               'tenant', jsonb_build_object('id', t.id, 'slug', t.slug, 'name', t.name, 'type', t.type, 'status', t.status)
              ) order by t.name)
       from public.kamai_memberships m
       join public.kamai_tenants t on t.id = m.tenant_id
@@ -466,13 +526,15 @@ set search_path = ''
 as $$
 declare
   v_row public.kamai_memberships;
+  v_old public.kamai_memberships;
+  v_priv boolean;
 begin
-  if not ((select private.kamai_is_platform_admin()) or (select private.kamai_is_server())
-          or (select private.kamai_has_role(p_tenant, array['owner','manager']))) then
+  v_priv := (select private.kamai_is_platform_admin()) or (select private.kamai_is_server())
+            or (select private.kamai_has_role(p_tenant, array['owner']));
+  if not (v_priv or (select private.kamai_has_role(p_tenant, array['manager']))) then
     raise exception 'kamai: not allowed to manage members of this tenant' using errcode = '42501';
   end if;
-  if p_role = 'owner' and not ((select private.kamai_is_platform_admin()) or (select private.kamai_is_server())
-          or (select private.kamai_has_role(p_tenant, array['owner']))) then
+  if p_role = 'owner' and not v_priv then
     raise exception 'kamai: only owners or platform admins may add owners' using errcode = '42501';
   end if;
   if p_role = 'store' and p_store_id is null then
@@ -480,6 +542,18 @@ begin
   end if;
   if p_store_id is not null and not exists (select 1 from public.kamai_stores s where s.id = p_store_id and s.tenant_id = p_tenant) then
     raise exception 'kamai: store % does not belong to tenant %', p_store_id, p_tenant;
+  end if;
+  -- existing membership: managers may never modify an owner (demote, re-scope or re-enable); owners cannot remove the last owner
+  select * into v_old from public.kamai_memberships where tenant_id = p_tenant and user_id = p_user for update;
+  if found and v_old.role = 'owner' then
+    if not v_priv then
+      raise exception 'kamai: only owners or platform admins may modify an owner' using errcode = '42501';
+    end if;
+    if p_role <> 'owner' and v_old.status = 'active'
+       and not exists (select 1 from public.kamai_memberships o
+                       where o.tenant_id = p_tenant and o.role = 'owner' and o.status = 'active' and o.user_id <> p_user) then
+      raise exception 'kamai: cannot demote the last owner' using errcode = '22023';
+    end if;
   end if;
   insert into public.kamai_memberships as m (tenant_id, user_id, role, store_id, status, created_by)
   values (p_tenant, p_user, p_role, p_store_id, 'active', auth.uid())

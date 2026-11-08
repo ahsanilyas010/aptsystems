@@ -155,6 +155,8 @@ declare
   v_wa text;
   v_contact uuid;
   v_msg uuid;
+  v_errors jsonb := '[]'::jsonb;
+  v_n_err int := 0;
 begin
   if not ((select private.kamai_is_platform_admin()) or (select private.kamai_is_server())) then
     raise exception 'kamai: platform admins or the scheduler only' using errcode = '42501';
@@ -165,8 +167,17 @@ begin
              where exists (select 1 from public.kamai_credit_exposures x where x.store_id = st.id and x.status = 'open')
                 or exists (select 1 from public.kamai_orders o where o.store_id = st.id and o.created_at >= now() - interval '90 days')
                 or exists (select 1 from public.kamai_credit_exposures x where x.store_id = st.id and x.closed_at >= now() - interval '180 days') loop
-    perform private.kamai_evaluate_store_core(v_s.id);
-    v_n_eval := v_n_eval + 1;
+    -- one bad store/policy must never abort the job for everyone else
+    begin
+      perform private.kamai_evaluate_store_core(v_s.id);
+      v_n_eval := v_n_eval + 1;
+    exception when others then
+      v_n_err := v_n_err + 1;
+      if jsonb_array_length(v_errors) < 20 then
+        v_errors := v_errors || jsonb_build_object('step', 'evaluate', 'store_id', v_s.id, 'error', sqlerrm);
+      end if;
+      raise warning 'kamai_run_daily: evaluate store % failed: %', v_s.id, sqlerrm;
+    end;
   end loop;
 
   -- 2. snapshots for every store with open exposure
@@ -190,6 +201,7 @@ begin
 
   -- 3. kill rules: PAR30 per tenant
   for v_t in select t.id, t.settings from public.kamai_tenants t where t.status = 'active' loop
+   begin
     select coalesce(sum(outstanding_minor) filter (where max_dpd > 30), 0)::numeric / nullif(sum(outstanding_minor), 0)
       into v_par30 from public.kamai_credit_snapshots where tenant_id = v_t.id and snapshot_date = v_today;
     v_thr := coalesce((private.kamai_rules(v_t.id) ->> 'par30_pause_pct')::numeric, 8) / 100;
@@ -202,19 +214,31 @@ begin
       update public.kamai_tenants set settings = (settings - 'credit_paused' - 'credit_paused_by' - 'credit_paused_at') where id = v_t.id;
       v_unpaused := v_unpaused + 1;
     end if;
+   exception when others then
+    v_n_err := v_n_err + 1;
+    if jsonb_array_length(v_errors) < 20 then
+      v_errors := v_errors || jsonb_build_object('step', 'par30', 'tenant_id', v_t.id, 'error', sqlerrm);
+    end if;
+    raise warning 'kamai_run_daily: PAR30 rule for tenant % failed: %', v_t.id, sqlerrm;
+   end;
   end loop;
 
-  -- 4. dunning
+  -- 4. dunning: per exposure the latest active rule whose offset has been reached (offset_days <= days overdue), once per
+  -- exposure and step. A missed run therefore fires the step the next day instead of skipping it, without back-filling
+  -- every earlier step.
   for v_x in
     select x.id as exposure_id, x.tenant_id, x.store_id, x.outstanding_minor, x.due_date, r.id as rule_id, r.offset_days, r.action,
            r.template_name, s.name as store_name, s.mobile, s.wa_opt_in_at, i.display_number
     from public.kamai_credit_exposures x
-    join public.kamai_dunning_rules r on r.tenant_id = x.tenant_id and r.active and r.offset_days = (v_today - x.due_date)
+    join lateral (select dr.* from public.kamai_dunning_rules dr
+                  where dr.tenant_id = x.tenant_id and dr.active and dr.offset_days <= (v_today - x.due_date)
+                  order by dr.offset_days desc limit 1) r on true
     join public.kamai_stores s on s.id = x.store_id
     left join public.kamai_invoices i on i.id = x.invoice_id
     where x.status = 'open' and x.outstanding_minor > 0
       and not exists (select 1 from public.kamai_dunning_events e where e.exposure_id = x.id and e.offset_days = r.offset_days)
   loop
+   begin
     v_msg := null;
     if v_x.mobile is not null and v_x.wa_opt_in_at is not null then
       v_wa := regexp_replace(v_x.mobile, '[^0-9]', '', 'g');
@@ -232,8 +256,16 @@ begin
     end if;
     insert into public.kamai_dunning_events (tenant_id, exposure_id, store_id, rule_id, offset_days, action, status, wa_message_id)
     values (v_x.tenant_id, v_x.exposure_id, v_x.store_id, v_x.rule_id, v_x.offset_days, v_x.action,
-            case when v_msg is null then 'skipped' else 'queued' end, v_msg);
+            case when v_msg is null then 'skipped' else 'queued' end, v_msg)
+    on conflict do nothing;
     v_n_dun := v_n_dun + 1;
+   exception when others then
+    v_n_err := v_n_err + 1;
+    if jsonb_array_length(v_errors) < 20 then
+      v_errors := v_errors || jsonb_build_object('step', 'dunning', 'exposure_id', v_x.exposure_id, 'error', sqlerrm);
+    end if;
+    raise warning 'kamai_run_daily: dunning for exposure % failed: %', v_x.exposure_id, sqlerrm;
+   end;
   end loop;
 
   -- 5. KPI snapshot
@@ -242,11 +274,101 @@ begin
   on conflict (snapshot_date) do update set metrics = excluded.metrics;
 
   return jsonb_build_object('date', v_today, 'stores_evaluated', v_n_eval, 'snapshots', v_n_snap, 'dunning_events', v_n_dun,
-                            'wa_queued', v_n_msg, 'tenants_paused', v_paused, 'tenants_unpaused', v_unpaused);
+                            'wa_queued', v_n_msg, 'tenants_paused', v_paused, 'tenants_unpaused', v_unpaused,
+                            'errors', v_n_err, 'error_samples', v_errors);
 end;
 $$;
 revoke execute on function public.kamai_run_daily() from public, anon;
 grant execute on function public.kamai_run_daily() to authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- credit policy validation: reject malformed rules at write time (the engine casts these keys with ::int / ::numeric)
+-- ---------------------------------------------------------------------------
+create or replace function private.kamai_rules_error(r jsonb)
+returns text
+language plpgsql immutable
+set search_path = ''
+as $$
+declare
+  k text;
+  t text;
+  v jsonb;
+  e record;
+  sub text;
+begin
+  if r is null or jsonb_typeof(r) <> 'object' then return 'rules must be a json object'; end if;
+  foreach k in array array['grace_days','pause_dpd','freeze_dpd','writeoff_dpd'] loop
+    if r ? k then
+      v := r -> k;
+      if jsonb_typeof(v) <> 'number' or (v #>> '{}')::numeric <> trunc((v #>> '{}')::numeric)
+         or (v #>> '{}')::numeric not between 0 and 3650 then return k || ' must be an integer between 0 and 3650'; end if;
+    end if;
+  end loop;
+  foreach k in array array['max_store_exposure_pct_of_tenant','par30_pause_pct'] loop
+    if r ? k then
+      v := r -> k;
+      if jsonb_typeof(v) <> 'number' or (v #>> '{}')::numeric not between 0 and 100 then return k || ' must be a number between 0 and 100'; end if;
+    end if;
+  end loop;
+  if r ? 'tenant_exposure_cap_minor' then
+    v := r -> 'tenant_exposure_cap_minor';
+    if jsonb_typeof(v) not in ('number','null') then return 'tenant_exposure_cap_minor must be a number or null'; end if;
+    if jsonb_typeof(v) = 'number' and ((v #>> '{}')::numeric <> trunc((v #>> '{}')::numeric) or (v #>> '{}')::numeric not between 0 and 9000000000000000)
+      then return 'tenant_exposure_cap_minor must be a non-negative integer'; end if;
+  end if;
+  if r ? 'tiers' then
+    if jsonb_typeof(r -> 'tiers') <> 'object' then return 'tiers must be an object'; end if;
+    for e in select key, value from jsonb_each(r -> 'tiers') loop
+      if e.key !~ '^[0-3]$' or jsonb_typeof(e.value) <> 'object' then return 'tiers keys must be 0..3 with object values'; end if;
+      foreach k in array array['limit_minor','tenor_days'] loop
+        if e.value ? k then
+          v := e.value -> k;
+          if jsonb_typeof(v) <> 'number' or (v #>> '{}')::numeric <> trunc((v #>> '{}')::numeric)
+             or (v #>> '{}')::numeric not between 0 and 9000000000000000 then return 'tiers.' || e.key || '.' || k || ' must be a non-negative integer'; end if;
+        end if;
+      end loop;
+    end loop;
+  end if;
+  if r ? 'tier_requirements' then
+    if jsonb_typeof(r -> 'tier_requirements') <> 'object' then return 'tier_requirements must be an object'; end if;
+    for e in select key, value from jsonb_each(r -> 'tier_requirements') loop
+      if e.key !~ '^[0-3]$' or jsonb_typeof(e.value) <> 'object' then return 'tier_requirements keys must be 0..3 with object values'; end if;
+      foreach k in array array['orders','days','closed','max_dpd_180','on_time'] loop
+        if e.value ? k then
+          v := e.value -> k;
+          if jsonb_typeof(v) <> 'number' or (v #>> '{}')::numeric not between 0 and 100000
+             or (k <> 'on_time' and (v #>> '{}')::numeric <> trunc((v #>> '{}')::numeric)) then
+            return 'tier_requirements.' || e.key || '.' || k || ' must be a number in range (integer except on_time)';
+          end if;
+        end if;
+      end loop;
+    end loop;
+  end if;
+  return null;
+end;
+$$;
+revoke execute on function private.kamai_rules_error(jsonb) from public, anon;
+grant execute on function private.kamai_rules_error(jsonb) to authenticated, service_role;
+
+create or replace function public.kamai_credit_policies_validate()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_err text;
+begin
+  v_err := private.kamai_rules_error(new.rules);
+  if v_err is not null then
+    raise exception 'kamai: invalid credit policy: %', v_err using errcode = '22023';
+  end if;
+  return new;
+end;
+$$;
+revoke execute on function public.kamai_credit_policies_validate() from public, anon, authenticated;
+drop trigger if exists kamai_credit_policies_validate on public.kamai_credit_policies;
+create trigger kamai_credit_policies_validate before insert or update of rules on public.kamai_credit_policies
+  for each row execute function public.kamai_credit_policies_validate();
 
 -- ---------------------------------------------------------------------------
 -- legacy import (read-only on legacy tables)

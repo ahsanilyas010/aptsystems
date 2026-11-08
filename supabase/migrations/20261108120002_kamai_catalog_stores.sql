@@ -41,7 +41,8 @@ create table if not exists public.kamai_price_lists (
   active      boolean not null default true,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
-  unique (tenant_id, name)
+  unique (tenant_id, name),
+  unique (tenant_id, id)            -- target of tenant-consistent composite FKs
 );
 create unique index if not exists kamai_price_lists_default_uidx on public.kamai_price_lists (tenant_id) where is_default;
 create index if not exists kamai_price_lists_tenant_idx on public.kamai_price_lists (tenant_id);
@@ -67,7 +68,6 @@ create table if not exists public.kamai_products (
   sale_type          text not null default 'Goods at standard rate (default)',
   is_third_schedule  boolean not null default false,
   retail_price_minor bigint check (retail_price_minor is null or retail_price_minor >= 0),
-  cost_price_minor   bigint check (cost_price_minor is null or cost_price_minor >= 0),
   trade_price_minor  bigint not null default 0 check (trade_price_minor >= 0),
   image_url          text,
   pack_size          text,
@@ -75,7 +75,8 @@ create table if not exists public.kamai_products (
   created_by         uuid,
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now(),
-  unique (tenant_id, sku)
+  unique (tenant_id, sku),
+  unique (tenant_id, id)            -- target of tenant-consistent composite FKs
 );
 create unique index if not exists kamai_products_tenant_gtin_uidx on public.kamai_products (tenant_id, gtin14) where gtin14 is not null;
 create index if not exists kamai_products_tenant_active_idx on public.kamai_products (tenant_id) where active;
@@ -89,16 +90,33 @@ alter table public.kamai_products enable row level security;
 create table if not exists public.kamai_price_list_items (
   id             uuid primary key default gen_random_uuid(),
   tenant_id      uuid not null references public.kamai_tenants(id) on delete cascade,
-  price_list_id  uuid not null references public.kamai_price_lists(id) on delete cascade,
-  product_id     uuid not null references public.kamai_products(id) on delete cascade,
+  price_list_id  uuid not null,
+  product_id     uuid not null,
   price_minor    bigint not null check (price_minor >= 0),
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
-  unique (price_list_id, product_id)
+  unique (price_list_id, product_id),
+  -- the list and the product must belong to the SAME tenant as the item (no cross-tenant price poisoning)
+  foreign key (tenant_id, price_list_id) references public.kamai_price_lists (tenant_id, id) on delete cascade,
+  foreign key (tenant_id, product_id) references public.kamai_products (tenant_id, id) on delete cascade
 );
 create index if not exists kamai_price_list_items_tenant_idx on public.kamai_price_list_items (tenant_id);
 create index if not exists kamai_price_list_items_product_idx on public.kamai_price_list_items (product_id);
 alter table public.kamai_price_list_items enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- kamai_product_costs: distributor cost price, split out of kamai_products so that store, rider, brand and
+-- linked readers of the catalog can never read it (readable by owner, manager, finance only).
+-- ---------------------------------------------------------------------------
+create table if not exists public.kamai_product_costs (
+  product_id       uuid primary key,
+  tenant_id        uuid not null references public.kamai_tenants(id) on delete cascade,
+  cost_price_minor bigint not null check (cost_price_minor >= 0),
+  updated_at       timestamptz not null default now(),
+  foreign key (tenant_id, product_id) references public.kamai_products (tenant_id, id) on delete cascade
+);
+create index if not exists kamai_product_costs_tenant_idx on public.kamai_product_costs (tenant_id);
+alter table public.kamai_product_costs enable row level security;
 
 -- ---------------------------------------------------------------------------
 -- kamai_stores
@@ -118,7 +136,7 @@ create table if not exists public.kamai_stores (
   longitude           double precision check (longitude is null or (longitude between -180 and 180)),
   category            text,
   tier                text check (tier is null or tier in ('A','B','C','default')),
-  price_list_id       uuid references public.kamai_price_lists(id) on delete set null,
+  price_list_id       uuid,
   payment_terms_days  smallint not null default 0 check (payment_terms_days between 0 and 90),
   credit_limit_minor  bigint not null default 0 check (credit_limit_minor >= 0),
   credit_status       text not null default 'cash_only' check (credit_status in ('cash_only','active','paused','frozen','written_off')),
@@ -129,7 +147,9 @@ create table if not exists public.kamai_stores (
   status              text not null default 'active' check (status in ('active','inactive','blocked')),
   created_by          uuid,
   created_at          timestamptz not null default now(),
-  updated_at          timestamptz not null default now()
+  updated_at          timestamptz not null default now(),
+  unique (tenant_id, id),
+  foreign key (tenant_id, price_list_id) references public.kamai_price_lists (tenant_id, id) on delete set null (price_list_id)
 );
 create unique index if not exists kamai_stores_tenant_legacy_uidx on public.kamai_stores (tenant_id, legacy_store_id) where legacy_store_id is not null;
 create index if not exists kamai_stores_tenant_idx on public.kamai_stores (tenant_id, status);
@@ -168,6 +188,10 @@ drop trigger if exists kamai_products_touch on public.kamai_products;
 create trigger kamai_products_touch before update on public.kamai_products for each row execute function public.kamai_touch_updated_at();
 drop trigger if exists kamai_price_list_items_touch on public.kamai_price_list_items;
 create trigger kamai_price_list_items_touch before update on public.kamai_price_list_items for each row execute function public.kamai_touch_updated_at();
+drop trigger if exists kamai_product_costs_touch on public.kamai_product_costs;
+create trigger kamai_product_costs_touch before update on public.kamai_product_costs for each row execute function public.kamai_touch_updated_at();
+drop trigger if exists kamai_product_costs_audit on public.kamai_product_costs;
+create trigger kamai_product_costs_audit after insert or update or delete on public.kamai_product_costs for each row execute function public.kamai_audit_trigger();
 drop trigger if exists kamai_stores_touch on public.kamai_stores;
 create trigger kamai_stores_touch before update on public.kamai_stores for each row execute function public.kamai_touch_updated_at();
 
@@ -177,6 +201,47 @@ drop trigger if exists kamai_price_list_items_audit on public.kamai_price_list_i
 create trigger kamai_price_list_items_audit after insert or update or delete on public.kamai_price_list_items for each row execute function public.kamai_audit_trigger();
 drop trigger if exists kamai_stores_audit on public.kamai_stores;
 create trigger kamai_stores_audit after insert or update or delete on public.kamai_stores for each row execute function public.kamai_audit_trigger();
+
+-- ---------------------------------------------------------------------------
+-- Reference validation triggers: store_id on memberships/invites must be a store of the same tenant;
+-- products.brand_tenant_id must be a tenant of type 'brand'.
+-- ---------------------------------------------------------------------------
+create or replace function public.kamai_check_store_tenant()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if new.store_id is not null and not exists (select 1 from public.kamai_stores s where s.id = new.store_id and s.tenant_id = new.tenant_id) then
+    raise exception 'kamai: store % does not belong to tenant %', new.store_id, new.tenant_id using errcode = '23503';
+  end if;
+  return new;
+end;
+$$;
+revoke execute on function public.kamai_check_store_tenant() from public, anon, authenticated;
+drop trigger if exists kamai_memberships_store_chk on public.kamai_memberships;
+create trigger kamai_memberships_store_chk before insert or update of store_id, tenant_id on public.kamai_memberships
+  for each row execute function public.kamai_check_store_tenant();
+drop trigger if exists kamai_invites_store_chk on public.kamai_invites;
+create trigger kamai_invites_store_chk before insert or update of store_id, tenant_id on public.kamai_invites
+  for each row execute function public.kamai_check_store_tenant();
+
+create or replace function public.kamai_check_product_brand()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if new.brand_tenant_id is not null and not exists (select 1 from public.kamai_tenants t where t.id = new.brand_tenant_id and t.type = 'brand') then
+    raise exception 'kamai: brand_tenant_id must be a tenant of type brand' using errcode = '23503';
+  end if;
+  return new;
+end;
+$$;
+revoke execute on function public.kamai_check_product_brand() from public, anon, authenticated;
+drop trigger if exists kamai_products_brand_chk on public.kamai_products;
+create trigger kamai_products_brand_chk before insert or update of brand_tenant_id on public.kamai_products
+  for each row execute function public.kamai_check_product_brand();
 
 -- ---------------------------------------------------------------------------
 -- private.kamai_store_scope(t): store ids a user may see inside tenant t.
@@ -202,9 +267,55 @@ grant execute on function private.kamai_store_scope(uuid) to authenticated, serv
 -- ---------------------------------------------------------------------------
 -- Policies
 -- ---------------------------------------------------------------------------
+-- Price visibility (finding: store and rider members must not read every tier / other stores' lists):
+--   owner, manager, booker, finance, viewer of the tenant: everything; supplier-linked tenants: everything;
+--   store members: the default list plus the list assigned to their own store; brand tenants: items of their own products;
+--   riders and every other reader: nothing.
+create or replace function private.kamai_my_store_price_list(t uuid)
+returns uuid
+language sql stable security definer
+set search_path = ''
+as $$
+  select s.price_list_id from public.kamai_memberships m
+  join public.kamai_stores s on s.id = m.store_id and s.tenant_id = m.tenant_id
+  where m.tenant_id = t and m.user_id = (select auth.uid()) and m.status = 'active' and m.role = 'store';
+$$;
+
+create or replace function private.kamai_price_list_visible(t uuid, pl uuid)
+returns boolean
+language sql stable security definer
+set search_path = ''
+as $$
+  select (select private.kamai_has_role(t, array['owner','manager','booker','finance','viewer']))
+      or t in (select private.kamai_linked_tenants(array['supplier']))
+      or ((select private.kamai_has_role(t, array['store']))
+          and exists (select 1 from public.kamai_price_lists l
+                      where l.id = pl and l.tenant_id = t and (l.is_default or l.id = (select private.kamai_my_store_price_list(t)))))
+      or exists (select 1 from public.kamai_price_list_items i join public.kamai_products p on p.id = i.product_id
+                 where i.price_list_id = pl and i.tenant_id = t and p.brand_tenant_id in (select private.kamai_user_tenants()));
+$$;
+
+create or replace function private.kamai_price_item_visible(t uuid, pl uuid, pr uuid)
+returns boolean
+language sql stable security definer
+set search_path = ''
+as $$
+  select (select private.kamai_has_role(t, array['owner','manager','booker','finance','viewer']))
+      or t in (select private.kamai_linked_tenants(array['supplier']))
+      or ((select private.kamai_has_role(t, array['store']))
+          and exists (select 1 from public.kamai_price_lists l
+                      where l.id = pl and l.tenant_id = t and (l.is_default or l.id = (select private.kamai_my_store_price_list(t)))))
+      or exists (select 1 from public.kamai_products p where p.id = pr and p.tenant_id = t
+                 and p.brand_tenant_id in (select private.kamai_user_tenants()));
+$$;
+revoke execute on function private.kamai_my_store_price_list(uuid), private.kamai_price_list_visible(uuid, uuid),
+  private.kamai_price_item_visible(uuid, uuid, uuid) from public, anon;
+grant execute on function private.kamai_my_store_price_list(uuid), private.kamai_price_list_visible(uuid, uuid),
+  private.kamai_price_item_visible(uuid, uuid, uuid) to authenticated, service_role;
+
 drop policy if exists kamai_price_lists_select on public.kamai_price_lists;
 create policy kamai_price_lists_select on public.kamai_price_lists for select to authenticated
-  using ((select private.kamai_is_platform_admin()) or tenant_id in (select private.kamai_readable_tenants()));
+  using ((select private.kamai_is_platform_admin()) or (select private.kamai_price_list_visible(tenant_id, id)));
 drop policy if exists kamai_price_lists_write on public.kamai_price_lists;
 create policy kamai_price_lists_write on public.kamai_price_lists for all to authenticated
   using ((select private.kamai_is_platform_admin()) or (select private.kamai_has_role(tenant_id, array['owner','manager'])))
@@ -213,7 +324,8 @@ create policy kamai_price_lists_write on public.kamai_price_lists for all to aut
 drop policy if exists kamai_products_select on public.kamai_products;
 create policy kamai_products_select on public.kamai_products for select to authenticated
   using ((select private.kamai_is_platform_admin())
-         or tenant_id in (select private.kamai_readable_tenants())
+         or tenant_id in (select private.kamai_user_tenants())
+         or tenant_id in (select private.kamai_linked_tenants(array['supplier']))
          or brand_tenant_id in (select private.kamai_user_tenants()));
 drop policy if exists kamai_products_insert on public.kamai_products;
 create policy kamai_products_insert on public.kamai_products for insert to authenticated
@@ -228,11 +340,19 @@ create policy kamai_products_delete on public.kamai_products for delete to authe
 
 drop policy if exists kamai_price_list_items_select on public.kamai_price_list_items;
 create policy kamai_price_list_items_select on public.kamai_price_list_items for select to authenticated
-  using ((select private.kamai_is_platform_admin()) or tenant_id in (select private.kamai_readable_tenants()));
+  using ((select private.kamai_is_platform_admin()) or (select private.kamai_price_item_visible(tenant_id, price_list_id, product_id)));
 drop policy if exists kamai_price_list_items_write on public.kamai_price_list_items;
 create policy kamai_price_list_items_write on public.kamai_price_list_items for all to authenticated
   using ((select private.kamai_is_platform_admin()) or (select private.kamai_has_role(tenant_id, array['owner','manager'])))
   with check ((select private.kamai_is_platform_admin()) or (select private.kamai_has_role(tenant_id, array['owner','manager'])));
+
+drop policy if exists kamai_product_costs_select on public.kamai_product_costs;
+create policy kamai_product_costs_select on public.kamai_product_costs for select to authenticated
+  using ((select private.kamai_is_platform_admin()) or (select private.kamai_has_role(tenant_id, array['owner','manager','finance'])));
+drop policy if exists kamai_product_costs_write on public.kamai_product_costs;
+create policy kamai_product_costs_write on public.kamai_product_costs for all to authenticated
+  using ((select private.kamai_is_platform_admin()) or (select private.kamai_has_role(tenant_id, array['owner','manager','finance'])))
+  with check ((select private.kamai_is_platform_admin()) or (select private.kamai_has_role(tenant_id, array['owner','manager','finance'])));
 
 drop policy if exists kamai_stores_select on public.kamai_stores;
 create policy kamai_stores_select on public.kamai_stores for select to authenticated
@@ -269,6 +389,10 @@ grant all on public.kamai_products to service_role;
 revoke all on public.kamai_price_list_items from anon;
 grant select, insert, update, delete on public.kamai_price_list_items to authenticated;
 grant all on public.kamai_price_list_items to service_role;
+
+revoke all on public.kamai_product_costs from anon;
+grant select, insert, update, delete on public.kamai_product_costs to authenticated;
+grant all on public.kamai_product_costs to service_role;
 
 revoke all on public.kamai_stores from anon;
 grant select, insert, update, delete on public.kamai_stores to authenticated;

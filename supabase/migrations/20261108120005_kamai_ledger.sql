@@ -163,7 +163,8 @@ as $$
     ('5200','Commission expense','expense','debit',false),
     ('5300','Financing cost','expense','debit',false),
     ('5400','Credit loss','expense','debit',false),
-    ('5500','Collection charges','expense','debit',false)
+    ('5500','Collection charges','expense','debit',false),
+    ('5600','Cash shortage / overage','expense','debit',false)
   ) as v(code, name, type, side, ctl)
   on conflict (tenant_id, code) do nothing;
 $$;

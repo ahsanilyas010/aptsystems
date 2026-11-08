@@ -205,7 +205,8 @@ declare
   v_used bigint;
   v_fin public.kamai_financings;
 begin
-  select * into v_f from public.kamai_facilities where id = p_facility_id;
+  -- lock the facility row: serialises concurrent advances so the limit check below cannot race
+  select * into v_f from public.kamai_facilities where id = p_facility_id for update;
   if not found then
     raise exception 'kamai: facility not found' using errcode = '22023';
   end if;
@@ -259,20 +260,33 @@ as $$
 declare
   v_fin public.kamai_financings;
   v_new bigint;
+  v_cover bigint;
 begin
   select * into v_fin from public.kamai_financings where id = p_financing_id for update;
   if not found then
     raise exception 'kamai: financing not found' using errcode = '22023';
   end if;
   if not ((select private.kamai_is_platform_admin()) or (select private.kamai_is_server())
-          or (select private.kamai_has_role(v_fin.lender_tenant_id, array['owner','manager','finance']))
-          or (select private.kamai_has_role(v_fin.tenant_id, array['owner','manager','finance']))) then
-    raise exception 'kamai: not allowed to settle this financing' using errcode = '42501';
+          or (select private.kamai_has_role(v_fin.lender_tenant_id, array['owner','manager','finance']))) then
+    -- the borrower (distributor) can never mark its own financing as repaid
+    raise exception 'kamai: only the lender or a platform admin may settle this financing' using errcode = '42501';
   end if;
   if p_amount_minor is null or p_amount_minor <= 0 or p_amount_minor > v_fin.disbursed_minor - v_fin.repaid_minor then
     raise exception 'kamai: amount must be between 1 and the outstanding financing' using errcode = '22023';
   end if;
   v_new := v_fin.repaid_minor + p_amount_minor;
+  -- Repayment must be backed by ledger-verified money: the store payments allocated to the financed exposure that are
+  -- bank-matched or verified (kamai_payments.status matched|verified). Platform admins and the server may override.
+  if not ((select private.kamai_is_platform_admin()) or (select private.kamai_is_server())) then
+    select coalesce(sum(a.amount_minor), 0) into v_cover
+    from public.kamai_payment_allocations a
+    join public.kamai_payments p on p.id = a.payment_id and p.status in ('matched','verified')
+    where a.exposure_id = v_fin.exposure_id;
+    if v_new > v_cover then
+      raise exception 'kamai: repayment not covered by verified payments (REPAYMENT_NOT_VERIFIED): verified % < repaid after this call %', v_cover, v_new
+        using errcode = '22023';
+    end if;
+  end if;
   update public.kamai_financings set repaid_minor = v_new,
          status = case when v_new >= disbursed_minor then 'settled' else 'partially_repaid' end
   where id = p_financing_id returning * into v_fin;

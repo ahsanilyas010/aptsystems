@@ -127,6 +127,11 @@ begin
   if found then
     return v_id;
   end if;
+  -- invoices are issued on delivered goods only: never for booked/cancelled/rejected orders, whose
+  -- quantities and prices can still change (the delivery re-price would otherwise leave a stale invoice)
+  if v_o.fulfilment_status not in ('delivered','disputed') then
+    raise exception 'kamai: an invoice can only be issued for a delivered order (state %)', v_o.fulfilment_status using errcode = '22023';
+  end if;
   select * into v_t from public.kamai_tenants where id = v_o.tenant_id;
   select * into v_s from public.kamai_stores where id = v_o.store_id;
   v_delivered := v_o.delivered_at is not null;

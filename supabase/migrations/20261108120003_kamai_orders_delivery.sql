@@ -126,9 +126,6 @@ alter table public.kamai_order_events enable row level security;
 create table if not exists public.kamai_delivery_proofs (
   order_id               uuid primary key references public.kamai_orders(id) on delete cascade,
   tenant_id              uuid not null references public.kamai_tenants(id) on delete cascade,
-  otp_hash               text,
-  otp_expires_at         timestamptz,
-  otp_attempts           int not null default 0,
   otp_verified_at        timestamptz,
   delivered_lat          double precision,
   delivered_lng          double precision,
@@ -156,6 +153,20 @@ create table if not exists public.kamai_delivery_proofs (
 );
 create index if not exists kamai_delivery_proofs_tenant_idx on public.kamai_delivery_proofs (tenant_id);
 alter table public.kamai_delivery_proofs enable row level security;
+
+-- OTP hash, expiry and attempt counter live here, NOT on kamai_delivery_proofs (which the rider can read):
+-- RLS is enabled with no policy and no grant to anon/authenticated, so only SECURITY DEFINER functions touch it.
+create table if not exists public.kamai_delivery_otp_secrets (
+  order_id       uuid primary key references public.kamai_orders(id) on delete cascade,
+  tenant_id      uuid not null references public.kamai_tenants(id) on delete cascade,
+  otp_hash       text not null,
+  expires_at     timestamptz not null,
+  attempts       int not null default 0,
+  issue_count    int not null default 1,
+  last_issued_at timestamptz not null default now()
+);
+create index if not exists kamai_delivery_otp_secrets_tenant_idx on public.kamai_delivery_otp_secrets (tenant_id);
+alter table public.kamai_delivery_otp_secrets enable row level security;
 
 -- plain OTP, visible to the store (so it can read it out / show it), written only by functions
 create table if not exists public.kamai_delivery_otps (
@@ -226,6 +237,9 @@ grant all on public.kamai_order_events to service_role;
 revoke all on public.kamai_delivery_proofs from anon;
 grant select on public.kamai_delivery_proofs to authenticated;
 grant all on public.kamai_delivery_proofs to service_role;
+
+revoke all on public.kamai_delivery_otp_secrets from anon, authenticated;
+grant all on public.kamai_delivery_otp_secrets to service_role;
 
 revoke all on public.kamai_delivery_otps from anon;
 grant select on public.kamai_delivery_otps to authenticated;
@@ -468,9 +482,9 @@ begin
   if v_o.fulfilment_status not in ('booked','credit_approved','packed','dispatched') then
     raise exception 'kamai: cannot assign a rider to an order in state %', v_o.fulfilment_status using errcode = '22023';
   end if;
-  if not (exists (select 1 from public.kamai_memberships m
-                  where m.tenant_id = v_o.tenant_id and m.user_id = p_rider_user_id and m.role = 'rider' and m.status = 'active')
-          or exists (select 1 from public.user_roles r where r.user_id = p_rider_user_id and r.role = 'rider')) then
+  -- tenant-scoped: the rider must hold an active 'rider' membership in THIS tenant (no global user_roles fallback)
+  if not exists (select 1 from public.kamai_memberships m
+                 where m.tenant_id = v_o.tenant_id and m.user_id = p_rider_user_id and m.role = 'rider' and m.status = 'active') then
     raise exception 'kamai: user is not a rider for this tenant' using errcode = '22023';
   end if;
   update public.kamai_orders set rider_user_id = p_rider_user_id where id = p_order_id returning * into v_o;
@@ -493,26 +507,46 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_o public.kamai_orders;
+  v_o    public.kamai_orders;
+  v_s    public.kamai_delivery_otp_secrets;
+  v_priv boolean;
+  v_n    bigint;
   v_code text;
-  v_exp timestamptz := now() + interval '24 hours';
+  v_exp  timestamptz := now() + interval '24 hours';
 begin
-  select * into v_o from public.kamai_orders where id = p_order_id;
+  select * into v_o from public.kamai_orders where id = p_order_id for update;
   if not found then
     raise exception 'kamai: order not found' using errcode = '22023';
   end if;
-  if not ((select private.kamai_can(v_o.tenant_id, array['owner','manager','booker']))
-          or (v_o.rider_user_id is not null and v_o.rider_user_id = (select auth.uid()))) then
+  v_priv := (select private.kamai_can(v_o.tenant_id, array['owner','manager']));
+  -- the assigned rider must still be an active rider member of the order's tenant
+  if not (v_priv
+          or (select private.kamai_can(v_o.tenant_id, array['booker']))
+          or (v_o.rider_user_id is not null and v_o.rider_user_id = (select auth.uid())
+              and (select private.kamai_has_role(v_o.tenant_id, array['rider'])))) then
     raise exception 'kamai: not allowed to issue a delivery OTP' using errcode = '42501';
   end if;
   if v_o.fulfilment_status <> 'dispatched' then
     raise exception 'kamai: OTP can only be issued for a dispatched order' using errcode = '22023';
   end if;
-  v_code := lpad((floor(random() * 1000000))::int::text, 6, '0');
-  insert into public.kamai_delivery_proofs (order_id, tenant_id, otp_hash, otp_expires_at, otp_attempts)
-  values (p_order_id, v_o.tenant_id, extensions.crypt(v_code, extensions.gen_salt('bf', 8)), v_exp, 0)
+  select * into v_s from public.kamai_delivery_otp_secrets where order_id = p_order_id for update;
+  if found and not v_priv then
+    -- reissue resets the attempt counter, so it is throttled: 60 s apart, 3 issues per order for non-managers
+    if v_s.last_issued_at > now() - interval '60 seconds' then
+      raise exception 'kamai: OTP was issued moments ago (OTP_RATE_LIMITED)' using errcode = '22023';
+    end if;
+    if v_s.issue_count >= 3 then
+      raise exception 'kamai: OTP reissue limit reached, ask a manager (OTP_REISSUE_LIMIT)' using errcode = '22023';
+    end if;
+  end if;
+  -- CSPRNG; 32 random bits mod 10^6 (bias < 0.03%)
+  v_n := (('x' || encode(extensions.gen_random_bytes(4), 'hex'))::bit(32))::bigint;
+  v_code := lpad((v_n % 1000000)::text, 6, '0');
+  insert into public.kamai_delivery_otp_secrets as s (order_id, tenant_id, otp_hash, expires_at, attempts, issue_count, last_issued_at)
+  values (p_order_id, v_o.tenant_id, extensions.crypt(p_order_id::text || ':' || v_code, extensions.gen_salt('bf', 8)), v_exp, 0, 1, now())
   on conflict (order_id) do update
-    set otp_hash = excluded.otp_hash, otp_expires_at = excluded.otp_expires_at, otp_attempts = 0;
+    set otp_hash = excluded.otp_hash, expires_at = excluded.expires_at, attempts = 0,
+        issue_count = s.issue_count + 1, last_issued_at = now();
   insert into public.kamai_delivery_otps (order_id, tenant_id, code, expires_at)
   values (p_order_id, v_o.tenant_id, v_code, v_exp)
   on conflict (order_id) do update set code = excluded.code, expires_at = excluded.expires_at, created_at = now();
@@ -548,6 +582,7 @@ declare
   v_o        public.kamai_orders;
   v_store    public.kamai_stores;
   v_proof    public.kamai_delivery_proofs;
+  v_sec      public.kamai_delivery_otp_secrets;
   v_tenant   public.kamai_tenants;
   v_radius   double precision;
   v_dist     double precision;
@@ -567,13 +602,16 @@ declare
   v_ordered_total bigint;
   v_today    date := (now() at time zone 'Asia/Karachi')::date;
   v_attempts int;
+  v_acc      double precision;
 begin
   select * into v_o from public.kamai_orders where id = p_order_id for update;
   if not found then
     raise exception 'kamai: order not found' using errcode = '22023';
   end if;
+  -- the assigned rider must still be an active rider member of the order's tenant
   if not ((select private.kamai_can(v_o.tenant_id, array['owner','manager']))
-          or (v_o.rider_user_id is not null and v_o.rider_user_id = (select auth.uid()))) then
+          or (v_o.rider_user_id is not null and v_o.rider_user_id = (select auth.uid())
+              and (select private.kamai_has_role(v_o.tenant_id, array['rider'])))) then
     raise exception 'kamai: only the assigned rider or a manager may confirm delivery' using errcode = '42501';
   end if;
   if v_o.fulfilment_status <> 'dispatched' then
@@ -583,20 +621,27 @@ begin
   select * into v_tenant from public.kamai_tenants where id = v_o.tenant_id;
   select * into v_proof from public.kamai_delivery_proofs where order_id = p_order_id for update;
 
+  -- take the store's credit-account lock before any exposure is created, so credit decisions
+  -- (which hold the same lock) never see a half-moved pending/open balance
+  if v_o.payment_mode = 'credit' then
+    perform 1 from public.kamai_credit_accounts where store_id = v_o.store_id for update;
+  end if;
+
   -- OTP
   if p_otp is not null and btrim(p_otp) <> '' then
-    if not found or v_proof.otp_hash is null then
+    select * into v_sec from public.kamai_delivery_otp_secrets where order_id = p_order_id for update;
+    if not found then
       raise exception 'kamai: no OTP has been issued for this order' using errcode = '22023';
     end if;
-    if v_proof.otp_attempts >= 5 then
+    if v_sec.attempts >= 5 then
       return jsonb_build_object('ok', false, 'error', 'OTP_LOCKED');
     end if;
-    if v_proof.otp_expires_at < now() then
+    if v_sec.expires_at < now() then
       return jsonb_build_object('ok', false, 'error', 'OTP_EXPIRED');
     end if;
-    if extensions.crypt(btrim(p_otp), v_proof.otp_hash) <> v_proof.otp_hash then
-      update public.kamai_delivery_proofs set otp_attempts = otp_attempts + 1 where order_id = p_order_id
-      returning otp_attempts into v_attempts;
+    if extensions.crypt(p_order_id::text || ':' || btrim(p_otp), v_sec.otp_hash) <> v_sec.otp_hash then
+      update public.kamai_delivery_otp_secrets set attempts = attempts + 1 where order_id = p_order_id
+      returning attempts into v_attempts;
       return jsonb_build_object('ok', false, 'error', 'OTP_INVALID', 'attempts_left', greatest(0, 5 - v_attempts));
     end if;
   else
@@ -610,7 +655,9 @@ begin
   v_radius := coalesce(nullif(v_tenant.settings ->> 'geofence_radius_m', '')::double precision, 150);
   if p_lat is not null and p_lng is not null and v_store.latitude is not null and v_store.longitude is not null then
     v_dist := public.kamai_distance_m(p_lat, p_lng, v_store.latitude, v_store.longitude);
-    v_geo_ok := v_dist <= greatest(v_radius, coalesce(p_accuracy_m, 0));
+    -- device-reported accuracy may widen the fence, but never by more than 100 m (a spoofed 1e6 would void the check)
+    v_acc := least(greatest(coalesce(p_accuracy_m, 0), 0), 100);
+    v_geo_ok := v_dist <= greatest(v_radius, v_acc);
   else
     v_dist := null;
     v_geo_ok := null;
@@ -657,6 +704,7 @@ begin
     dispute_window_ends_at = now() + make_interval(hours => v_hours)
   where order_id = p_order_id;
   delete from public.kamai_delivery_otps where order_id = p_order_id;
+  delete from public.kamai_delivery_otp_secrets where order_id = p_order_id;
 
   if v_status = 'refused' then
     perform private.kamai_do_transition(p_order_id, 'cancelled', 'refused at door: ' || v_override,
@@ -738,6 +786,9 @@ begin
     raise exception 'kamai: only the store may dispute its delivery' using errcode = '42501';
   end if;
   select * into v_p from public.kamai_delivery_proofs where order_id = p_order_id;
+  if found and v_p.resolution is not null then
+    raise exception 'kamai: this delivery dispute was already resolved (DISPUTE_ALREADY_RESOLVED)' using errcode = '22023';
+  end if;
   if v_o.fulfilment_status <> 'delivered' or not found or v_p.dispute_window_ends_at is null or v_p.dispute_window_ends_at < now() then
     raise exception 'kamai: order is not in a disputable state (DISPUTE_WINDOW_CLOSED)' using errcode = '22023';
   end if;
@@ -758,11 +809,18 @@ set search_path = ''
 as $$
 declare
   v_o public.kamai_orders;
+  v_p public.kamai_delivery_proofs;
   v_x record;
   v_credit bigint := coalesce(p_credit_minor, 0);
+  v_prior bigint;
+  v_apply bigint := 0;
+  v_unapplied bigint := 0;
+  v_net bigint;
+  v_tax bigint;
   v_serial bigint;
   v_cn uuid;
   v_inv record;
+  v_lines jsonb;
 begin
   select * into v_o from public.kamai_orders where id = p_order_id for update;
   if not found then
@@ -777,26 +835,47 @@ begin
   if coalesce(btrim(p_resolution), '') = '' then
     raise exception 'kamai: resolution text is required' using errcode = '22023';
   end if;
-  if v_credit < 0 or v_credit > v_o.total_minor then
-    raise exception 'kamai: credit must be between 0 and the order total' using errcode = '22023';
+  select * into v_p from public.kamai_delivery_proofs where order_id = p_order_id for update;
+  v_prior := coalesce(v_p.credit_minor, 0);
+  -- a dispute is resolved once (kamai_dispute_delivery refuses a second one); cap on what is not yet credited
+  if v_credit < 0 or v_credit > v_o.total_minor - v_prior then
+    raise exception 'kamai: credit must be between 0 and the order total not yet credited (%)', v_o.total_minor - v_prior using errcode = '22023';
   end if;
 
   if v_credit > 0 then
+    -- split the credit into net and tax in the order's own ratio
+    v_net := case when v_o.total_minor > 0 then round(v_credit::numeric * v_o.subtotal_minor / v_o.total_minor)::bigint else v_credit end;
+    v_tax := v_credit - v_net;
+
     select * into v_x from public.kamai_credit_exposures where order_id = p_order_id for update;
-    if found then
+    if found and v_x.status = 'open' then
+      v_apply := least(v_credit, v_x.outstanding_minor);
       update public.kamai_credit_exposures set
-        credited_minor = credited_minor + least(v_credit, outstanding_minor),
-        outstanding_minor = outstanding_minor - least(v_credit, outstanding_minor),
-        status = case when outstanding_minor - least(v_credit, outstanding_minor) = 0 then 'paid' else status end,
-        closed_at = case when outstanding_minor - least(v_credit, outstanding_minor) = 0 then now() else closed_at end
+        credited_minor = credited_minor + v_apply,
+        outstanding_minor = outstanding_minor - v_apply,
+        status = case when outstanding_minor - v_apply = 0 then 'paid' else status end,
+        closed_at = case when outstanding_minor - v_apply = 0 then now() else closed_at end
       where id = v_x.id;
+      -- anything beyond what is still owed (already paid) stays on the store's 1200 sub-ledger as an unapplied credit
+      v_unapplied := v_credit - v_apply;
+    elsif found then
+      v_unapplied := v_credit;
+    else
+      v_apply := v_credit;   -- COD order: no exposure row, the credit simply reduces the receivable
     end if;
-    perform private.kamai_post_entry_core(v_o.tenant_id, 'order:' || p_order_id || ':dispute-credit', 'dispute', p_order_id::text, now(),
-      'Dispute credit for order ' || v_o.order_no,
-      jsonb_build_array(
-        jsonb_build_object('account_code', '4100', 'direction', 'debit', 'amount_minor', v_credit),
-        jsonb_build_object('account_code', '1200', 'direction', 'credit', 'amount_minor', v_credit,
-                           'party_type', 'store', 'party_id', v_o.store_id::text)));
+
+    v_lines := case when v_net > 0 then jsonb_build_array(
+      jsonb_build_object('account_code', '4100', 'direction', 'debit', 'amount_minor', v_net)) else '[]'::jsonb end
+      || case when v_tax > 0 then jsonb_build_array(
+           jsonb_build_object('account_code', '2450', 'direction', 'debit', 'amount_minor', v_tax)) else '[]'::jsonb end
+      || case when v_apply > 0 then jsonb_build_array(
+           jsonb_build_object('account_code', '1200', 'direction', 'credit', 'amount_minor', v_apply,
+                              'party_type', 'store', 'party_id', v_o.store_id::text)) else '[]'::jsonb end
+      || case when v_unapplied > 0 then jsonb_build_array(
+           jsonb_build_object('account_code', '1200', 'direction', 'credit', 'amount_minor', v_unapplied,
+                              'party_type', 'store', 'party_id', v_o.store_id::text, 'memo', 'unapplied credit (refund due)')) else '[]'::jsonb end;
+    perform private.kamai_post_entry_core(v_o.tenant_id, 'order:' || p_order_id || ':dispute-credit:' || v_prior, 'dispute', p_order_id::text, now(),
+      'Dispute credit for order ' || v_o.order_no, v_lines);
     -- credit note
     select * into v_inv from public.kamai_invoices where id = v_o.invoice_id;
     if found then
@@ -806,16 +885,17 @@ begin
          buyer_ntn_cnic, buyer_registration_type, total_excl_st_minor, sales_tax_minor, total_incl_minor, due_date, status, ref_invoice_id)
       values (v_o.tenant_id, v_serial, split_part(v_inv.display_number, '-', 1) || '-' || lpad(v_serial::text, 6, '0'),
               'Credit Note', (now() at time zone 'Asia/Karachi')::date, null, v_o.store_id, v_inv.seller_snapshot, v_inv.buyer_snapshot,
-              v_inv.buyer_ntn_cnic, v_inv.buyer_registration_type, v_credit, 0, v_credit, null, 'issued', v_inv.id)
+              v_inv.buyer_ntn_cnic, v_inv.buyer_registration_type, v_net, v_tax, v_credit, null, 'issued', v_inv.id)
       returning id into v_cn;
     end if;
   end if;
 
   perform private.kamai_do_transition(p_order_id, 'delivered', 'dispute resolved: ' || p_resolution,
     jsonb_build_object('credit_minor', v_credit, 'credit_note_id', v_cn), (select auth.uid()));
-  update public.kamai_delivery_proofs set resolved_at = now(), resolution = p_resolution, credit_minor = v_credit
+  update public.kamai_delivery_proofs set resolved_at = now(), resolution = p_resolution, credit_minor = v_prior + v_credit
   where order_id = p_order_id;
-  return jsonb_build_object('order_id', p_order_id, 'credit_minor', v_credit, 'credit_note_id', v_cn);
+  return jsonb_build_object('order_id', p_order_id, 'credit_minor', v_credit, 'credit_note_id', v_cn,
+                            'unapplied_minor', v_unapplied);
 end;
 $$;
 revoke execute on function public.kamai_resolve_dispute(uuid, text, bigint) from public, anon;
