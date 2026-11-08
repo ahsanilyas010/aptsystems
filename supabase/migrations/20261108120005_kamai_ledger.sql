@@ -251,6 +251,31 @@ revoke execute on function public.kamai_post_entry(uuid, text, text, text, times
 grant execute on function public.kamai_post_entry(uuid, text, text, text, timestamptz, text, jsonb) to authenticated, service_role;
 
 -- reversing entry (corrections never edit history)
+create or replace function private.kamai_reverse_entry_core(p_entry_id uuid, p_memo text default null)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_e public.kamai_ledger_entries;
+begin
+  select * into v_e from public.kamai_ledger_entries where id = p_entry_id;
+  if not found then
+    raise exception 'kamai: entry not found' using errcode = '22023';
+  end if;
+  return private.kamai_post_entry_core(v_e.tenant_id, 'reverse:' || p_entry_id, 'reversal', p_entry_id::text, now(),
+    coalesce(p_memo, 'Reversal of ' || coalesce(v_e.memo, p_entry_id::text)),
+    (select jsonb_agg(jsonb_build_object(
+        'account_code', a.code, 'direction', case when l.direction = 'debit' then 'credit' else 'debit' end,
+        'amount_minor', l.amount_minor, 'party_type', l.party_type, 'party_id', l.party_id))
+     from public.kamai_ledger_lines l join public.kamai_ledger_accounts a on a.id = l.account_id
+     where l.entry_id = p_entry_id), p_entry_id);
+end;
+$$;
+revoke execute on function private.kamai_reverse_entry_core(uuid, text) from public, anon, authenticated;
+grant execute on function private.kamai_reverse_entry_core(uuid, text) to service_role;
+
 create or replace function public.kamai_reverse_entry(p_entry_id uuid, p_memo text default null)
 returns uuid
 language plpgsql
@@ -259,7 +284,6 @@ set search_path = ''
 as $$
 declare
   v_e public.kamai_ledger_entries;
-  v_new uuid;
 begin
   select * into v_e from public.kamai_ledger_entries where id = p_entry_id;
   if not found then
@@ -268,14 +292,7 @@ begin
   if not (select private.kamai_can(v_e.tenant_id, array['owner','manager','finance'])) then
     raise exception 'kamai: not allowed to reverse ledger entries' using errcode = '42501';
   end if;
-  v_new := private.kamai_post_entry_core(v_e.tenant_id, 'reverse:' || p_entry_id, 'reversal', p_entry_id::text, now(),
-    coalesce(p_memo, 'Reversal of ' || coalesce(v_e.memo, p_entry_id::text)),
-    (select jsonb_agg(jsonb_build_object(
-        'account_code', a.code, 'direction', case when l.direction = 'debit' then 'credit' else 'debit' end,
-        'amount_minor', l.amount_minor, 'party_type', l.party_type, 'party_id', l.party_id))
-     from public.kamai_ledger_lines l join public.kamai_ledger_accounts a on a.id = l.account_id
-     where l.entry_id = p_entry_id), p_entry_id);
-  return v_new;
+  return private.kamai_reverse_entry_core(p_entry_id, p_memo);
 end;
 $$;
 revoke execute on function public.kamai_reverse_entry(uuid, text) from public, anon;

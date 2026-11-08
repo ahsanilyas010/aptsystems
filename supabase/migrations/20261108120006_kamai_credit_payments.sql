@@ -107,9 +107,19 @@ create table if not exists public.kamai_payments (
   notes             text,
   order_id          uuid references public.kamai_orders(id),
   legacy_payment_id text,
+  client_key        text check (client_key is null or length(client_key) between 1 and 128),  -- client idempotency key
+  reported_by       uuid,                -- set when a store member reported (claimed) the payment; never allocated until verified
+  settled_at        timestamptz,         -- allocation + ledger posting done (cash on record, non-cash once verified)
+  order_applied_minor bigint not null default 0 check (order_applied_minor >= 0),  -- part applied straight to a COD order
+  verified_by       uuid,
+  verified_at       timestamptz,
+  reversed_at       timestamptz,
+  reversal_reason   text,
   created_at        timestamptz not null default now()
 );
-create unique index if not exists kamai_payments_extref_uidx on public.kamai_payments (tenant_id, lower(external_ref)) where external_ref is not null;
+-- a rejected / reversed payment frees its external reference
+create unique index if not exists kamai_payments_extref_uidx on public.kamai_payments (tenant_id, lower(external_ref)) where external_ref is not null and status <> 'rejected';
+create unique index if not exists kamai_payments_client_key_uidx on public.kamai_payments (tenant_id, client_key) where client_key is not null;
 create index if not exists kamai_payments_store_idx on public.kamai_payments (store_id, collected_at desc);
 create index if not exists kamai_payments_tenant_idx on public.kamai_payments (tenant_id, collected_at desc);
 create index if not exists kamai_payments_collector_idx on public.kamai_payments (collected_by, collected_at) where collected_by is not null;
@@ -123,6 +133,7 @@ create table if not exists public.kamai_payment_allocations (
   payment_id    uuid not null references public.kamai_payments(id) on delete cascade,
   exposure_id   uuid not null references public.kamai_credit_exposures(id),
   amount_minor  bigint not null check (amount_minor > 0),
+  reversed_at   timestamptz,
   created_at    timestamptz not null default now()
 );
 create index if not exists kamai_payment_allocations_payment_idx on public.kamai_payment_allocations (payment_id);
@@ -204,6 +215,8 @@ create table if not exists public.kamai_bank_lines (
 create index if not exists kamai_bank_lines_tenant_idx on public.kamai_bank_lines (tenant_id, line_date desc);
 create index if not exists kamai_bank_lines_payment_idx on public.kamai_bank_lines (matched_payment_id) where matched_payment_id is not null;
 create index if not exists kamai_bank_lines_open_idx on public.kamai_bank_lines (statement_id) where match_status = 'unmatched';
+-- one bank line per payment
+create unique index if not exists kamai_bank_lines_payment_uidx on public.kamai_bank_lines (matched_payment_id) where matched_payment_id is not null;
 alter table public.kamai_bank_lines enable row level security;
 
 create table if not exists public.kamai_cash_deposits (
@@ -219,6 +232,8 @@ create table if not exists public.kamai_cash_deposits (
   variance_minor   bigint not null default 0,
   status           text not null default 'submitted' check (status in ('open','submitted','reconciled','variance')),
   notes            text,
+  ledger_entry_id  uuid,                 -- current ledger entry (posted only by finance confirmation)
+  post_version     int not null default 0,
   created_by       uuid,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
@@ -545,14 +560,21 @@ begin
   insert into public.kamai_credit_accounts (store_id, tenant_id, policy_id)
   values (v_o.store_id, v_o.tenant_id, v_policy)
   on conflict (store_id) do nothing;
-  select * into v_a from public.kamai_credit_accounts where store_id = v_o.store_id;
+  -- serialise concurrent decisions / deliveries / payments for this store: the limit check below reads
+  -- exposure that those paths change
+  select * into v_a from public.kamai_credit_accounts where store_id = v_o.store_id for update;
+  v_cap := nullif(v_rules ->> 'tenant_exposure_cap_minor', '')::bigint;
+  if v_cap is not null then
+    -- tenant-wide cap: one decision at a time per tenant
+    perform pg_advisory_xact_lock(hashtextextended('kamai_credit:' || v_o.tenant_id::text, 0));
+  end if;
 
   select coalesce(sum(outstanding_minor), 0) into v_open
   from public.kamai_credit_exposures where store_id = v_o.store_id and status = 'open';
   select coalesce(sum(total_minor), 0) into v_pending
   from public.kamai_orders
   where store_id = v_o.store_id and id <> v_o.id and payment_mode = 'credit'
-    and fulfilment_status in ('booked','credit_approved','packed','dispatched');
+    and fulfilment_status in ('credit_approved','packed','dispatched');   -- held / unapproved booked orders do not count
   v_exposure := v_open + v_pending;
   v_limit := v_a.limit_minor;
 
@@ -573,13 +595,12 @@ begin
     if v_a.status = 'active' and v_exposure + v_o.total_minor > v_limit then
       v_reasons := array_append(v_reasons, 'LIMIT_EXCEEDED'::text);
     end if;
-    v_cap := nullif(v_rules ->> 'tenant_exposure_cap_minor', '')::bigint;
     if v_cap is not null then
       select coalesce(sum(outstanding_minor), 0) into v_ten_exp from public.kamai_credit_exposures
       where tenant_id = v_o.tenant_id and status = 'open';
       v_ten_exp := v_ten_exp + coalesce((select sum(total_minor) from public.kamai_orders
         where tenant_id = v_o.tenant_id and id <> v_o.id and payment_mode = 'credit'
-          and fulfilment_status in ('booked','credit_approved','packed','dispatched')), 0);
+          and fulfilment_status in ('credit_approved','packed','dispatched')), 0);
       if v_ten_exp + v_o.total_minor > v_cap then v_reasons := array_append(v_reasons, 'TENANT_CAP'::text); end if;
       v_pct := coalesce((v_rules ->> 'max_store_exposure_pct_of_tenant')::numeric, 100);
       if v_exposure + v_o.total_minor > (v_cap * v_pct / 100) then v_reasons := array_append(v_reasons, 'STORE_CAP'::text); end if;
@@ -809,74 +830,67 @@ grant execute on function public.kamai_evaluate_store(uuid) to authenticated, se
 -- ---------------------------------------------------------------------------
 -- payments
 -- ---------------------------------------------------------------------------
-create or replace function public.kamai_record_payment(p jsonb)
+-- Settlement core: allocate a payment to receivables and post it to the ledger. Called exactly once per
+-- payment (settled_at guards it): immediately for cash, and for non-cash only after verification
+-- (bank match / manual bank confirmation). A COD order named by the payment is settled first; only the
+-- remainder goes FIFO against the store's older credit exposures.
+create or replace function private.kamai_settle_payment(p_payment_id uuid)
 returns jsonb
 language plpgsql
 security definer
 set search_path = ''
 as $$
 declare
-  v_tenant   uuid := nullif(p ->> 'tenant_id', '')::uuid;
-  v_store    public.kamai_stores;
-  v_amount   bigint := nullif(p ->> 'amount_minor', '')::bigint;
-  v_channel  text := coalesce(nullif(p ->> 'channel', ''), 'cash');
-  v_ext      text := nullif(btrim(p ->> 'external_ref'), '');
-  v_notes    text := nullif(btrim(p ->> 'notes'), '');
-  v_order    public.kamai_orders;
   v_pay      public.kamai_payments;
+  v_store    public.kamai_stores;
+  v_order    public.kamai_orders;
   v_remaining bigint;
   v_alloc    bigint;
   v_x        record;
   v_allocs   jsonb := '[]'::jsonb;
   v_entry    uuid;
   v_new_out  bigint;
+  v_cod_prior bigint;
+  v_cod_apply bigint := 0;
+  v_cash     boolean;
 begin
-  if v_tenant is null or v_amount is null or v_amount <= 0 then
-    raise exception 'kamai: tenant_id and a positive amount_minor are required' using errcode = '22023';
-  end if;
-  if not (select private.kamai_can(v_tenant, array['rider','booker','finance','manager','owner'])) then
-    raise exception 'kamai: not allowed to record payments' using errcode = '42501';
-  end if;
-  select * into v_store from public.kamai_stores where id = nullif(p ->> 'store_id', '')::uuid and tenant_id = v_tenant;
+  select * into v_pay from public.kamai_payments where id = p_payment_id for update;
   if not found then
-    raise exception 'kamai: store not found in tenant' using errcode = '22023';
+    raise exception 'kamai: payment not found' using errcode = '22023';
   end if;
-  if v_channel not in ('cash','raast','ibft','easypaisa','jazzcash','cheque','rtp') then
-    raise exception 'kamai: unknown channel %', v_channel using errcode = '22023';
+  if v_pay.settled_at is not null or v_pay.status = 'rejected' then
+    return jsonb_build_object('payment_id', v_pay.id, 'settled', false);
   end if;
-  if v_channel <> 'cash' and not (coalesce(length(v_ext), 0) >= 6 or v_notes is not null) then
-    raise exception 'kamai: non-cash payments need an external reference (6+ chars) or an override note' using errcode = '22023';
-  end if;
-  if nullif(p ->> 'order_id', '') is not null then
-    select * into v_order from public.kamai_orders where id = (p ->> 'order_id')::uuid and tenant_id = v_tenant and store_id = v_store.id;
-    if not found then
-      raise exception 'kamai: order not found for this store' using errcode = '22023';
+  v_cash := v_pay.channel = 'cash';
+  select * into v_store from public.kamai_stores where id = v_pay.store_id;
+  -- same lock order as credit decisions and delivery: credit account first, then exposures
+  perform 1 from public.kamai_credit_accounts where store_id = v_pay.store_id for update;
+  v_remaining := v_pay.amount_minor;
+
+  if v_pay.order_id is not null then
+    select * into v_order from public.kamai_orders where id = v_pay.order_id;
+    if found and v_order.payment_mode = 'cod' then
+      select coalesce(sum(order_applied_minor), 0) into v_cod_prior from public.kamai_payments
+      where order_id = v_order.id and id <> v_pay.id and settled_at is not null and status <> 'rejected';
+      v_cod_apply := least(v_remaining, greatest(0, v_order.total_minor - v_cod_prior));
+      v_remaining := v_remaining - v_cod_apply;
+      if v_cod_apply > 0 and v_order.invoice_id is not null and v_cod_prior + v_cod_apply >= v_order.total_minor then
+        update public.kamai_invoices set status = 'paid' where id = v_order.invoice_id and status = 'issued';
+      end if;
     end if;
   end if;
 
-  begin
-    insert into public.kamai_payments
-      (tenant_id, store_id, amount_minor, channel, external_ref, reference_code, collected_by, collected_at, evidence_url, notes, order_id)
-    values (v_tenant, v_store.id, v_amount, v_channel, v_ext,
-            coalesce(nullif(p ->> 'reference_code', ''), v_store.payment_ref_code), (select auth.uid()),
-            coalesce(nullif(p ->> 'collected_at', '')::timestamptz, now()), nullif(p ->> 'evidence_url', ''), v_notes, v_order.id)
-    returning * into v_pay;
-  exception when unique_violation then
-    raise exception 'kamai: a payment with external_ref % already exists (DUPLICATE_PAYMENT)', v_ext using errcode = '23505';
-  end;
-
-  v_remaining := v_amount;
   for v_x in
     select * from public.kamai_credit_exposures
-    where store_id = v_store.id and status = 'open' and outstanding_minor > 0
-    order by due_date, origination_date, created_at
+    where store_id = v_pay.store_id and status = 'open' and outstanding_minor > 0
+    order by (order_id is not distinct from v_pay.order_id) desc, due_date, origination_date, created_at
     for update
   loop
     exit when v_remaining <= 0;
     v_alloc := least(v_remaining, v_x.outstanding_minor);
     v_new_out := v_x.outstanding_minor - v_alloc;
     insert into public.kamai_payment_allocations (tenant_id, payment_id, exposure_id, amount_minor)
-    values (v_tenant, v_pay.id, v_x.id, v_alloc);
+    values (v_pay.tenant_id, v_pay.id, v_x.id, v_alloc);
     update public.kamai_credit_exposures set
       outstanding_minor = v_new_out, paid_minor = paid_minor + v_alloc, last_payment_at = now(),
       status = case when v_new_out = 0 then 'paid' else status end,
@@ -890,26 +904,262 @@ begin
     v_remaining := v_remaining - v_alloc;
   end loop;
 
-  -- COD order settled directly
-  if v_order.id is not null and v_order.payment_mode = 'cod' and v_order.invoice_id is not null and v_remaining >= v_order.total_minor then
-    update public.kamai_invoices set status = 'paid' where id = v_order.invoice_id and status = 'issued';
-  end if;
-
-  v_entry := private.kamai_post_entry_core(v_tenant, 'payment:' || v_pay.id, 'payment', v_pay.id::text, v_pay.collected_at,
-    'Payment ' || v_channel || ' from ' || v_store.name,
+  -- cash lands in the rider float; a verified digital payment lands in the bank account
+  v_entry := private.kamai_post_entry_core(v_pay.tenant_id, 'payment:' || v_pay.id, 'payment', v_pay.id::text, v_pay.collected_at,
+    'Payment ' || v_pay.channel || ' from ' || v_store.name,
     jsonb_build_array(
-      jsonb_build_object('account_code', case when v_channel = 'cash' then '1110' else '1150' end, 'direction', 'debit',
-                         'amount_minor', v_amount, 'party_type', 'rider', 'party_id', (select auth.uid())::text),
-      jsonb_build_object('account_code', '1200', 'direction', 'credit', 'amount_minor', v_amount,
+      jsonb_build_object('account_code', case when v_cash then '1110' else '1100' end, 'direction', 'debit',
+                         'amount_minor', v_pay.amount_minor,
+                         'party_type', case when v_cash and v_pay.collected_by is not null then 'rider' end,
+                         'party_id', case when v_cash then v_pay.collected_by::text end),
+      jsonb_build_object('account_code', '1200', 'direction', 'credit', 'amount_minor', v_pay.amount_minor,
                          'party_type', 'store', 'party_id', v_store.id::text)));
 
-  perform private.kamai_evaluate_store_core(v_store.id);
-  return jsonb_build_object('payment_id', v_pay.id, 'allocated_minor', v_amount - v_remaining,
-                            'unallocated_minor', v_remaining, 'allocations', v_allocs, 'ledger_entry_id', v_entry);
+  update public.kamai_payments set settled_at = now(), order_applied_minor = v_cod_apply where id = v_pay.id;
+  perform private.kamai_evaluate_store_core(v_pay.store_id);
+  return jsonb_build_object('payment_id', v_pay.id, 'settled', true, 'allocated_minor', v_pay.amount_minor - v_remaining,
+                            'unallocated_minor', v_remaining, 'order_applied_minor', v_cod_apply,
+                            'allocations', v_allocs, 'ledger_entry_id', v_entry);
+end;
+$$;
+revoke execute on function private.kamai_settle_payment(uuid) from public, anon, authenticated;
+grant execute on function private.kamai_settle_payment(uuid) to service_role;
+
+-- record a payment collected by staff. Cash is trusted on record (the rider's cash day close reconciles it);
+-- every non-cash payment is only an unverified claim until a bank line is matched / confirmed.
+create or replace function public.kamai_record_payment(p jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_tenant   uuid := nullif(p ->> 'tenant_id', '')::uuid;
+  v_store    public.kamai_stores;
+  v_amount   bigint := nullif(p ->> 'amount_minor', '')::bigint;
+  v_channel  text := coalesce(nullif(p ->> 'channel', ''), 'cash');
+  v_ext      text := nullif(btrim(p ->> 'external_ref'), '');
+  v_notes    text := nullif(btrim(p ->> 'notes'), '');
+  v_key      text := nullif(btrim(p ->> 'client_key'), '');
+  v_at       timestamptz := coalesce(nullif(p ->> 'collected_at', '')::timestamptz, now());
+  v_role     text;
+  v_order    public.kamai_orders;
+  v_pay      public.kamai_payments;
+  v_res      jsonb;
+begin
+  if v_tenant is null or v_amount is null or v_amount <= 0 then
+    raise exception 'kamai: tenant_id and a positive amount_minor are required' using errcode = '22023';
+  end if;
+  if not (select private.kamai_can(v_tenant, array['rider','booker','finance','manager','owner'])) then
+    raise exception 'kamai: not allowed to record payments' using errcode = '42501';
+  end if;
+  v_role := (select private.kamai_my_role(v_tenant));
+  select * into v_store from public.kamai_stores where id = nullif(p ->> 'store_id', '')::uuid and tenant_id = v_tenant;
+  if not found then
+    raise exception 'kamai: store not found in tenant' using errcode = '22023';
+  end if;
+  if v_channel not in ('cash','raast','ibft','easypaisa','jazzcash','cheque','rtp') then
+    raise exception 'kamai: unknown channel %', v_channel using errcode = '22023';
+  end if;
+  if v_channel <> 'cash' and not (coalesce(length(v_ext), 0) >= 6 or v_notes is not null) then
+    raise exception 'kamai: non-cash payments need an external reference (6+ chars) or an override note' using errcode = '22023';
+  end if;
+  if v_key is not null and length(v_key) > 128 then
+    raise exception 'kamai: client_key is too long' using errcode = '22023';
+  end if;
+  -- collected_at may not be in the future and may not reach far back (riders: 2 days)
+  if v_at > now() + interval '5 minutes' or v_at < now() - case when v_role = 'rider' then interval '2 days' else interval '35 days' end then
+    raise exception 'kamai: collected_at is outside the allowed window' using errcode = '22023';
+  end if;
+  if v_role = 'rider' then
+    -- riders collect cash only, and only from stores on their own run
+    if v_channel <> 'cash' then
+      raise exception 'kamai: riders may only record cash payments' using errcode = '42501';
+    end if;
+    if not exists (select 1 from public.kamai_orders o
+                   where o.tenant_id = v_tenant and o.store_id = v_store.id and o.rider_user_id = (select auth.uid())
+                     and o.fulfilment_status in ('dispatched','delivered','disputed')) then
+      raise exception 'kamai: this store is not on your run' using errcode = '42501';
+    end if;
+  end if;
+  if nullif(p ->> 'order_id', '') is not null then
+    select * into v_order from public.kamai_orders where id = (p ->> 'order_id')::uuid and tenant_id = v_tenant and store_id = v_store.id;
+    if not found then
+      raise exception 'kamai: order not found for this store' using errcode = '22023';
+    end if;
+  end if;
+
+  -- client idempotency: a retried request returns the original payment
+  if v_key is not null then
+    select * into v_pay from public.kamai_payments where tenant_id = v_tenant and client_key = v_key;
+    if found then
+      return jsonb_build_object('payment_id', v_pay.id, 'status', v_pay.status, 'replayed', true,
+        'allocated_minor', coalesce((select sum(a.amount_minor) from public.kamai_payment_allocations a where a.payment_id = v_pay.id and a.reversed_at is null), 0) + v_pay.order_applied_minor,
+        'unallocated_minor', 0, 'allocations', '[]'::jsonb, 'ledger_entry_id', null);
+    end if;
+  end if;
+
+  begin
+    insert into public.kamai_payments
+      (tenant_id, store_id, amount_minor, channel, external_ref, reference_code, collected_by, collected_at, evidence_url, notes, order_id, client_key)
+    values (v_tenant, v_store.id, v_amount, v_channel, v_ext,
+            coalesce(nullif(p ->> 'reference_code', ''), v_store.payment_ref_code), (select auth.uid()),
+            v_at, nullif(p ->> 'evidence_url', ''), v_notes, v_order.id, v_key)
+    returning * into v_pay;
+  exception when unique_violation then
+    if v_key is not null and exists (select 1 from public.kamai_payments where tenant_id = v_tenant and client_key = v_key) then
+      select * into v_pay from public.kamai_payments where tenant_id = v_tenant and client_key = v_key;
+      return jsonb_build_object('payment_id', v_pay.id, 'status', v_pay.status, 'replayed', true);
+    end if;
+    raise exception 'kamai: a payment with external_ref % already exists (DUPLICATE_PAYMENT)', v_ext using errcode = '23505';
+  end;
+
+  if v_channel <> 'cash' then
+    -- unverified: no allocation, no ledger posting until a bank line confirms it
+    return jsonb_build_object('payment_id', v_pay.id, 'status', v_pay.status, 'verified', false, 'allocated_minor', 0,
+                              'unallocated_minor', v_amount, 'allocations', '[]'::jsonb, 'ledger_entry_id', null);
+  end if;
+  v_res := private.kamai_settle_payment(v_pay.id);
+  return (v_res - 'settled') || jsonb_build_object('status', v_pay.status, 'verified', false);
 end;
 $$;
 revoke execute on function public.kamai_record_payment(jsonb) from public, anon;
 grant execute on function public.kamai_record_payment(jsonb) to authenticated, service_role;
+
+-- a store member reports (claims) that it paid. Creates an UNVERIFIED claim only: no allocation and no
+-- ledger posting; finance confirms it later by matching/confirming a bank line (kamai_confirm_bank_match)
+-- or rejects it (kamai_reverse_payment).
+create or replace function public.kamai_report_payment(
+  p_store_id uuid, p_amount_minor bigint, p_method text, p_reference text, p_order_id uuid default null)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_store  public.kamai_stores;
+  v_ref    text := nullif(btrim(p_reference), '');
+  v_method text := lower(coalesce(nullif(btrim(p_method), ''), ''));
+  v_order  public.kamai_orders;
+  v_pay    public.kamai_payments;
+begin
+  if (select auth.uid()) is null then
+    raise exception 'kamai: sign in to report a payment' using errcode = '42501';
+  end if;
+  select * into v_store from public.kamai_stores where id = p_store_id;
+  if not found then
+    raise exception 'kamai: store not found' using errcode = '22023';
+  end if;
+  if not exists (select 1 from public.kamai_memberships m
+                 where m.tenant_id = v_store.tenant_id and m.user_id = (select auth.uid()) and m.status = 'active'
+                   and m.role = 'store' and m.store_id = p_store_id) then
+    raise exception 'kamai: a store member may only report payments for its own store' using errcode = '42501';
+  end if;
+  if p_amount_minor is null or p_amount_minor <= 0 then
+    raise exception 'kamai: a positive amount is required' using errcode = '22023';
+  end if;
+  if v_method not in ('raast','ibft','easypaisa','jazzcash','cheque','rtp') then
+    raise exception 'kamai: method must be a digital channel (raast, ibft, easypaisa, jazzcash, cheque, rtp); hand cash to your rider' using errcode = '22023';
+  end if;
+  if coalesce(length(v_ref), 0) < 6 then
+    raise exception 'kamai: a payment reference of 6+ characters is required' using errcode = '22023';
+  end if;
+  if p_order_id is not null then
+    select * into v_order from public.kamai_orders where id = p_order_id and tenant_id = v_store.tenant_id and store_id = p_store_id;
+    if not found then
+      raise exception 'kamai: order not found for this store' using errcode = '22023';
+    end if;
+  end if;
+  if (select count(*) from public.kamai_payments x
+      where x.store_id = p_store_id and x.reported_by is not null and x.settled_at is null and x.status = 'recorded') >= 20 then
+    raise exception 'kamai: too many unverified payment reports are waiting for finance' using errcode = '22023';
+  end if;
+  begin
+    insert into public.kamai_payments
+      (tenant_id, store_id, amount_minor, channel, external_ref, reference_code, collected_by, collected_at, notes, order_id, reported_by)
+    values (v_store.tenant_id, p_store_id, p_amount_minor, v_method, v_ref, v_store.payment_ref_code, null, now(),
+            'reported by store, unverified', v_order.id, (select auth.uid()))
+    returning * into v_pay;
+  exception when unique_violation then
+    raise exception 'kamai: a payment with this reference already exists (DUPLICATE_PAYMENT)' using errcode = '23505';
+  end;
+  return jsonb_build_object('payment_id', v_pay.id, 'status', v_pay.status, 'verified', false);
+end;
+$$;
+revoke execute on function public.kamai_report_payment(uuid, bigint, text, text, uuid) from public, anon;
+grant execute on function public.kamai_report_payment(uuid, bigint, text, text, uuid) to authenticated, service_role;
+
+-- reject an unverified payment, or reverse a settled one: allocations are undone (exposures, invoices and
+-- finance status reopened), the ledger entry is reversed, and a matched bank line is released.
+create or replace function public.kamai_reverse_payment(p_payment_id uuid, p_reason text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_pay   public.kamai_payments;
+  v_a     record;
+  v_x     public.kamai_credit_exposures;
+  v_entry uuid;
+  v_rev   uuid;
+  v_order public.kamai_orders;
+begin
+  if coalesce(btrim(p_reason), '') = '' then
+    raise exception 'kamai: a reason is required' using errcode = '22023';
+  end if;
+  select * into v_pay from public.kamai_payments where id = p_payment_id for update;
+  if not found then
+    raise exception 'kamai: payment not found' using errcode = '22023';
+  end if;
+  if not (select private.kamai_can(v_pay.tenant_id, array['owner','manager','finance'])) then
+    raise exception 'kamai: not allowed to reverse payments' using errcode = '42501';
+  end if;
+  if v_pay.status = 'rejected' then
+    raise exception 'kamai: payment is already rejected or reversed' using errcode = '22023';
+  end if;
+  perform 1 from public.kamai_credit_accounts where store_id = v_pay.store_id for update;
+
+  if v_pay.settled_at is not null then
+    for v_a in select * from public.kamai_payment_allocations where payment_id = p_payment_id and reversed_at is null for update loop
+      select * into v_x from public.kamai_credit_exposures where id = v_a.exposure_id for update;
+      update public.kamai_credit_exposures set
+        outstanding_minor = outstanding_minor + v_a.amount_minor,
+        paid_minor = greatest(0, paid_minor - v_a.amount_minor),
+        status = case when status = 'paid' then 'open' else status end,
+        closed_at = case when status = 'paid' then null else closed_at end
+      where id = v_x.id;
+      if v_x.status = 'paid' then
+        update public.kamai_invoices set status = 'issued' where id = v_x.invoice_id and status = 'paid';
+        update public.kamai_orders set finance_status = 'financed' where id = v_x.order_id and finance_status = 'paid' and v_x.financed_minor > 0;
+      end if;
+      update public.kamai_payment_allocations set reversed_at = now() where id = v_a.id;
+    end loop;
+    if v_pay.order_applied_minor > 0 and v_pay.order_id is not null then
+      select * into v_order from public.kamai_orders where id = v_pay.order_id;
+      if found and v_order.invoice_id is not null then
+        update public.kamai_invoices set status = 'issued' where id = v_order.invoice_id and status = 'paid';
+      end if;
+    end if;
+    select id into v_entry from public.kamai_ledger_entries where tenant_id = v_pay.tenant_id and idempotency_key = 'payment:' || p_payment_id;
+    if v_entry is not null then
+      v_rev := private.kamai_reverse_entry_core(v_entry, 'Reversal of payment ' || p_payment_id || ': ' || btrim(p_reason));
+    end if;
+  end if;
+
+  update public.kamai_bank_lines set match_status = 'unmatched', matched_payment_id = null, matched_at = null, matched_by = null,
+         meta = meta || jsonb_build_object('released_from_payment', p_payment_id)
+   where matched_payment_id = p_payment_id;
+  update public.kamai_payments set status = 'rejected', reversed_at = now(), reversal_reason = btrim(p_reason)
+   where id = p_payment_id returning * into v_pay;
+  if v_pay.settled_at is not null then
+    perform private.kamai_evaluate_store_core(v_pay.store_id);
+  end if;
+  return jsonb_build_object('payment_id', p_payment_id, 'status', 'rejected', 'reversal_entry_id', v_rev);
+end;
+$$;
+revoke execute on function public.kamai_reverse_payment(uuid, text) from public, anon;
+grant execute on function public.kamai_reverse_payment(uuid, text) to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
 -- bank statement import and matching
