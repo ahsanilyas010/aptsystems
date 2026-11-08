@@ -7,7 +7,7 @@ export type Cell =
   | string
   | { strong: string }
   | { badge: string; tone: BadgeTone }
-  | { prio: Prio }
+  | { prio: Prio; label?: string }
   | { link: string; href: string }
 
 export interface Tbl {
@@ -41,5 +41,5 @@ export interface Intro {
 
 export const b = (strong: string): Cell => ({ strong })
 export const badge = (text: string, tone: BadgeTone): Cell => ({ badge: text, tone })
-export const prio = (p: Prio): Cell => ({ prio: p })
+export const prio = (p: Prio, label?: string): Cell => ({ prio: p, label })
 export const link = (text: string, href: string): Cell => ({ link: text, href })
