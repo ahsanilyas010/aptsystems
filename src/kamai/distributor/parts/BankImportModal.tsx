@@ -99,8 +99,9 @@ export function BankImportModal({ open, onClose, tenantId }: { open: boolean; on
     try {
       if (save) {
         const cur = (tenant.data?.settings ?? {}) as Record<string, Json>
-        const { error } = await supabase.from('kamai_tenants').update({ settings: { ...cur, bank_csv_mapping: map as unknown as Json } }).eq('id', tenantId)
+        const { data: saved, error } = await supabase.from('kamai_tenants').update({ settings: { ...cur, bank_csv_mapping: map as unknown as Json } }).eq('id', tenantId).select('id')
         if (error) toast.warning(`Mapping not saved: ${error.message}`)
+        else if (!saved || saved.length === 0) toast.warning('Mapping not saved: only the tenant owner can store the CSV mapping.')
       }
       const dates = lines.out.map((l) => l.line_date).sort()
       const imp = await rpc<{ statement_id: string; inserted: number; duplicate: boolean }>('kamai_import_bank_lines', {

@@ -35,12 +35,14 @@ export function CreditOverrideModal({ account, storeName, onClose }: { account: 
     if (reason.trim().length < 5) return setErr('Please give a reason (min 5 characters)')
     setBusy(true)
     try {
-      const { error } = await supabase
+      const { data: upd, error } = await supabase
         .from('kamai_credit_accounts')
         .update({ limit_minor: lim, status, reason_codes: ['MANUAL_OVERRIDE', `NOTE: ${reason.trim().slice(0, 200)}`], last_reviewed_at: new Date().toISOString() })
         .eq('store_id', account.store_id)
         .eq('tenant_id', account.tenant_id)
+        .select('store_id')
       if (error) throw new Error(error.message)
+      if (!upd || upd.length === 0) throw new Error('Not allowed: you do not have permission to change this credit account.')
       toast.success('Credit account updated')
       await refresh()
       onClose()

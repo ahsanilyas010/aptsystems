@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import { Navigate, Outlet, useLocation } from 'react-router'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from './supabase'
 
 // ---------------------------------------------------------------------------
@@ -126,17 +127,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [activeTenantId, setActiveTenantState] = useState<string | null>(() => readStoredTenant())
   const userIdRef = useRef<string | null>(null)
+  const qc = useQueryClient()
 
   const applySession = useCallback(async (s: Session | null) => {
     setSession(s)
     const uid = s?.user?.id ?? null
     if (!uid) {
+      // Involuntary sign-out (expiry, other tab): drop every cached row and the active tenant.
+      if (userIdRef.current) {
+        qc.clear()
+        setActiveTenantState(null)
+        writeStoredTenant(null)
+      }
       userIdRef.current = null
       setCtx(EMPTY_CTX)
       setLoading(false)
       return
     }
     const changedUser = userIdRef.current !== uid
+    // A different user on the same tab must never see the previous user's cached data.
+    if (changedUser && userIdRef.current) qc.clear()
     userIdRef.current = uid
     if (changedUser) {
       const c = await loadKamaiContext()
@@ -144,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (userIdRef.current === uid) setCtx(c)
     }
     setLoading(false)
-  }, [])
+  }, [qc])
 
   useEffect(() => {
     let cancelled = false
@@ -187,6 +197,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     userIdRef.current = null
+    qc.clear()
     setCtx(EMPTY_CTX)
     setActiveTenantState(null)
     writeStoredTenant(null)
@@ -194,8 +205,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await supabase.auth.signOut()
     } finally {
       setSession(null)
+      qc.clear()
     }
-  }, [])
+  }, [qc])
 
   const refresh = useCallback(async () => {
     const c = await loadKamaiContext()

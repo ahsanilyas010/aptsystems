@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { Badge, Card, CardTitle, Table, cx, type Column } from '../../ui'
 import type { Cell, Intro, Prio, Tbl, TimelineItem } from '../content/types'
 import { Rich } from '../lib/rich'
+import { safeHttpUrl } from '../../lib/pod'
 
 /** Dark intro box at the top of every panel. */
 export function Highlight({ intro, title, children }: { intro?: Intro; title?: string; children?: ReactNode }) {
@@ -66,8 +67,10 @@ function renderCell(c: Cell): ReactNode {
   if ('strong' in c) return <strong className="font-bold text-k-dark">{c.strong}</strong>
   if ('badge' in c) return <Badge tone={c.tone}>{c.badge}</Badge>
   if ('prio' in c) return <PrioTag p={c.prio} label={c.label} />
+  const href = safeHttpUrl(c.href)
+  if (!href) return <span className="text-xs text-k-muted">{c.link}</span>
   return (
-    <a href={c.href} target="_blank" rel="noreferrer" className="text-xs font-semibold text-k-green underline">
+    <a href={href} target="_blank" rel="noreferrer noopener" className="text-xs font-semibold text-k-green underline">
       {c.link}
     </a>
   )

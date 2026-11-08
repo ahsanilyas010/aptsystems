@@ -1,8 +1,12 @@
 // IndexedDB queue for delivery confirmations made while offline.
+import { currentUserId } from '../../lib/supabase'
+
 export interface QueuedDelivery {
   id: string
   orderId: string
   tenantId: string
+  /** owner of the item; only this user's items are listed or replayed */
+  userId?: string | null
   orderNo: number | null
   createdAt: number
   args: {
@@ -56,13 +60,14 @@ function notify() {
 }
 
 export async function enqueueDelivery(item: QueuedDelivery): Promise<void> {
-  await tx('readwrite', (s) => s.put(item))
+  await tx('readwrite', (s) => s.put({ ...item, userId: item.userId ?? (await currentUserId()) }))
   notify()
 }
 
 export async function listQueue(): Promise<QueuedDelivery[]> {
   try {
-    const all = await tx<QueuedDelivery[]>('readonly', (s) => s.getAll())
+    const uid = await currentUserId()
+    const all = (await tx<QueuedDelivery[]>('readonly', (s) => s.getAll())).filter((q) => !!uid && q.userId === uid)
     return all.sort((a, b) => a.createdAt - b.createdAt)
   } catch {
     return []

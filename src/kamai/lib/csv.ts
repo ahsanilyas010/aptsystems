@@ -36,7 +36,11 @@ export function parseCsv<T extends Record<string, string> = Record<string, strin
 /** Serialize rows to CSV text (header from `columns` or the first row's keys). */
 export function toCsv<T extends Record<string, unknown>>(rows: T[], columns?: Array<keyof T & string>): string {
   const cols = columns ?? (rows[0] ? (Object.keys(rows[0]) as Array<keyof T & string>) : [])
-  return Papa.unparse({ fields: cols, data: rows.map((r) => cols.map((c) => (r[c] === null || r[c] === undefined ? '' : r[c]))) })
+  // escapeFormulae prefixes cells starting with = + - @ (tab/CR) with a quote, defusing spreadsheet formula injection.
+  return Papa.unparse(
+    { fields: cols, data: rows.map((r) => cols.map((c) => (r[c] === null || r[c] === undefined ? '' : r[c]))) },
+    { escapeFormulae: true },
+  )
 }
 
 /** Trigger a browser download of CSV text. Prepends a UTF-8 BOM for Excel. */

@@ -25,4 +25,14 @@ export const supabase: SupabaseClient<any> = createClient(SUPABASE_URL, SUPABASE
   },
 })
 
+/** Current signed-in user id (from the local session), or null. Used to scope offline queues. */
+export async function currentUserId(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getSession()
+    return data.session?.user?.id ?? null
+  } catch {
+    return null
+  }
+}
+
 export default supabase

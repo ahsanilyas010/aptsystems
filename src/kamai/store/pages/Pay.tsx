@@ -6,7 +6,7 @@ import { Badge, Button, Card, CardTitle, EmptyState, Input, Select, statusTone, 
 import { PKR, fmtDate } from '../../lib/format'
 import { toMinor } from '../../lib/money'
 import { useLang } from '../../lib/i18n'
-import type { Json, PaymentChannel, RecordPaymentResult } from '../../lib/db-types'
+import type { Json, PaymentChannel, ReportPaymentResult } from '../../lib/db-types'
 import { daysOverdue, sumOutstanding, useExposures, useInvoiceMap, usePayments, useStoreCtx, useStoreRow, useTenantRow } from '../lib/data'
 import { CopyButton, ErrorBox, Loading } from '../lib/parts'
 import '../lib/strings'
@@ -53,18 +53,16 @@ export function Component() {
 
   const pay = useMutation({
     mutationFn: async () => {
-      const { data, error } = await supabase.rpc('kamai_record_payment', {
-        p: {
-          tenant_id: ctx!.tenantId,
-          store_id: ctx!.storeId,
-          amount_minor: amountMinor,
-          channel,
-          external_ref: txn.trim(),
-          reference_code: refCode,
-        },
+      // Store members cannot record payments; they report one, which the distributor verifies.
+      const { data, error } = await supabase.rpc('kamai_report_payment', {
+        p_store_id: ctx!.storeId,
+        p_amount_minor: amountMinor,
+        p_method: channel,
+        p_reference: txn.trim(),
+        p_order_id: null,
       })
       if (error) throw new Error(error.message)
-      return data as RecordPaymentResult
+      return data as ReportPaymentResult
     },
     onSuccess: () => {
       setDone(true)

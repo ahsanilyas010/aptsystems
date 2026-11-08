@@ -97,7 +97,7 @@ extendDictionary({
   st_txn_id: { en: 'Transaction ID', ru: 'Transaction ID', ur: 'ٹرانزیکشن آئی ڈی' },
   st_txn_hint: { en: 'At least 6 characters, from your bank or wallet receipt.', ru: 'Kam az kam 6 harf/number, bank ya wallet ki receipt se.', ur: 'کم از کم 6 حروف/نمبر، بینک یا والٹ کی رسید سے۔' },
   st_submit_paid: { en: 'Send payment details', ru: 'Payment ki tafseel bhejein', ur: 'ادائیگی کی تفصیل بھیجیں' },
-  st_paid_ok: { en: 'Payment noted. Your distributor will verify it.', ru: 'Payment note ho gayi. Distributor tasdeeq karega.', ur: 'ادائیگی نوٹ ہو گئی۔ ڈسٹری بیوٹر تصدیق کرے گا۔' },
+  st_paid_ok: { en: 'Payment submitted for verification. Your distributor will confirm it.', ru: 'Payment note ho gayi. Distributor tasdeeq karega.', ur: 'ادائیگی نوٹ ہو گئی۔ ڈسٹری بیوٹر تصدیق کرے گا۔' },
   st_paid_denied: { en: 'This payment could not be saved from the app. Send the transaction ID to your distributor on WhatsApp.', ru: 'Yeh payment app se save nahi hui. Transaction ID distributor ko WhatsApp par bhejein.', ur: 'یہ ادائیگی ایپ سے محفوظ نہیں ہوئی۔ ٹرانزیکشن آئی ڈی ڈسٹری بیوٹر کو واٹس ایپ کریں۔' },
   st_recent_pay: { en: 'Recent payments', ru: 'Haal ki payments', ur: 'حالیہ ادائیگیاں' },
   st_store_details: { en: 'Store details', ru: 'Store ki tafseel', ur: 'اسٹور کی تفصیل' },

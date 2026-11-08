@@ -1,7 +1,7 @@
 // IndexedDB backed outbox for orders placed without signal. Jobs are keyed by client_order_id,
 // so replaying a job is idempotent on the server (kamai_submit_order returns replayed:true).
 import { useEffect, useState } from 'react'
-import { supabase } from '../../lib/supabase'
+import { currentUserId, supabase } from '../../lib/supabase'
 
 const DB_NAME = 'kamai-store-queue'
 const STORE = 'jobs'
@@ -21,6 +21,8 @@ export interface QueuedOrderPayload {
 export interface QueueJob {
   client_order_id: string
   payload: QueuedOrderPayload
+  /** owner of the job; queues are shared per device, so only this user's jobs are shown or replayed */
+  user_id?: string | null
   attempts: number
   last_error: string | null
   created_at: string
@@ -62,7 +64,9 @@ function emit() {
 
 export async function listJobs(): Promise<QueueJob[]> {
   try {
-    const rows = await tx<QueueJob[]>('readonly', (s) => s.getAll() as IDBRequest<QueueJob[]>)
+    const uid = await currentUserId()
+    const all = await tx<QueueJob[]>('readonly', (s) => s.getAll() as IDBRequest<QueueJob[]>)
+    const rows = all.filter((j) => !!uid && j.user_id === uid)
     return rows.sort((a, b) => a.created_at.localeCompare(b.created_at))
   } catch {
     return []
@@ -70,7 +74,7 @@ export async function listJobs(): Promise<QueueJob[]> {
 }
 
 export async function enqueueOrder(payload: QueuedOrderPayload): Promise<void> {
-  const job: QueueJob = { client_order_id: payload.client_order_id, payload, attempts: 0, last_error: null, created_at: new Date().toISOString() }
+  const job: QueueJob = { client_order_id: payload.client_order_id, payload, user_id: await currentUserId(), attempts: 0, last_error: null, created_at: new Date().toISOString() }
   await tx('readwrite', (s) => s.put(job))
   emit()
 }

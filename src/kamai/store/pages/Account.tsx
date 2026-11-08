@@ -26,14 +26,8 @@ export function Component() {
   const optIn = !!store.data?.wa_opt_in_at
   const wa = useMutation({
     mutationFn: async (on: boolean) => {
-      const { data, error } = await supabase
-        .from('kamai_stores')
-        .update({ wa_opt_in_at: on ? new Date().toISOString() : null, wa_opt_in_source: on ? 'store_pwa' : null })
-        .eq('tenant_id', ctx!.tenantId)
-        .eq('id', ctx!.storeId)
-        .select('id')
-      if (error) throw new Error(error.message)
-      if (!data || data.length === 0) throw new Error(t('st_wa_fail'))
+      const { error } = await supabase.rpc('kamai_set_wa_opt_in', { p_store_id: ctx!.storeId, p_opt_in: on, p_source: 'store_app' })
+      if (error) throw new Error(t('st_wa_fail'))
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['kamai-store', 'store'] }),
     onError: (e: Error) => toast.error(e.message),

@@ -237,6 +237,7 @@ export interface KamaiDeliveryProofsRow {
   geofence_ok: boolean | null
   override_reason: string | null
   flagged: boolean
+  /** storage PATH in the private kamai-pod bucket (<tenant_id>/...); display via createSignedUrl */
   photo_url: string | null
   signature_url: string | null
   receiver_name: string | null
@@ -963,6 +964,11 @@ export interface RecordPaymentResult {
   ledger_entry_id: string
 }
 
+export interface ReportPaymentResult {
+  payment_id: string
+  status: string
+}
+
 export interface LedgerLineInput {
   account_code: string
   direction: LedgerSide
@@ -1000,6 +1006,8 @@ export interface KamaiRpc {
   kamai_evaluate_store: { args: { p_store_id: string }; returns: { store_id: string; tier: number; status: CreditStatus; limit_minor: number; changed: boolean; target_tier: number; max_dpd_open: number } }
   kamai_store_outstanding: { args: { p_store_id: string }; returns: number }
   kamai_record_payment: { args: { p: RecordPaymentInput }; returns: RecordPaymentResult }
+  kamai_report_payment: { args: { p_store_id: string; p_amount_minor: number; p_method: PaymentChannel; p_reference: string; p_order_id?: string | null }; returns: ReportPaymentResult }
+  kamai_set_wa_opt_in: { args: { p_store_id: string; p_opt_in: boolean; p_source?: string }; returns: unknown }
   kamai_import_bank_lines: { args: { p_statement: BankStatementInput; p_lines: BankLineInput[] }; returns: { statement_id: string; inserted: number; duplicate: boolean } }
   kamai_match_bank_lines: { args: { p_statement_id: string }; returns: { statement_id: string; matched_by_reference: number; matched_by_external_ref: number; proposed: number; ambiguous: number } }
   kamai_confirm_bank_match: { args: { p_line_id: string; p_payment_id: string }; returns: { line_id: string; payment_id: string; match_status: 'manual' } }
@@ -1025,7 +1033,7 @@ export const KAMAI_RPCS = [
   'kamai_my_context', 'kamai_create_tenant', 'kamai_add_member', 'kamai_submit_order', 'kamai_transition_order',
   'kamai_assign_rider', 'kamai_issue_delivery_otp', 'kamai_confirm_delivery', 'kamai_dispute_delivery',
   'kamai_resolve_dispute', 'kamai_convert_order_to_cod', 'kamai_issue_invoice', 'kamai_credit_decide',
-  'kamai_evaluate_store', 'kamai_store_outstanding', 'kamai_record_payment', 'kamai_import_bank_lines',
+  'kamai_evaluate_store', 'kamai_store_outstanding', 'kamai_record_payment', 'kamai_report_payment', 'kamai_set_wa_opt_in', 'kamai_import_bank_lines',
   'kamai_match_bank_lines', 'kamai_confirm_bank_match', 'kamai_close_cash_day', 'kamai_post_entry',
   'kamai_reverse_entry', 'kamai_finance_order', 'kamai_settle_financing', 'kamai_os_kpis', 'kamai_run_daily',
   'kamai_import_legacy', 'kamai_distance_m', 'kamai_line_tax', 'kamai_dpd_bucket', 'kamai_gtin_check_digit_ok',

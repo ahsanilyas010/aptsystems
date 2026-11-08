@@ -106,6 +106,41 @@ const tempPassword = () => randomBytes(18).toString("base64url");
 const waLink = (digits, text) => `https://wa.me/${digits}${text ? `?text=${encodeURIComponent(text)}` : ""}`;
 
 // ---- actions ------------------------------------------------------------------------------
+// Role hierarchy: a caller may only act on a user whose role in every tenant is strictly below the
+// caller's own role in that tenant.
+const RANK = { owner: 4, manager: 3, booker: 2, finance: 2, viewer: 1, rider: 1, store: 1 };
+const callerRank = (c, tenantId) => Math.max(0, ...c.memberships.filter((m) => m.tenant_id === tenantId).map((m) => RANK[m.role] ?? 0));
+const PIN_DOMAIN = "@kamai.assorted.group";
+
+async function isPlatformAdminUser(db, userId) {
+  const [pa, ur] = await Promise.all([
+    db.from("kamai_platform_admins").select("user_id").eq("user_id", userId).maybeSingle(),
+    db.from("user_roles").select("role").eq("user_id", userId).eq("role", "admin").limit(1),
+  ]);
+  if (pa.error) throw pa.error;
+  if (ur.error) throw ur.error;
+  return !!pa.data || (ur.data?.length ?? 0) > 0;
+}
+async function membershipsOf(db, userId) {
+  const { data, error } = await db.from("kamai_memberships").select("tenant_id,role,status").eq("user_id", userId);
+  if (error) throw error;
+  return data ?? [];
+}
+
+// Authorise acting (reset PIN / disable) on an existing user. Never platform admins; every tenant the
+// target belongs to (any status) must be managed by the caller, who must outrank the target there.
+async function guardTarget(db, c, userId) {
+  if (await isPlatformAdminUser(db, userId)) throw forbidden("Platform admins cannot be managed here");
+  const rows = await membershipsOf(db, userId);
+  if (!rows.length) throw new HttpError(404, "User has no Kamai membership");
+  if (c.isAdmin) return rows;
+  for (const r of rows) {
+    if (!hasRole(c, r.tenant_id, MANAGE_ROLES)) throw forbidden("User also belongs to a tenant you do not manage");
+    if (callerRank(c, r.tenant_id) <= (RANK[r.role] ?? 0)) throw forbidden("Your role does not outrank this user's role");
+  }
+  return rows;
+}
+
 async function provisionUser(db, c, p) {
   const tenantId = v.uuid(p.tenant_id, "tenant_id");
   const role = v.str(p.role, "role", 20);
@@ -127,56 +162,72 @@ async function provisionUser(db, c, p) {
   }
 
   const meta = { kamai: true, full_name: fullName, mobile: mobile ? `+${mobile}` : null, persona: role };
-  let userId, login, actionLink;
+  let userId, login, actionLink, existing = null, isNew = false;
   if (email) {
     login = { kind: "email_invite", identifier: email };
-    const existing = await findUserByEmail(db, email);
-    if (existing) {
-      userId = existing.id;
-    } else {
+    existing = await findUserByEmail(db, email);
+    if (!existing) {
       const redirectTo = "https://apt.assorted.group/auth/accept";
       const inv = await db.auth.admin.inviteUserByEmail(email, { redirectTo, data: meta });
       if (!inv.error && inv.data?.user) {
-        userId = inv.data.user.id;
+        userId = inv.data.user.id; isNew = true;
       } else {
         console.error("[kamai-admin] invite failed, falling back to generateLink:", inv.error?.message);
         const gl = await db.auth.admin.generateLink({ type: "invite", email, options: { redirectTo, data: meta } });
         if (gl.error || !gl.data?.user) {
           if (gl.error && isExists(gl.error)) {
-            const again = await findUserByEmail(db, email);
-            if (!again) throw gl.error;
-            userId = again.id;
+            existing = await findUserByEmail(db, email);
+            if (!existing) throw gl.error;
           } else throw gl.error || new Error("invite failed");
         } else {
-          userId = gl.data.user.id;
+          userId = gl.data.user.id; isNew = true;
           actionLink = gl.data.properties?.action_link;
         }
       }
     }
   } else {
     const prefix = role === "store" ? "store" : "user";
-    const identifier = `${prefix}-${mobile}@kamai.assorted.group`;
+    const identifier = `${prefix}-${mobile}${PIN_DOMAIN}`;
     login = { kind: "mobile_pin", identifier };
     const created = await db.auth.admin.createUser({ email: identifier, password: pin, email_confirm: true, user_metadata: meta });
     if (created.error) {
       if (!isExists(created.error)) throw created.error;
-      const existing = await findUserByEmail(db, identifier);
+      existing = await findUserByEmail(db, identifier);
       if (!existing) throw created.error;
-      userId = existing.id;
+    } else { userId = created.data.user.id; isNew = true; }
+  }
+
+  // An account that already exists is never taken over: its password and metadata are not touched.
+  if (existing) {
+    userId = existing.id;
+    const mems = await membershipsOf(db, userId);
+    const platformAdmin = await isPlatformAdminUser(db, userId);
+    if (platformAdmin && !c.isAdmin) throw forbidden("Platform admins cannot be provisioned into a tenant here");
+    if (mems.some((m) => m.tenant_id === tenantId)) throw new HttpError(409, "User is already a member of this tenant");
+    if (!c.isAdmin && mems.length) throw forbidden("User already belongs to another tenant; ask a platform admin");
+    if (!email) {
+      // Mobile/PIN login that already exists: only an orphan from an interrupted provisioning
+      // (no membership anywhere, not an admin, created by Kamai) may be adopted and get this PIN.
+      const orphan = !mems.length && !platformAdmin && existing.user_metadata?.kamai === true;
+      if (!orphan) throw new HttpError(409, "A login for this mobile already exists; use reset_pin");
       const upd = await db.auth.admin.updateUserById(userId, { password: pin, user_metadata: { ...(existing.user_metadata || {}), ...meta } });
       if (upd.error) throw upd.error;
-    } else userId = created.data.user.id;
+    }
   }
 
   // The live handle_new_user trigger grants 'rider' to every new user; remove it for other personas.
-  if (role !== "rider") {
+  // Only for users created by this call, never for an existing account.
+  if (isNew && role !== "rider") {
     const del = await db.from("user_roles").delete().eq("user_id", userId).eq("role", "rider");
     if (del.error) console.error("[kamai-admin] user_roles cleanup:", del.error.message);
   }
-  const mem = await db.from("kamai_memberships").upsert(
-    { tenant_id: tenantId, user_id: userId, role, store_id: role === "store" ? storeId : null, status: "active", created_by: c.user.id },
-    { onConflict: "tenant_id,user_id" });
-  if (mem.error) throw mem.error;
+  // Plain insert: an existing membership (role, status) is never overwritten or re-activated here.
+  const mem = await db.from("kamai_memberships").insert(
+    { tenant_id: tenantId, user_id: userId, role, store_id: role === "store" ? storeId : null, status: "active", created_by: c.user.id });
+  if (mem.error) {
+    if (mem.error.code === "23505") throw new HttpError(409, "User is already a member of this tenant");
+    throw mem.error;
+  }
   if (role === "store") {
     const wa = await db.from("kamai_wa_contacts").upsert(
       { tenant_id: tenantId, wa_id: mobile, store_id: storeId }, { onConflict: "tenant_id,wa_id" });
@@ -185,21 +236,14 @@ async function provisionUser(db, c, p) {
   return { ok: true, user_id: userId, login, ...(actionLink ? { action_link: actionLink } : {}) };
 }
 
-// Tenants (among the caller's manageable ones) where the target user has a membership.
-async function manageableTenantsOf(db, c, userId) {
-  const { data, error } = await db.from("kamai_memberships").select("tenant_id").eq("user_id", userId);
-  if (error) throw error;
-  const ids = (data ?? []).map((r) => r.tenant_id);
-  if (!ids.length) throw new HttpError(404, "User has no Kamai membership");
-  const allowed = c.isAdmin ? ids : ids.filter((t) => hasRole(c, t, MANAGE_ROLES));
-  if (!allowed.length) throw forbidden();
-  return allowed;
-}
-
 async function resetPin(db, c, p) {
   const userId = v.uuid(p.user_id, "user_id");
   const pin = v.pin(p.pin);
-  await manageableTenantsOf(db, c, userId);
+  await guardTarget(db, c, userId);
+  // Only mobile/PIN logins created by provisioning may be reset here, never email accounts.
+  const { data, error: ge } = await db.auth.admin.getUserById(userId);
+  if (ge || !data?.user) throw new HttpError(404, "User not found");
+  if (!(data.user.email || "").toLowerCase().endsWith(PIN_DOMAIN)) throw bad("User does not have a mobile PIN login");
   const { error } = await db.auth.admin.updateUserById(userId, { password: pin });
   if (error) throw error;
   return { ok: true };
@@ -208,7 +252,7 @@ async function resetPin(db, c, p) {
 async function disableUser(db, c, p) {
   const userId = v.uuid(p.user_id, "user_id");
   if (userId === c.user.id) throw bad("You cannot disable yourself");
-  const tenants = await manageableTenantsOf(db, c, userId);
+  const tenants = (await guardTarget(db, c, userId)).map((r) => r.tenant_id);
   const m = await db.from("kamai_memberships").update({ status: "disabled" }).eq("user_id", userId).in("tenant_id", tenants);
   if (m.error) throw m.error;
   // Only ban the login when every membership of the user is now disabled.
