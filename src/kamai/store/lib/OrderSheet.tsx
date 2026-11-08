@@ -67,8 +67,11 @@ export function OrderSheet({
   const [cid, setCid] = useState(() => crypto.randomUUID())
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    if (open) setCid(crypto.randomUUID())
-  }, [open])
+    if (open) {
+      setCid(crypto.randomUUID())
+      setMode(initialMode ?? 'credit')
+    }
+  }, [open, initialMode])
 
   const total = lines.reduce((a, l) => a + l.qty * l.unit_minor, 0)
 

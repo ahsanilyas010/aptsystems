@@ -62,7 +62,6 @@ export function Component() {
 
       <InstallBanner hasOrders={(orders.data?.length ?? 0) > 0} />
 
-      {active && active.id !== last?.id ? null : null}
       {active ? (
         <Link to={`/store/orders/${active.id}`} className="block">
           <Card padding="sm" className="flex items-center gap-3">
