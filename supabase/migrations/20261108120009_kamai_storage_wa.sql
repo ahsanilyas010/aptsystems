@@ -91,7 +91,8 @@ begin
   end if;
   select * into v_s from public.kamai_stores where id = p_store_id for update;
   if not found then
-    raise exception 'kamai: store not found' using errcode = '22023';
+    -- same error as "not allowed": do not reveal whether a store id exists
+    raise exception 'kamai: not allowed to change WhatsApp consent of this store' using errcode = '42501';
   end if;
   v_allowed := (select private.kamai_is_platform_admin()) or (select private.kamai_is_server())
     or (select private.kamai_has_role(v_s.tenant_id, array['owner','manager']))

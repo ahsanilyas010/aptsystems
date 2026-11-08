@@ -942,6 +942,7 @@ declare
   v_notes    text := nullif(btrim(p ->> 'notes'), '');
   v_key      text := nullif(btrim(p ->> 'client_key'), '');
   v_at       timestamptz := coalesce(nullif(p ->> 'collected_at', '')::timestamptz, now());
+  v_floor    timestamptz;
   v_role     text;
   v_order    public.kamai_orders;
   v_pay      public.kamai_payments;
@@ -968,7 +969,8 @@ begin
     raise exception 'kamai: client_key is too long' using errcode = '22023';
   end if;
   -- collected_at may not be in the future and may not reach far back (riders: 2 days)
-  if v_at > now() + interval '5 minutes' or v_at < now() - case when v_role = 'rider' then interval '2 days' else interval '35 days' end then
+  v_floor := now() - (case when v_role = 'rider' then interval '2 days' else interval '35 days' end);
+  if v_at > now() + interval '5 minutes' or v_at < v_floor then
     raise exception 'kamai: collected_at is outside the allowed window' using errcode = '22023';
   end if;
   if v_role = 'rider' then
@@ -1237,12 +1239,15 @@ begin
     if v_l.extracted_ref is not null then
       select p.id into v_pid from public.kamai_payments p
       where p.tenant_id = v_st.tenant_id and upper(p.reference_code) = v_l.extracted_ref and p.amount_minor = v_l.amount_minor
-        and p.status = 'recorded' and not exists (select 1 from public.kamai_bank_lines b where b.matched_payment_id = p.id)
-      order by p.collected_at limit 1;
+        and p.status = 'recorded' and p.channel <> 'cash'
+        and not exists (select 1 from public.kamai_bank_lines b where b.matched_payment_id = p.id)
+      order by p.collected_at limit 1
+      for update of p;
       if v_pid is not null then
         update public.kamai_bank_lines set match_status = 'auto', matched_payment_id = v_pid, matched_at = now(),
                meta = meta || jsonb_build_object('pass', 1) where id = v_l.id;
-        update public.kamai_payments set status = 'matched' where id = v_pid;
+        update public.kamai_payments set status = 'matched', verified_at = now(), verified_by = (select auth.uid()) where id = v_pid;
+        perform private.kamai_settle_payment(v_pid);   -- the bank line proves the money arrived
         v_pass1 := v_pass1 + 1;
         continue;
       end if;
@@ -1250,15 +1255,17 @@ begin
     -- pass 2: external ref equals bank ref or appears in the narration
     select p.id into v_pid from public.kamai_payments p
     where p.tenant_id = v_st.tenant_id and p.external_ref is not null and length(p.external_ref) >= 6
-      and p.amount_minor = v_l.amount_minor and p.status = 'recorded'
+      and p.amount_minor = v_l.amount_minor and p.status = 'recorded' and p.channel <> 'cash'
       and (lower(p.external_ref) = lower(coalesce(v_l.bank_ref, ''))
            or position(lower(p.external_ref) in lower(coalesce(v_l.narration, ''))) > 0)
       and not exists (select 1 from public.kamai_bank_lines b where b.matched_payment_id = p.id)
-    order by p.collected_at limit 1;
+    order by p.collected_at limit 1
+    for update of p;
     if v_pid is not null then
       update public.kamai_bank_lines set match_status = 'auto', matched_payment_id = v_pid, matched_at = now(),
              meta = meta || jsonb_build_object('pass', 2) where id = v_l.id;
-      update public.kamai_payments set status = 'matched' where id = v_pid;
+      update public.kamai_payments set status = 'matched', verified_at = now(), verified_by = (select auth.uid()) where id = v_pid;
+      perform private.kamai_settle_payment(v_pid);
       v_pass2 := v_pass2 + 1;
       continue;
     end if;
@@ -1297,6 +1304,7 @@ as $$
 declare
   v_l public.kamai_bank_lines;
   v_p public.kamai_payments;
+  v_s jsonb;
 begin
   select * into v_l from public.kamai_bank_lines where id = p_line_id for update;
   if not found then
@@ -1305,17 +1313,32 @@ begin
   if not (select private.kamai_can(v_l.tenant_id, array['owner','manager','finance'])) then
     raise exception 'kamai: not allowed to confirm bank matches' using errcode = '42501';
   end if;
-  select * into v_p from public.kamai_payments where id = p_payment_id and tenant_id = v_l.tenant_id;
+  select * into v_p from public.kamai_payments where id = p_payment_id and tenant_id = v_l.tenant_id for update;
   if not found then
     raise exception 'kamai: payment not found' using errcode = '22023';
   end if;
   if v_l.match_status <> 'unmatched' then
     raise exception 'kamai: bank line is already %', v_l.match_status using errcode = '22023';
   end if;
+  if v_l.direction <> 'credit' then
+    raise exception 'kamai: only a bank credit can confirm a payment' using errcode = '22023';
+  end if;
+  if v_p.status <> 'recorded' then
+    raise exception 'kamai: payment is already %', v_p.status using errcode = '22023';
+  end if;
+  if v_p.channel = 'cash' then
+    raise exception 'kamai: cash payments are reconciled through the rider cash day, not bank lines' using errcode = '22023';
+  end if;
+  if v_p.amount_minor <> v_l.amount_minor then
+    raise exception 'kamai: payment amount % does not equal the bank line amount %', v_p.amount_minor, v_l.amount_minor using errcode = '22023';
+  end if;
   update public.kamai_bank_lines set match_status = 'manual', matched_payment_id = p_payment_id, matched_at = now(),
          matched_by = (select auth.uid()) where id = p_line_id;
-  update public.kamai_payments set status = 'verified' where id = p_payment_id;
-  return jsonb_build_object('line_id', p_line_id, 'payment_id', p_payment_id, 'match_status', 'manual');
+  update public.kamai_payments set status = 'verified', verified_at = now(), verified_by = (select auth.uid()) where id = p_payment_id;
+  -- verification is what allocates the payment to receivables and posts Dr 1100 bank / Cr 1200
+  v_s := private.kamai_settle_payment(p_payment_id);
+  return jsonb_build_object('line_id', p_line_id, 'payment_id', p_payment_id, 'match_status', 'manual',
+                            'allocated_minor', v_s -> 'allocated_minor', 'ledger_entry_id', v_s -> 'ledger_entry_id');
 end;
 $$;
 revoke execute on function public.kamai_confirm_bank_match(uuid, uuid) from public, anon;
@@ -1333,35 +1356,94 @@ security definer
 set search_path = ''
 as $$
 declare
+  v_priv     boolean;
+  v_today    date := (now() at time zone 'Asia/Karachi')::date;
   v_expected bigint;
-  v_row public.kamai_cash_deposits;
+  v_row      public.kamai_cash_deposits;
+  v_status   text;
+  v_lines    jsonb;
+  v_entry    uuid;
+  v_short    bigint;
 begin
-  if not ((select private.kamai_can(p_tenant, array['owner','manager','finance']))
-          or (p_rider_user_id = (select auth.uid()) and (select private.kamai_has_role(p_tenant, array['rider'])))) then
+  v_priv := (select private.kamai_can(p_tenant, array['owner','manager','finance']));
+  if not (v_priv or (p_rider_user_id = (select auth.uid()) and (select private.kamai_has_role(p_tenant, array['rider'])))) then
     raise exception 'kamai: not allowed to close this cash day' using errcode = '42501';
   end if;
   if p_deposited_minor is null or p_deposited_minor < 0 then
     raise exception 'kamai: deposited amount must be >= 0' using errcode = '22023';
   end if;
+  if p_business_date is null or p_business_date > v_today or (not v_priv and p_business_date < v_today - 7) then
+    raise exception 'kamai: business date is outside the allowed window' using errcode = '22023';
+  end if;
+  if not exists (select 1 from public.kamai_memberships m where m.tenant_id = p_tenant and m.user_id = p_rider_user_id and m.role = 'rider') then
+    raise exception 'kamai: user is not a rider of this tenant' using errcode = '22023';
+  end if;
+
+  select * into v_row from public.kamai_cash_deposits
+   where tenant_id = p_tenant and rider_user_id = p_rider_user_id and business_date = p_business_date for update;
+  if found and v_row.status = 'reconciled' then
+    raise exception 'kamai: this cash day is already reconciled' using errcode = '22023';
+  end if;
+  if found and not v_priv then
+    -- a rider may submit once; only finance can change the amount. Same amount = idempotent (slip/ref/notes may be added).
+    if v_row.deposited_minor <> p_deposited_minor then
+      raise exception 'kamai: this cash day was already submitted with a different amount, ask finance to correct it' using errcode = '22023';
+    end if;
+    update public.kamai_cash_deposits set deposit_ref = coalesce(p_deposit_ref, deposit_ref),
+           slip_url = coalesce(p_slip_url, slip_url), notes = coalesce(p_notes, notes)
+     where id = v_row.id returning * into v_row;
+    return to_jsonb(v_row);
+  end if;
+
   select coalesce(sum(amount_minor), 0) into v_expected from public.kamai_payments
-  where tenant_id = p_tenant and collected_by = p_rider_user_id and channel = 'cash'
+  where tenant_id = p_tenant and collected_by = p_rider_user_id and channel = 'cash' and status <> 'rejected'
     and (collected_at at time zone 'Asia/Karachi')::date = p_business_date;
+  v_status := case when p_deposited_minor <> v_expected then 'variance'
+                   when v_priv then 'reconciled' else 'submitted' end;
+
   insert into public.kamai_cash_deposits
     (tenant_id, rider_user_id, business_date, expected_minor, deposited_minor, method, deposit_ref, slip_url, variance_minor, status, notes, created_by)
   values (p_tenant, p_rider_user_id, p_business_date, v_expected, p_deposited_minor, coalesce(p_method, 'bank'), p_deposit_ref, p_slip_url,
-          p_deposited_minor - v_expected, case when p_deposited_minor = v_expected then 'submitted' else 'variance' end, p_notes, (select auth.uid()))
+          p_deposited_minor - v_expected, v_status, p_notes, (select auth.uid()))
   on conflict (tenant_id, rider_user_id, business_date) do update set
     expected_minor = excluded.expected_minor, deposited_minor = excluded.deposited_minor, method = excluded.method,
     deposit_ref = excluded.deposit_ref, slip_url = excluded.slip_url, variance_minor = excluded.variance_minor,
     status = excluded.status, notes = excluded.notes
   returning * into v_row;
-  if p_deposited_minor > 0 then
-    perform private.kamai_post_entry_core(p_tenant, 'cashdep:' || p_rider_user_id || ':' || p_business_date || ':' || p_deposited_minor,
-      'cash_deposit', v_row.id::text, now(), 'Rider cash deposit ' || p_business_date,
-      jsonb_build_array(
-        jsonb_build_object('account_code', '1150', 'direction', 'debit', 'amount_minor', p_deposited_minor),
-        jsonb_build_object('account_code', '1110', 'direction', 'credit', 'amount_minor', p_deposited_minor,
-                           'party_type', 'rider', 'party_id', p_rider_user_id::text)));
+
+  -- the ledger moves only on finance confirmation (a rider's own submission never posts)
+  if v_priv and (v_expected > 0 or p_deposited_minor > 0) then
+    -- unchanged amounts on an already-posted day: nothing to do
+    if v_row.ledger_entry_id is null or v_row.post_version = 0
+       or (select coalesce(sum(l.amount_minor), 0) from public.kamai_ledger_lines l join public.kamai_ledger_accounts a on a.id = l.account_id
+           where l.entry_id = v_row.ledger_entry_id and a.code = '1150') <> p_deposited_minor
+       or (select coalesce(sum(l.amount_minor), 0) from public.kamai_ledger_lines l join public.kamai_ledger_accounts a on a.id = l.account_id
+           where l.entry_id = v_row.ledger_entry_id and a.code = '1110' and l.direction = 'credit') <> v_expected then
+      if v_row.ledger_entry_id is not null then
+        perform private.kamai_reverse_entry_core(v_row.ledger_entry_id, 'Correction of rider cash deposit ' || p_business_date);
+      end if;
+      v_short := v_expected - p_deposited_minor;     -- > 0 shortage, < 0 overage
+      v_lines := '[]'::jsonb;
+      if p_deposited_minor > 0 then
+        v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_code', '1150', 'direction', 'debit', 'amount_minor', p_deposited_minor));
+      end if;
+      if v_short > 0 then
+        v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_code', '5600', 'direction', 'debit', 'amount_minor', v_short,
+                                                                   'memo', 'cash shortage'));
+      end if;
+      if v_expected > 0 then
+        v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_code', '1110', 'direction', 'credit', 'amount_minor', v_expected,
+                                                                   'party_type', 'rider', 'party_id', p_rider_user_id::text));
+      end if;
+      if v_short < 0 then
+        v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_code', '5600', 'direction', 'credit', 'amount_minor', -v_short,
+                                                                   'memo', 'cash overage'));
+      end if;
+      v_entry := private.kamai_post_entry_core(p_tenant, 'cashdep:' || v_row.id || ':v' || (v_row.post_version + 1), 'cash_deposit',
+        v_row.id::text, now(), 'Rider cash deposit ' || p_business_date, v_lines);
+      update public.kamai_cash_deposits set ledger_entry_id = v_entry, post_version = post_version + 1
+       where id = v_row.id returning * into v_row;
+    end if;
   end if;
   return to_jsonb(v_row);
 end;
