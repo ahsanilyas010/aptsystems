@@ -16,8 +16,8 @@ export const OTP_MESSAGES: Record<string, string> = {
 export async function submitQueued(q: QueuedDelivery): Promise<string | null> {
   let photoUrl: string | null = null
   let sigUrl: string | null = null
-  if (q.photo) photoUrl = (await uploadPod(`${q.tenantId}/${q.orderId}/photo.jpg`, q.photo, 'image/jpeg')).url
-  if (q.signature) sigUrl = (await uploadPod(`${q.tenantId}/${q.orderId}/signature.png`, q.signature, 'image/png')).url
+  if (q.photo) photoUrl = (await uploadPod(`${q.tenantId}/${q.orderId}/photo.jpg`, q.photo, 'image/jpeg')).path
+  if (q.signature) sigUrl = (await uploadPod(`${q.tenantId}/${q.orderId}/signature.png`, q.signature, 'image/png')).path
   const { data, error } = await supabase.rpc('kamai_confirm_delivery', { ...q.args, p_photo_url: photoUrl, p_signature_url: sigUrl })
   if (error) throw error
   const res = data as { ok?: boolean; error?: string } | null

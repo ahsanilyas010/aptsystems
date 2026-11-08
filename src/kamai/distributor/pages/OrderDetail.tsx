@@ -7,6 +7,7 @@ import { callKamaiApi } from '../../lib/api'
 import { PKR, fmtDateTime, humanize, padNo } from '../../lib/format'
 import { mapsUrl } from '../../lib/geo'
 import { supabase } from '../../lib/supabase'
+import { ProofImage } from '../../lib/pod'
 import type { KamaiCreditDecisionsRow, KamaiDeliveryProofsRow, KamaiInvoicesRow, KamaiOrderEventsRow, KamaiOrderItemsRow, KamaiOrdersRow } from '../../lib/db-types'
 import { Dl } from '../lib/Drawer'
 import { ErrorState, Gate, NoTenant, errMsg, rpc, useCan, useRefreshAll, useStores, useTenantId, useTq } from '../lib/data'
@@ -150,8 +151,8 @@ export function Component() {
                 {p.disputed_at ? <p className="text-sm text-k-red">Disputed: {p.dispute_reason}</p> : null}
                 {p.delivered_lat != null && p.delivered_lng != null ? <a className="inline-flex items-center gap-1 text-[13px] font-semibold text-k-green" href={mapsUrl({ lat: p.delivered_lat, lng: p.delivered_lng })} target="_blank" rel="noreferrer noopener"><MapPin size={13} />Delivery location</a> : null}
                 <div className="flex gap-2">
-                  {p.photo_url ? <a href={p.photo_url} target="_blank" rel="noreferrer noopener"><img src={p.photo_url} alt="Delivery proof" className="h-24 w-24 rounded-lg border border-k-border object-cover" /></a> : null}
-                  {p.signature_url ? <a href={p.signature_url} target="_blank" rel="noreferrer noopener"><img src={p.signature_url} alt="Signature" className="h-24 w-24 rounded-lg border border-k-border bg-white object-contain" /></a> : null}
+                  <ProofImage value={p.photo_url} alt="Delivery proof" className="object-cover" />
+                  <ProofImage value={p.signature_url} alt="Signature" className="bg-white object-contain" />
                 </div>
               </div>
             ) : <p className="mt-3 text-sm text-k-muted">No delivery proof yet.</p>}

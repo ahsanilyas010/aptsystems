@@ -55,7 +55,7 @@ export function Component() {
       if (slip) {
         const r = await uploadPod(`${tenantId}/cash/${today}/slip.jpg`, slip, 'image/jpeg')
         if (r.error) throw new Error(r.error)
-        slipUrl = r.url
+        slipUrl = r.path
       }
       const m = METHODS.find((x) => x.value === method)!
       const { data, error } = await supabase.rpc('kamai_close_cash_day', {

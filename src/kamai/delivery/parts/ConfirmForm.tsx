@@ -137,13 +137,13 @@ export function ConfirmForm({ tenantId, order, items, store, onDone }: Props) {
       let sigPath: string | null = null
       if (photo) {
         const r = await uploadPod(`${tenantId}/${order.id}/photo.jpg`, photo, 'image/jpeg')
-        photoPath = r.url
+        photoPath = r.path
         if (r.error && !args.p_override_reason) {
           setError(r.error)
           return
         }
       }
-      if (sigBlob) sigPath = (await uploadPod(`${tenantId}/${order.id}/signature.png`, sigBlob, 'image/png')).url
+      if (sigBlob) sigPath = (await uploadPod(`${tenantId}/${order.id}/signature.png`, sigBlob, 'image/png')).path
 
       try {
         const { data, error: e } = await supabase.rpc('kamai_confirm_delivery', { ...args, p_photo_url: photoPath, p_signature_url: sigPath })

@@ -51,7 +51,8 @@ export function PositionDrawer({
     },
   })
   const d = q.data
-  const photo = d?.proof?.photo_url
+  const photoUrl = useSignedUrl(d?.proof?.photo_url)
+  const pdfUrl = safeHttpUrl(d?.invoice?.pdf_url)
   const canShowFinance = canFinance && !!row && row.status === 'open' && (row.financed_minor ?? 0) === 0 && !!row.eligible_flag
 
   return (
@@ -128,14 +129,10 @@ export function PositionDrawer({
                     {d.proof.override_reason ? <Row k="Override reason" v={d.proof.override_reason} /> : null}
                     <Row k="Receiver" v={d.proof.receiver_name ?? '—'} />
                     {d.proof.disputed_at ? <Row k="Dispute" v={d.proof.dispute_reason ?? 'Open'} /> : null}
-                    {photo ? (
-                      photo.startsWith('http') ? (
-                        <a href={photo} target="_blank" rel="noreferrer">
-                          <img src={photo} alt="Delivery proof" className="mt-3 max-h-64 rounded-xl border border-k-border object-cover" />
-                        </a>
-                      ) : (
-                        <p className="mt-2 break-all text-xs text-k-muted">Photo: {photo}</p>
-                      )
+                    {photoUrl ? (
+                      <a href={photoUrl} target="_blank" rel="noreferrer noopener">
+                        <img src={photoUrl} alt="Delivery proof" className="mt-3 max-h-64 rounded-xl border border-k-border object-cover" />
+                      </a>
                     ) : null}
                   </>
                 ) : (
@@ -150,8 +147,8 @@ export function PositionDrawer({
                     <Row k="Date" v={fmtDate(d.invoice.invoice_date)} />
                     <Row k="Total incl. tax" v={PKR(d.invoice.total_incl_minor)} />
                     <Row k="FBR" v={d.invoice.fbr_invoice_number ?? humanize(d.invoice.fbr_status) ?? '—'} />
-                    {d.invoice.pdf_url ? (
-                      <a className="mt-2 inline-block text-sm font-bold text-k-green" href={d.invoice.pdf_url} target="_blank" rel="noreferrer">
+                    {pdfUrl ? (
+                      <a className="mt-2 inline-block text-sm font-bold text-k-green" href={pdfUrl} target="_blank" rel="noreferrer noopener">
                         Open invoice PDF
                       </a>
                     ) : null}

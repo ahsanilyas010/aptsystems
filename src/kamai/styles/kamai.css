@@ -4,7 +4,7 @@
  * (@source "../" is relative to this file). Imported only by KamaiRoot.tsx so
  * the legacy inline-styled CRM at '/' never loads it.
  */
-@layer theme, base, components, utilities;
+@layer legacy, theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @source "../";

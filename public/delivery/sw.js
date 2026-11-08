@@ -2,7 +2,7 @@
  * - cache-first: same-origin /delivery/ static files and /assets/*
  * - network-first: navigations under /delivery/, falling back to the cached /delivery/ shell
  * - never touches /api, other origins (supabase) or non-GET requests */
-const VERSION = 'kamai-delivery-v1'
+const VERSION = 'kamai-delivery-v2'
 const SHELL = '/delivery/'
 const PRECACHE = [SHELL, '/delivery/manifest.webmanifest', '/delivery/icons/icon-192.png', '/delivery/icons/icon-512.png']
 

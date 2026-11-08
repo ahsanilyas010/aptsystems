@@ -10,7 +10,7 @@ export const STORE_COLS = 'id,name,mobile,address,area,latitude,longitude,owner_
 /** Default geofence radius; the server reads tenant.settings.geofence_radius_m and is authoritative. */
 export const DEFAULT_GEOFENCE_M = 150
 export const CASH_CAP_MINOR = 5_000_000 // Rs 50,000
-export const POD_BUCKET = 'kamai-pod'
+export { POD_BUCKET } from '../../lib/pod'
 
 /** Rider's tenant: active tenant if it is a rider membership, else the first rider membership. */
 export function useRiderTenant(): { tenantId: string | null; userId: string | null } {

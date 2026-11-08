@@ -1,5 +1,5 @@
 import { supabase } from '../../lib/supabase'
-import { POD_BUCKET } from './data'
+import { POD_BUCKET } from '../../lib/pod'
 
 /** Downscale an image file to max 1280px on the long edge, JPEG q0.75. */
 export async function resizeImage(file: Blob, maxEdge = 1280, quality = 0.75): Promise<Blob> {
@@ -40,22 +40,23 @@ function draw(src: CanvasImageSource, w: number, h: number, maxEdge: number, qua
 }
 
 export interface UploadResult {
-  url: string | null
+  /** storage path inside kamai-pod (<tenant_id>/...), not a URL */
+  path: string | null
   error: string | null
 }
 
-/** Upload to the kamai-pod bucket; never throws. A missing bucket yields a friendly error. */
+/** Upload to the private kamai-pod bucket (path must start with <tenant_id>/); never throws. A missing bucket yields a friendly error. */
 export async function uploadPod(path: string, blob: Blob, contentType: string): Promise<UploadResult> {
   try {
     const { error } = await supabase.storage.from(POD_BUCKET).upload(path, blob, { contentType, upsert: true })
     if (error) {
       const m = error.message || ''
       if (/bucket not found|not found/i.test(m))
-        return { url: null, error: 'Photo upload ka storage tayyar nahi (kamai-pod). Override reason ke saath aage barhein. / Proof storage is not set up yet (kamai-pod bucket); continue with an override reason.' }
-      return { url: null, error: `Upload fail: ${m}` }
+        return { path: null, error: 'Photo upload ka storage tayyar nahi (kamai-pod). Override reason ke saath aage barhein. / Proof storage is not set up yet (kamai-pod bucket); continue with an override reason.' }
+      return { path: null, error: `Upload fail: ${m}` }
     }
-    return { url: supabase.storage.from(POD_BUCKET).getPublicUrl(path).data.publicUrl, error: null }
+    return { path, error: null }
   } catch (e) {
-    return { url: null, error: `Upload fail: ${e instanceof Error ? e.message : 'network'}` }
+    return { path: null, error: `Upload fail: ${e instanceof Error ? e.message : 'network'}` }
   }
 }
