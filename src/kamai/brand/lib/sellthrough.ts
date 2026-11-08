@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { supabase } from '../../lib/supabase'
-import type { KamaiOrderItemsRow, KamaiOrdersRow, KamaiProductsRow, KamaiStoresRow } from '../../lib/db-types'
-import { chunk, useBrandProducts, useTid } from './data'
+import type { KamaiBrandSellthroughRow, KamaiProductsRow } from '../../lib/db-types'
+import { useBrandProducts, useTid } from './data'
 
 export interface Agg {
   key: string
@@ -21,21 +21,6 @@ export interface SellThrough {
   byDistributor: Agg[]
 }
 
-type Item = Pick<KamaiOrderItemsRow, 'order_id' | 'product_id' | 'delivered_qty' | 'line_total_minor' | 'tenant_id'>
-type Ord = Pick<KamaiOrdersRow, 'id' | 'tenant_id' | 'store_id' | 'fulfilment_status' | 'delivered_at'>
-
-async function inChunks<T>(table: string, cols: string, col: string, ids: string[], extra?: (q: any) => any): Promise<T[]> {
-  const out: T[] = []
-  for (const part of chunk(ids, 80)) {
-    let q = supabase.from(table).select(cols).in(col, part)
-    if (extra) q = extra(q)
-    const { data, error } = await q.limit(10000)
-    if (error) throw new Error(error.message)
-    out.push(...((data ?? []) as T[]))
-  }
-  return out
-}
-
 function rollup(map: Map<string, { label: string; units: number; gmv: number; stores: Set<string> }>): Agg[] {
   return [...map].map(([key, v]) => ({ key, label: v.label, units: v.units, gmv: v.gmv, stores: v.stores.size })).sort((a, b) => b.gmv - a.gmv)
 }
@@ -50,13 +35,9 @@ export function useSellThrough(days: number) {
     queryKey: ['brand', tid, 'sellthrough', days, ids.length],
     enabled: !!tid && products.isSuccess,
     queryFn: async (): Promise<SellThrough> => {
-      const since = new Date(Date.now() - days * 86_400_000).toISOString()
-      const items = await inChunks<Item>('kamai_order_items', 'order_id,product_id,delivered_qty,line_total_minor,tenant_id', 'product_id', ids, (q) => q.gte('created_at', new Date(Date.now() - (days + 60) * 86_400_000).toISOString()))
-      const orders = await inChunks<Ord>('kamai_orders', 'id,tenant_id,store_id,fulfilment_status,delivered_at', 'id', [...new Set(items.map((i) => i.order_id))])
-      const ok = new Map(orders.filter((o) => o.fulfilment_status === 'delivered' && o.delivered_at && o.delivered_at >= since).map((o) => [o.id, o]))
-      const storeIds = [...new Set([...ok.values()].map((o) => o.store_id))]
-      const stores = storeIds.length ? await inChunks<Pick<KamaiStoresRow, 'id' | 'area'>>('kamai_stores', 'id,area', 'id', storeIds) : []
-      const area = new Map(stores.map((s) => [s.id, s.area?.trim() || 'Unknown']))
+      const { data, error } = await supabase.rpc('kamai_brand_sellthrough', { p_days: days })
+      if (error) throw new Error(error.message)
+      const rows = (data ?? []) as KamaiBrandSellthroughRow[]
       const pById = new Map(prods.map((p) => [p.id, p]))
 
       const sku = new Map<string, { label: string; units: number; gmv: number; stores: Set<string> }>()
@@ -72,20 +53,19 @@ export function useSellThrough(days: number) {
         v.stores.add(store)
         m.set(key, v)
       }
-      for (const it of items) {
-        const o = ok.get(it.order_id)
-        if (!o) continue
+      for (const it of rows) {
         const p = pById.get(it.product_id)
         const units = it.delivered_qty ?? 0
         const gmv = it.line_total_minor ?? 0
+        const areaName = it.area?.trim() || 'Unknown'
         totalUnits += units
         totalGmv += gmv
-        bump(sku, it.product_id, p ? `${p.name} (${p.sku})` : it.product_id.slice(0, 8), units, gmv, o.store_id)
-        bump(ar, area.get(o.store_id) ?? 'Unknown', area.get(o.store_id) ?? 'Unknown', units, gmv, o.store_id)
-        bump(ds, o.tenant_id, o.tenant_id, units, gmv, o.store_id)
-        const s = ordersPerStore.get(o.store_id) ?? new Set<string>()
-        s.add(o.id)
-        ordersPerStore.set(o.store_id, s)
+        bump(sku, it.product_id, p ? `${p.name} (${p.sku})` : `${it.product_name} (${it.sku})`, units, gmv, it.store_id)
+        bump(ar, areaName, areaName, units, gmv, it.store_id)
+        bump(ds, it.distributor_tenant_id, it.distributor_tenant_id, units, gmv, it.store_id)
+        const so = ordersPerStore.get(it.store_id) ?? new Set<string>()
+        so.add(it.order_id)
+        ordersPerStore.set(it.store_id, so)
       }
       return {
         totalUnits,

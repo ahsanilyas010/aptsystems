@@ -13,11 +13,11 @@ import { padGtin14, validateGtin } from '../lib/gtin'
 
 export const PRODUCT_CSV_COLUMNS = ['sku', 'name', 'name_ur', 'category', 'gtin', 'hs_code', 'fbr_uom', 'tax_rate_pct', 'sale_type', 'is_third_schedule', 'retail_price', 'cost_price', 'trade_price', 'pack_size', 'active'] as const
 
-export function exportProducts(rows: KamaiProductsRow[]) {
+export function exportProducts(rows: KamaiProductsRow[], costs: Record<string, number> = {}) {
   const data = rows.map((p) => ({
     sku: p.sku, name: p.name, name_ur: p.name_ur ?? '', category: p.category ?? '', gtin: p.gtin14 ?? '', hs_code: p.hs_code ?? '', fbr_uom: p.fbr_uom ?? '',
     tax_rate_pct: p.tax_rate_pct, sale_type: p.sale_type, is_third_schedule: p.is_third_schedule ? 'yes' : 'no',
-    retail_price: p.retail_price_minor != null ? fromMinor(p.retail_price_minor) : '', cost_price: p.cost_price_minor != null ? fromMinor(p.cost_price_minor) : '',
+    retail_price: p.retail_price_minor != null ? fromMinor(p.retail_price_minor) : '', cost_price: costs[p.id] != null ? fromMinor(costs[p.id]) : '',
     trade_price: fromMinor(p.trade_price_minor), pack_size: p.pack_size ?? '', active: p.active ? 'yes' : 'no',
   }))
   downloadRowsAsCsv('kamai-products', data as unknown as Array<Record<string, unknown>>, [...PRODUCT_CSV_COLUMNS])
@@ -91,13 +91,22 @@ export function ImportProductsModal({ open, onClose, tenantId }: { open: boolean
           tenant_id: tenantId, sku: d.sku, name: d.name, name_ur: d.name_ur || null, category: d.category || null,
           gtin14: padGtin14(digits), gtin_type: digits ? digits.length : null, hs_code: d.hs_code || null, fbr_uom: d.fbr_uom || null,
           tax_rate_pct: d.tax_rate_pct, sale_type: d.sale_type || 'Goods at standard rate (default)', is_third_schedule: d.is_third_schedule,
-          retail_price_minor: d.retail_price != null ? toMinor(d.retail_price) : null, cost_price_minor: d.cost_price != null ? toMinor(d.cost_price) : null,
+          retail_price_minor: d.retail_price != null ? toMinor(d.retail_price) : null,
           trade_price_minor: toMinor(d.trade_price), pack_size: d.pack_size || null, active: d.active, created_by: user?.id ?? null,
         }
       })
       for (let i = 0; i < payload.length; i += 200) {
-        const { error } = await supabase.from('kamai_products').upsert(payload.slice(i, i + 200), { onConflict: 'tenant_id,sku' })
+        const { data: saved, error } = await supabase.from('kamai_products').upsert(payload.slice(i, i + 200), { onConflict: 'tenant_id,sku' }).select('id,sku')
         if (error) throw new Error(`Batch ${i / 200 + 1}: ${error.message}`)
+        const idBySku = new Map((saved ?? []).map((r) => [r.sku as string, r.id as string]))
+        const costRows = valid.slice(i, i + 200).flatMap((r) => {
+          const pid = idBySku.get(r.data!.sku)
+          return pid && r.data!.cost_price != null ? [{ product_id: pid, tenant_id: tenantId, cost_price_minor: toMinor(r.data!.cost_price) }] : []
+        })
+        if (costRows.length) {
+          const cr = await supabase.from('kamai_product_costs').upsert(costRows, { onConflict: 'product_id' })
+          if (cr.error) throw new Error(`Batch ${i / 200 + 1} costs: ${cr.error.message}`)
+        }
       }
       toast.success(`${payload.length} products imported`)
       await refresh()

@@ -31,7 +31,10 @@ begin
   v_t := split_part(p_name, '/', 1)::uuid;
   v_seg := split_part(p_name, '/', 2);
   v_role := private.kamai_my_role(v_t);
-  if v_role is null then return false; end if;
+  if v_role is null then
+    -- a lender with an active lender_view link reads proof of delivery for the loan book it finances
+    return p_mode = 'read' and exists (select 1 from private.kamai_linked_tenants(array['lender_view']) lt(id) where lt.id = v_t);
+  end if;
   if p_mode = 'delete' then return v_role in ('owner','manager'); end if;
   if v_role in ('owner','manager','booker') then return true; end if;
   if v_role in ('finance','viewer') then return p_mode = 'read'; end if;

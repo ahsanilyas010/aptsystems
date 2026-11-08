@@ -119,7 +119,7 @@ stores/orders/products data). Distributors are created from `/os/tenants`.
 - `kamai_products` tenant_id, sku (unique per tenant), name, name_ur, category, brand_tenant_id,
   legacy_product_id (text to products.id), gtin14 (14-digit text, check-digit CHECK), gtin_type,
   hs_code, fbr_uom, tax_rate_pct, sale_type, is_third_schedule, retail_price_minor,
-  cost_price_minor, trade_price_minor, image_url, pack_size, active.
+  trade_price_minor (cost lives in kamai_product_costs), image_url, pack_size, active.
 - `kamai_price_lists` tenant_id, name, tier ('A','B','C','default'). `kamai_price_list_items`
   price_list_id, product_id, price_minor.
 - `kamai_stores` tenant_id, legacy_store_id (uuid to stores.id), legacy_customer_id (text to
@@ -141,7 +141,7 @@ stores/orders/products data). Distributors are created from `/os/tenants`.
 - `kamai_order_items` order_id, product_id, sku, name, qty, delivered_qty, unit_price_minor,
   tax_rate_pct, line_total_minor.
 - `kamai_order_events` append-only: order_id, from_state, to_state, actor, reason, meta, at.
-- `kamai_delivery_proofs` order_id (PK), otp_hash, otp_expires_at, otp_attempts,
+- `kamai_delivery_proofs` order_id (PK; OTP hash/expiry/attempts live in kamai_delivery_otp_secrets),
   otp_verified_at, delivered_lat/lng, gps_accuracy_m, store_lat/lng snapshot, distance_m,
   geofence_radius_m, geofence_ok, override_reason, photo_url, signature_url, receiver_name,
   delivery_status ('full','partial','refused'), dispute_window_ends_at, disputed_at,

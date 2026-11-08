@@ -20,7 +20,7 @@ function fromRow(p: KamaiProductsRow): Form {
   return {
     sku: p.sku, name: p.name, name_ur: p.name_ur ?? '', category: p.category ?? '', gtin: p.gtin14 ?? '', hs_code: p.hs_code ?? '', fbr_uom: p.fbr_uom ?? '',
     tax: String(p.tax_rate_pct), sale_type: p.sale_type, third: p.is_third_schedule,
-    retail: p.retail_price_minor != null ? String(fromMinor(p.retail_price_minor)) : '', cost: p.cost_price_minor != null ? String(fromMinor(p.cost_price_minor)) : '',
+    retail: p.retail_price_minor != null ? String(fromMinor(p.retail_price_minor)) : '', cost: '',
     trade: String(fromMinor(p.trade_price_minor)), pack: p.pack_size ?? '', active: p.active,
   }
 }
@@ -33,9 +33,22 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
   const [f, setF] = useState<Form>(EMPTY)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [origCost, setOrigCost] = useState('')
   useEffect(() => {
     if (product) setF(product === 'new' ? EMPTY : fromRow(product))
     setErr(null)
+    setOrigCost('')
+    if (product && product !== 'new') {
+      // cost lives in kamai_product_costs (owner, manager, finance only); other roles simply get no row
+      let live = true
+      void supabase.from('kamai_product_costs').select('cost_price_minor').eq('product_id', product.id).maybeSingle().then(({ data }) => {
+        if (!live || !data) return
+        const c = String(fromMinor(data.cost_price_minor as number))
+        setOrigCost(c)
+        setF((p) => ({ ...p, cost: c }))
+      })
+      return () => { live = false }
+    }
   }, [product])
   if (!product) return null
   const edit = product !== 'new' ? product : null
@@ -65,7 +78,6 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
       sale_type: f.sale_type.trim() || 'Goods at standard rate (default)',
       is_third_schedule: f.third,
       retail_price_minor: f.retail ? toMinor(f.retail) : null,
-      cost_price_minor: f.cost ? toMinor(f.cost) : null,
       trade_price_minor: toMinor(f.trade),
       pack_size: f.pack.trim() || null,
       active: f.active,
@@ -74,9 +86,16 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
     setBusy(true)
     try {
       const res = edit
-        ? await supabase.from('kamai_products').update(row).eq('id', edit.id).eq('tenant_id', tenantId)
-        : await supabase.from('kamai_products').insert({ ...row, created_by: user?.id ?? null })
+        ? await supabase.from('kamai_products').update(row).eq('id', edit.id).eq('tenant_id', tenantId).select('id').single()
+        : await supabase.from('kamai_products').insert({ ...row, created_by: user?.id ?? null }).select('id').single()
       if (res.error) throw new Error(res.error.code === '23505' ? 'SKU or GTIN already exists' : res.error.message)
+      if (f.cost !== origCost) {
+        const pid = (res.data as { id: string }).id
+        const cr = f.cost
+          ? await supabase.from('kamai_product_costs').upsert({ product_id: pid, tenant_id: tenantId, cost_price_minor: toMinor(f.cost) }, { onConflict: 'product_id' })
+          : await supabase.from('kamai_product_costs').delete().eq('product_id', pid)
+        if (cr.error) throw new Error(`Product saved, but cost was not: ${cr.error.message}`)
+      }
       toast.success(edit ? 'Product updated' : 'Product added')
       await refresh()
       onClose()

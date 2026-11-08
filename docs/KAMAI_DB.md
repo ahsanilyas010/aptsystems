@@ -115,7 +115,7 @@ Each store, tenant and dunning row runs in its own exception block: a failure is
 
 ## Known limits
 
-Further tax and extra tax are stored per line but not computed in v1. `otp_hash` is readable by roles that can read delivery proofs (the plain OTP is deliberately shown to the store). The store limit is
+Further tax and extra tax are stored per line but not computed in v1. The OTP hash, expiry and attempts live in `kamai_delivery_otp_secrets` (no access for anon or authenticated; only SECURITY DEFINER functions); the plain OTP is deliberately shown to the store through `kamai_delivery_otps`. The store limit is
 tier-driven: `kamai_evaluate_store` keeps a manually edited limit until the tier changes. `floor_tier` (set to 1 for legacy credit-terms stores) stops the engine downgrading imported stores for lack of Kamai history.
 
 ## Proof-of-delivery storage (kamai-pod)

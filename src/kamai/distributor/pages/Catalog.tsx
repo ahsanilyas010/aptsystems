@@ -3,6 +3,7 @@ import { Download, Plus, Search, Upload } from 'lucide-react'
 import { Badge, Button, Card, EmptyState, Input, PageHeader, Table, Tabs } from '../../ui'
 import type { Column } from '../../ui'
 import { PKR } from '../../lib/format'
+import { supabase } from '../../lib/supabase'
 import type { KamaiProductsRow } from '../../lib/db-types'
 import { ErrorState, NoTenant, useCan, useProducts, useTenantId } from '../lib/data'
 import { PriceLists } from '../parts/PriceLists'
@@ -19,6 +20,12 @@ export function Component() {
   const [q, setQ] = useState('')
   const [edit, setEdit] = useState<KamaiProductsRow | 'new' | null>(null)
   const [imp, setImp] = useState(false)
+
+  async function exportWithCosts() {
+    // cost prices live in kamai_product_costs (owner, manager, finance); other roles export without them
+    const { data } = await supabase.from('kamai_product_costs').select('product_id,cost_price_minor').eq('tenant_id', tid as string)
+    exportProducts(prods.rows, Object.fromEntries((data ?? []).map((r) => [r.product_id as string, r.cost_price_minor as number])))
+  }
 
   const rows = useMemo(() => {
     const s = q.trim().toLowerCase()
@@ -46,7 +53,7 @@ export function Component() {
         description="Products with FBR fields, price lists and tier prices."
         actions={
           <>
-            <Button variant="secondary" icon={<Download size={15} />} onClick={() => exportProducts(prods.rows)} disabled={!prods.rows.length}>Export CSV</Button>
+            <Button variant="secondary" icon={<Download size={15} />} onClick={() => void exportWithCosts()} disabled={!prods.rows.length}>Export CSV</Button>
             {canEdit ? (
               <>
                 <Button variant="secondary" icon={<Upload size={15} />} onClick={() => setImp(true)}>Import CSV</Button>

@@ -107,6 +107,8 @@ export interface KamaiCashDepositsRow {
   variance_minor: number
   status: 'open' | 'submitted' | 'reconciled' | 'variance'
   notes: string | null
+  ledger_entry_id: string | null
+  post_version: number
   created_by: string | null
   created_at: string
   updated_at: string
@@ -223,9 +225,6 @@ export interface KamaiDeliveryOtpsRow {
 export interface KamaiDeliveryProofsRow {
   order_id: string
   tenant_id: string
-  otp_hash: string | null
-  otp_expires_at: string | null
-  otp_attempts: number
   otp_verified_at: string | null
   delivered_lat: number | null
   delivered_lng: number | null
@@ -523,6 +522,7 @@ export interface KamaiPaymentAllocationsRow {
   payment_id: string
   exposure_id: string
   amount_minor: number
+  reversed_at: string | null
   created_at: string
 }
 
@@ -541,6 +541,14 @@ export interface KamaiPaymentsRow {
   notes: string | null
   order_id: string | null
   legacy_payment_id: string | null
+  client_key: string | null
+  reported_by: string | null
+  settled_at: string | null
+  order_applied_minor: number
+  verified_by: string | null
+  verified_at: string | null
+  reversed_at: string | null
+  reversal_reason: string | null
   created_at: string
 }
 
@@ -571,6 +579,13 @@ export interface KamaiPriceListsRow {
   updated_at: string
 }
 
+export interface KamaiProductCostsRow {
+  product_id: string
+  tenant_id: string
+  cost_price_minor: number
+  updated_at: string
+}
+
 export interface KamaiProductsRow {
   id: string
   tenant_id: string
@@ -588,7 +603,6 @@ export interface KamaiProductsRow {
   sale_type: string
   is_third_schedule: boolean
   retail_price_minor: number | null
-  cost_price_minor: number | null
   trade_price_minor: number
   image_url: string | null
   pack_size: string | null
@@ -828,6 +842,7 @@ export const KAMAI_TABLES = [
   'kamai_platform_admins',
   'kamai_price_list_items',
   'kamai_price_lists',
+  'kamai_product_costs',
   'kamai_products',
   'kamai_store_imports',
   'kamai_stores',
@@ -955,6 +970,7 @@ export interface RecordPaymentInput {
   evidence_url?: string
   notes?: string
   order_id?: string
+  client_key?: string
 }
 export interface RecordPaymentResult {
   payment_id: string
@@ -964,9 +980,15 @@ export interface RecordPaymentResult {
   ledger_entry_id: string
 }
 
+export interface KamaiBrandSellthroughRow {
+  distributor_tenant_id: string; product_id: string; sku: string; product_name: string; order_id: string; store_id: string
+  area: string | null; delivered_qty: number; line_total_minor: number; delivered_at: string
+}
+
 export interface ReportPaymentResult {
   payment_id: string
   status: string
+  verified: boolean
 }
 
 export interface LedgerLineInput {
@@ -999,7 +1021,7 @@ export interface KamaiRpc {
     returns: ConfirmDeliveryResult
   }
   kamai_dispute_delivery: { args: { p_order_id: string; p_reason: string }; returns: KamaiDeliveryProofsRow }
-  kamai_resolve_dispute: { args: { p_order_id: string; p_resolution: string; p_credit_minor?: number }; returns: { order_id: string; credit_minor: number; credit_note_id: string | null } }
+  kamai_resolve_dispute: { args: { p_order_id: string; p_resolution: string; p_credit_minor?: number }; returns: { order_id: string; credit_minor: number; credit_note_id: string | null; unapplied_minor?: number } }
   kamai_convert_order_to_cod: { args: { p_order_id: string }; returns: KamaiCreditDecisionsRow }
   kamai_issue_invoice: { args: { p_order_id: string }; returns: string }
   kamai_credit_decide: { args: { p_order_id: string }; returns: KamaiCreditDecisionsRow }
@@ -1007,6 +1029,8 @@ export interface KamaiRpc {
   kamai_store_outstanding: { args: { p_store_id: string }; returns: number }
   kamai_record_payment: { args: { p: RecordPaymentInput }; returns: RecordPaymentResult }
   kamai_report_payment: { args: { p_store_id: string; p_amount_minor: number; p_method: PaymentChannel; p_reference: string; p_order_id?: string | null }; returns: ReportPaymentResult }
+  kamai_reverse_payment: { args: { p_payment_id: string; p_reason: string }; returns: { payment_id: string; status: 'rejected'; reversal_entry_id: string | null } }
+  kamai_brand_sellthrough: { args: { p_days?: number }; returns: KamaiBrandSellthroughRow[] }
   kamai_set_wa_opt_in: { args: { p_store_id: string; p_opt_in: boolean; p_source?: string }; returns: unknown }
   kamai_import_bank_lines: { args: { p_statement: BankStatementInput; p_lines: BankLineInput[] }; returns: { statement_id: string; inserted: number; duplicate: boolean } }
   kamai_match_bank_lines: { args: { p_statement_id: string }; returns: { statement_id: string; matched_by_reference: number; matched_by_external_ref: number; proposed: number; ambiguous: number } }
@@ -1033,7 +1057,7 @@ export const KAMAI_RPCS = [
   'kamai_my_context', 'kamai_create_tenant', 'kamai_add_member', 'kamai_submit_order', 'kamai_transition_order',
   'kamai_assign_rider', 'kamai_issue_delivery_otp', 'kamai_confirm_delivery', 'kamai_dispute_delivery',
   'kamai_resolve_dispute', 'kamai_convert_order_to_cod', 'kamai_issue_invoice', 'kamai_credit_decide',
-  'kamai_evaluate_store', 'kamai_store_outstanding', 'kamai_record_payment', 'kamai_report_payment', 'kamai_set_wa_opt_in', 'kamai_import_bank_lines',
+  'kamai_evaluate_store', 'kamai_store_outstanding', 'kamai_record_payment', 'kamai_report_payment', 'kamai_reverse_payment', 'kamai_brand_sellthrough', 'kamai_set_wa_opt_in', 'kamai_import_bank_lines',
   'kamai_match_bank_lines', 'kamai_confirm_bank_match', 'kamai_close_cash_day', 'kamai_post_entry',
   'kamai_reverse_entry', 'kamai_finance_order', 'kamai_settle_financing', 'kamai_os_kpis', 'kamai_run_daily',
   'kamai_import_legacy', 'kamai_distance_m', 'kamai_line_tax', 'kamai_dpd_bucket', 'kamai_gtin_check_digit_ok',
@@ -1055,6 +1079,7 @@ export interface OsKpis {
 export interface RunDailyResult {
   date: string; stores_evaluated: number; snapshots: number; dunning_events: number
   wa_queued: number; tenants_paused: number; tenants_unpaused: number
+  errors?: number; error_samples?: string[]
 }
 
 // Default credit policy rules (kamai_credit_policies.rules)
