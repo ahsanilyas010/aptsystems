@@ -168,7 +168,7 @@ export function Component() {
         <div className="mb-4 grid gap-3 md:grid-cols-3">
           <Select label="Tenant" value={tenant} onChange={(e) => setTenant(e.target.value)} options={[{ value: '', label: 'All tenants' }, ...(tenants.data ?? []).map((t) => ({ value: t.id, label: t.name }))]} />
           <Select label="Status" value={status} onChange={(e) => setStatus(e.target.value)} options={[{ value: '', label: 'All statuses' }, ...STATES.map((s) => ({ value: s, label: humanize(s) }))]} />
-          <Input label="Search" prefix={<Search size={14} />} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Order no or store" className="[&_input]:pl-9" />
+          <Input label="Search" prefix={<Search size={14} />} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Order no or store" />
         </div>
         {orders.error ? (
           <ErrorState error={orders.error} onRetry={() => void orders.refetch()} />
