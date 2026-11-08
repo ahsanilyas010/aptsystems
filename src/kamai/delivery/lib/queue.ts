@@ -60,7 +60,8 @@ function notify() {
 }
 
 export async function enqueueDelivery(item: QueuedDelivery): Promise<void> {
-  await tx('readwrite', (s) => s.put({ ...item, userId: item.userId ?? (await currentUserId()) }))
+  const userId = item.userId ?? (await currentUserId())
+  await tx('readwrite', (s) => s.put({ ...item, userId }))
   notify()
 }
 

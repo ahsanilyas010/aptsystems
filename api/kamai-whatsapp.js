@@ -1,6 +1,6 @@
 // Vercel Serverless Function: /api/kamai-whatsapp
 // Meta WhatsApp Cloud API webhook. GET = verification handshake, POST = signed events.
-// Always answers 200 quickly once the signature is valid; errors are logged server-side only.
+// Answers 200 once a signed event is persisted; persistence errors answer 500 so Meta retries.
 import { createClient } from "@supabase/supabase-js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -32,63 +32,83 @@ function signatureValid(raw, header) {
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-const OPT_OUT_RE = /\b(stop|band|unsubscribe)\b/i;
+// Keywords must be the whole (trimmed) message, so "please do not stop my delivery" is not an opt-out.
+const OPT_OUT_RE = /^(stop|stop all|stopall|unsubscribe|band|band karo)$/i;
+const OPT_IN_RE = /^(start|unstop|subscribe|resume|shuru)$/i;
 
 function messageText(m) {
   return m.text?.body ?? m.button?.text ?? m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title ?? "";
 }
 
+// Unknown phone numbers are NOT attributed to any tenant: the tenant must carry
+// settings.wa_phone_number_id (see docs/KAMAI_RUNBOOK.md).
 async function resolveTenantId(db, phoneNumberId, cache) {
+  if (!phoneNumberId) return null;
   if (cache.has(phoneNumberId)) return cache.get(phoneNumberId);
-  let id = null;
-  if (phoneNumberId) {
-    const { data } = await db.from("kamai_tenants").select("id").eq("settings->>wa_phone_number_id", phoneNumberId).limit(1).maybeSingle();
-    id = data?.id ?? null;
-  }
-  if (!id) {
-    const { data } = await db.from("kamai_tenants").select("id").eq("slug", "kamai").limit(1).maybeSingle();
-    id = data?.id ?? null;
-  }
+  const { data, error } = await db.from("kamai_tenants").select("id").eq("settings->>wa_phone_number_id", phoneNumberId).limit(1).maybeSingle();
+  if (error) throw error;
+  const id = data?.id ?? null;
   cache.set(phoneNumberId, id);
   return id;
 }
 
+// A status may only move forward: queued -> sent -> delivered -> read; failed only from queued/sent.
+const STATUS_FROM = {
+  sent: ["queued"],
+  delivered: ["queued", "sent"],
+  read: ["queued", "sent", "delivered"],
+  failed: ["queued", "sent"],
+};
+
+// Throws on persistence failure so the webhook answers 5xx and Meta retries (handlers are idempotent).
 async function handleStatus(db, s) {
-  if (!s?.id) return;
-  const patch = { status: s.status, status_at: s.timestamp ? new Date(Number(s.timestamp) * 1000).toISOString() : new Date().toISOString() };
+  if (!s?.id || !STATUS_FROM[s.status]) return;
+  const at = s.timestamp ? new Date(Number(s.timestamp) * 1000).toISOString() : new Date().toISOString();
+  const patch = { status: s.status };
+  if (s.status === "sent") patch.sent_at = at;
   if (s.pricing?.category) patch.pricing_category = s.pricing.category;
-  if (typeof s.pricing?.billable === "boolean") patch.pricing_billable = s.pricing.billable;
-  if (s.errors?.[0]?.code != null) patch.error_code = String(s.errors[0].code);
-  const { error } = await db.from("kamai_wa_messages").update(patch).eq("wamid", s.id);
-  if (error) console.error("[kamai-whatsapp] status update:", error.message);
+  if (s.status === "failed" && s.errors?.[0]) patch.error = `${s.errors[0].code ?? ""}: ${String(s.errors[0].title || s.errors[0].message || "").slice(0, 300)}`;
+  const { error } = await db.from("kamai_wa_messages").update(patch).eq("wamid", s.id).in("status", STATUS_FROM[s.status]);
+  if (error) throw new Error(`status update: ${error.message}`);
 }
 
 async function handleInbound(db, m, value, cache) {
   const waId = String(m.from || "").replace(/\D/g, "");
   if (!m.id || !waId) return;
   const tenantId = await resolveTenantId(db, value.metadata?.phone_number_id, cache);
-  if (!tenantId) { console.error("[kamai-whatsapp] no tenant resolved"); return; }
+  if (!tenantId) { console.error("[kamai-whatsapp] unmapped phone_number_id, event ignored"); return; }
   const at = m.timestamp ? new Date(Number(m.timestamp) * 1000).toISOString() : new Date().toISOString();
-  const text = messageText(m);
+  const text = messageText(m).trim();
 
-  const ins = await db.from("kamai_wa_messages").upsert(
-    { tenant_id: tenantId, wa_id: waId, direction: "in", wamid: m.id, type: m.type || "text", payload: m, status: "received", status_at: at },
-    { onConflict: "wamid", ignoreDuplicates: true });
-  if (ins.error) console.error("[kamai-whatsapp] message insert:", ins.error.message);
+  // A retried or replayed message changes nothing.
+  const dup = await db.from("kamai_wa_messages").select("id").eq("wamid", m.id).maybeSingle();
+  if (dup.error) throw new Error(`message lookup: ${dup.error.message}`);
+  if (dup.data) return;
 
-  const { data: existing } = await db.from("kamai_wa_contacts").select("opted_in_at,opted_out_at").eq("tenant_id", tenantId).eq("wa_id", waId).maybeSingle();
-  const row = { tenant_id: tenantId, wa_id: waId, last_inbound_at: at, last_inbound_wamid: m.id };
+  const { data: existing, error: ce } = await db.from("kamai_wa_contacts").select("id,opted_in_at,opted_out_at,last_inbound_at")
+    .eq("tenant_id", tenantId).eq("wa_id", waId).maybeSingle();
+  if (ce) throw new Error(`contact lookup: ${ce.message}`);
+  const newer = (prev) => !prev || new Date(at).getTime() > new Date(prev).getTime();
+  const row = { tenant_id: tenantId, wa_id: waId };
+  if (newer(existing?.last_inbound_at)) row.last_inbound_at = at;
   if (OPT_OUT_RE.test(text)) {
-    row.opted_out_at = new Date().toISOString();
-  } else if (!existing?.opted_in_at) {
-    // Any inbound message is implicit opt-in, for utility messages only.
-    row.opted_in_at = new Date().toISOString();
-    row.opt_in_source = "inbound_whatsapp";
-    row.opt_in_scopes = ["utility"];
-    if (existing?.opted_out_at) row.opted_out_at = null;
+    if (newer(existing?.opted_out_at)) row.opted_out_at = at;
+  } else if (OPT_IN_RE.test(text)) {
+    // Explicit resume clears a previous STOP (only if it is newer than the STOP).
+    if (newer(existing?.opted_out_at)) {
+      row.opted_out_at = null;
+      row.opted_in_at = at; row.opt_in_source = "inbound_whatsapp"; row.opt_in_scopes = ["utility"];
+    }
+  } else if (!existing?.opted_in_at && !existing?.opted_out_at) {
+    // Any other inbound message is implicit opt-in for utility messages only, never after a STOP.
+    row.opted_in_at = at; row.opt_in_source = "inbound_whatsapp"; row.opt_in_scopes = ["utility"];
   }
-  const up = await db.from("kamai_wa_contacts").upsert(row, { onConflict: "tenant_id,wa_id" });
-  if (up.error) console.error("[kamai-whatsapp] contact upsert:", up.error.message);
+  const up = await db.from("kamai_wa_contacts").upsert(row, { onConflict: "tenant_id,wa_id" }).select("id").maybeSingle();
+  if (up.error) throw new Error(`contact upsert: ${up.error.message}`);
+
+  const ins = await db.from("kamai_wa_messages").insert(
+    { tenant_id: tenantId, contact_id: up.data?.id ?? existing?.id ?? null, direction: "in", wamid: m.id, payload: m, status: "received" });
+  if (ins.error && ins.error.code !== "23505") throw new Error(`message insert: ${ins.error.message}`);
 }
 
 async function processEvents(db, payload) {
@@ -97,8 +117,8 @@ async function processEvents(db, payload) {
     for (const change of entry?.changes ?? []) {
       const value = change?.value;
       if (!value) continue;
-      for (const s of value.statuses ?? []) await handleStatus(db, s).catch((e) => console.error("[kamai-whatsapp] status:", e));
-      for (const m of value.messages ?? []) await handleInbound(db, m, value, cache).catch((e) => console.error("[kamai-whatsapp] inbound:", e));
+      for (const s of value.statuses ?? []) await handleStatus(db, s);
+      for (const m of value.messages ?? []) await handleInbound(db, m, value, cache);
     }
   }
 }
@@ -122,10 +142,12 @@ export default async function handler(req, res) {
   try {
     const payload = JSON.parse(raw.toString("utf8"));
     const db = getAdmin();
-    if (!db) console.error("[kamai-whatsapp] Supabase env missing");
-    else await processEvents(db, payload);
+    if (!db) throw new Error("Supabase env missing");
+    await processEvents(db, payload);
   } catch (e) {
+    // Signed payload but persistence failed: answer 5xx so Meta retries (all handlers are idempotent).
     console.error("[kamai-whatsapp]", e);
+    return res.status(500).send("retry");
   }
   return res.status(200).send("ok");
 }

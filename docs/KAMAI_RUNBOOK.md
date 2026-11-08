@@ -46,8 +46,11 @@ Authentication, Sign In / Providers:
 
 Note: the admin API (`createUser`/`updateUserById`) sets passwords server-side, but with a minimum
 length of 8 a 6-digit PIN is rejected by GoTrue. Resolve before provisioning stores by either
-keeping the minimum at 6 (then document the reduced strength and rely on rate limits and the
-`kamai_` lockout) or padding the PIN client and server side (for example password = PIN + fixed
+keeping the minimum at 6 (then document the reduced strength; note there is NO application-level
+lockout today: login is a direct Supabase password grant from the browser, so only Supabase's
+per-IP auth rate limits apply and distributed guessing of a 6-digit PIN against a derivable
+`store-<mobile>@kamai.assorted.group` identifier is feasible; a lockout needs a Supabase auth
+password-verification hook or a server-side login proxy, tracked as a follow-up) or padding the PIN client and server side (for example password = PIN + fixed
 pepper). Decide this at first run; the code currently sends the raw 6-digit PIN.
 
 ## c. Applying migrations and verifying
@@ -89,8 +92,8 @@ Verify after each batch:
 5. Webhook callback URL `https://apt.assorted.group/api/kamai-whatsapp`, verify token as above.
    Subscribe the WABA to fields `messages` and `message_template_status_update`.
 6. Store the phone number id on the tenant: `update kamai_tenants set settings = settings ||
-   '{"wa_phone_number_id":"<id>"}' where slug = '<tenant>'` (inbound events fall back to the
-   `kamai` platform tenant otherwise).
+   '{"wa_phone_number_id":"<id>"}' where slug = '<tenant>'` (inbound events from a phone number id
+   that no tenant carries are ignored and logged, there is no fallback tenant, so this step is required).
 7. Submit these templates (language `en`, Roman Urdu text; Meta reviews content, not script):
    - `kamai_order_confirmed` UTILITY: "Salam {{1}}, aapka Kamai order {{2}} confirm ho gaya hai.
      Total: {{3}}. Delivery kal subah hogi." Footer "Kamai by Assorted Produce Traders". Buttons:
@@ -108,8 +111,21 @@ Verify after each batch:
 
 Rules enforced by `api/kamai-admin.js`: business-initiated templates require
 `kamai_wa_contacts.opted_in_at` (else `NO_OPT_IN` with a `wa.me` fallback), except authentication
-templates; free text only inside the 24h window; STOP/BAND/UNSUBSCRIBE from a store sets
-`opted_out_at`. Budget roughly PKR 3-4.5 per utility/auth message and PKR 13-14 per marketing
+templates, which only the internal delivery-OTP path may use (the public `send_whatsapp` action
+rejects them, only sends to existing `kamai_wa_contacts` of the tenant, and accepts only text/payload
+template parameters); free text only inside the 24h window. A store message that is exactly
+STOP/BAND/UNSUBSCRIBE sets `opted_out_at`; exactly START/RESUME clears it; any other message never
+re-enables a stopped contact. Inbound retries are idempotent and the webhook answers 500 on a
+persistence failure so Meta retries.
+
+Account rules in `api/kamai-admin.js`: `provision_user` never changes the password or metadata of an
+existing account (use `reset_pin`), never overwrites or re-activates an existing membership, and
+refuses platform admins and users who already belong to another tenant unless the caller is a
+platform admin. `reset_pin` / `disable_user` refuse platform admins, require every tenant of the
+target to be managed by the caller, and require the caller's role to outrank the target's;
+`reset_pin` only works on `@kamai.assorted.group` PIN logins. Re-enabling a disabled member
+currently needs a platform admin (SQL). `send_delivery_otp` allows one issue per 60 s and 5 OTP
+messages per order per hour. Budget roughly PKR 3-4.5 per utility/auth message and PKR 13-14 per marketing
 message; confirm against Meta's official rate card.
 
 ## f. Legal and compliance gates (before enabling financed states)

@@ -272,6 +272,21 @@ async function disableUser(db, c, p) {
     note: banned ? "Login banned; existing access token lapses at JWT expiry (sessions cannot be revoked by user id)." : "Membership disabled; user keeps other active memberships." };
 }
 
+// Template components from API callers: text/payload parameters only (no media links), bounded size.
+function validateComponents(components) {
+  if (!Array.isArray(components) || components.length > 10) throw bad("components must be an array of up to 10 items");
+  if (JSON.stringify(components).length > 4096) throw bad("components is too large");
+  for (const comp of components) {
+    if (!comp || typeof comp !== "object" || !["header", "body", "button"].includes(comp.type)) throw bad("component type is invalid");
+    const params = comp.parameters ?? [];
+    if (!Array.isArray(params) || params.length > 10) throw bad("component parameters are invalid");
+    for (const prm of params) {
+      if (!prm || !["text", "payload"].includes(prm.type)) throw bad("only text and payload parameters are allowed");
+      if (typeof (prm.type === "text" ? prm.text : prm.payload) !== "string") throw bad("parameter value must be a string");
+    }
+  }
+}
+
 async function sendWhatsapp(db, c, p) {
   const tenantId = v.uuid(p.tenant_id, "tenant_id");
   requireRole(c, tenantId, WA_SENDER_ROLES);
@@ -281,25 +296,29 @@ async function sendWhatsapp(db, c, p) {
   if (!templateName && !text) throw bad("template_name or text is required");
   const language = v.str(p.language, "language", 10, false) || "en";
   const components = p.components == null ? undefined : p.components;
-  if (components !== undefined && !Array.isArray(components)) throw bad("components must be an array");
+  if (components !== undefined) validateComponents(components);
   const orderId = p.related_order_id ? v.uuid(p.related_order_id, "related_order_id") : null;
   const invoiceId = p.related_invoice_id ? v.uuid(p.related_invoice_id, "related_invoice_id") : null;
-  return deliverWhatsapp(db, { tenantId, to, templateName, text, language, components, orderId, invoiceId });
+  return deliverWhatsapp(db, { tenantId, to, templateName, text, language, components, orderId, invoiceId, external: true });
 }
 
-async function deliverWhatsapp(db, { tenantId, to, templateName, text, language = "en", components, orderId = null, invoiceId = null, category: forcedCategory }) {
+async function deliverWhatsapp(db, { tenantId, to, templateName, text, language = "en", components, orderId = null, invoiceId = null, category: forcedCategory, external = false }) {
   const fallback_url = waLink(to, text || (templateName ? `[${templateName}]` : ""));
   let category = forcedCategory;
   if (templateName && !category) {
     const t = await db.from("kamai_wa_templates").select("category").eq("tenant_id", tenantId).eq("name", templateName).eq("language_code", language).maybeSingle();
     category = t.data?.category ? String(t.data.category).toLowerCase() : null;
   }
-  const { data: contact } = await db.from("kamai_wa_contacts").select("opted_in_at,opted_out_at,last_inbound_at,store_id").eq("tenant_id", tenantId).eq("wa_id", to).maybeSingle();
+  // Authentication templates (which skip the consent gates) are reserved for the internal OTP path.
+  if (external && category === "authentication") return { ok: false, delivered: false, reason: "TEMPLATE_NOT_ALLOWED", fallback_url };
+  const { data: contact } = await db.from("kamai_wa_contacts").select("id,opted_in_at,opted_out_at,last_inbound_at,store_id").eq("tenant_id", tenantId).eq("wa_id", to).maybeSingle();
   let optedIn = contact?.opted_in_at;
   if (!optedIn && contact?.store_id) {
     const s = await db.from("kamai_stores").select("wa_opt_in_at").eq("id", contact.store_id).maybeSingle();
     optedIn = s.data?.wa_opt_in_at;
   }
+  // Public sends only go to known contacts of the tenant.
+  if (external && !contact) return { ok: false, delivered: false, reason: "UNKNOWN_CONTACT", fallback_url };
   const windowOpen = !!contact?.last_inbound_at && Date.now() - new Date(contact.last_inbound_at).getTime() < 24 * 3600 * 1000;
   const businessInitiated = !!templateName;
   if (contact?.opted_out_at && category !== "authentication") return { ok: false, delivered: false, reason: "OPTED_OUT", fallback_url };
@@ -310,8 +329,8 @@ async function deliverWhatsapp(db, { tenantId, to, templateName, text, language 
     ? { messaging_product: "whatsapp", recipient_type: "individual", to, type: "template",
         template: { name: templateName, language: { code: language }, ...(components ? { components } : {}) } }
     : { messaging_product: "whatsapp", recipient_type: "individual", to, type: "text", text: { body: text, preview_url: false } };
-  const base = { tenant_id: tenantId, wa_id: to, direction: "out", type: payload.type, template_name: templateName || null,
-    category: category || null, related_order_id: orderId, related_invoice_id: invoiceId };
+  const base = { tenant_id: tenantId, contact_id: contact?.id ?? null, store_id: contact?.store_id ?? null, to_wa_id: to, direction: "out",
+    template_name: templateName || null, category: category || null, order_id: orderId, invoice_id: invoiceId };
   // Never persist OTP values in the message log.
   const logPayload = category === "authentication" ? { ...payload, template: { ...payload.template, components: "[redacted]" } } : payload;
 
@@ -330,17 +349,19 @@ async function deliverWhatsapp(db, { tenantId, to, templateName, text, language 
     body = await r.json().catch(() => ({}));
   } catch (e) {
     console.error("[kamai-admin] graph fetch:", e);
-    await db.from("kamai_wa_messages").insert({ ...base, payload: logPayload, status: "failed", error_code: "network" });
+    const f = await db.from("kamai_wa_messages").insert({ ...base, payload: logPayload, status: "failed", error: "network" });
+    if (f.error) console.error("[kamai-admin] failed insert:", f.error.message);
     return { ok: false, delivered: false, reason: "NETWORK_ERROR", fallback_url };
   }
   const wamid = body?.messages?.[0]?.id;
   if (r.ok && wamid) {
-    const ins = await db.from("kamai_wa_messages").insert({ ...base, payload: logPayload, wamid, status: "sent", status_at: new Date().toISOString() });
+    const ins = await db.from("kamai_wa_messages").insert({ ...base, payload: logPayload, wamid, status: "sent", sent_at: new Date().toISOString() });
     if (ins.error) console.error("[kamai-admin] sent insert:", ins.error.message);
     return { ok: true, delivered: true, wamid };
   }
   const code = String(body?.error?.code ?? r.status);
-  await db.from("kamai_wa_messages").insert({ ...base, payload: logPayload, status: "failed", error_code: code });
+  const fi = await db.from("kamai_wa_messages").insert({ ...base, payload: logPayload, status: "failed", error: `${code}: ${String(body?.error?.message || "").slice(0, 300)}` });
+  if (fi.error) console.error("[kamai-admin] failed insert:", fi.error.message);
   console.error("[kamai-admin] graph error", code, body?.error?.message);
   return { ok: false, delivered: false, reason: "GRAPH_ERROR", error_code: code, fallback_url };
 }
@@ -353,10 +374,21 @@ async function sendDeliveryOtp(db, c, p) {
   const isAssignedRider = order.rider_user_id === c.user.id && hasRole(c, order.tenant_id, ["rider"]);
   if (!isAssignedRider) requireRole(c, order.tenant_id, OTP_ROLES);
 
-  // Run the RPC as the caller so auth.uid() and its own checks apply.
+  // Throttle for every caller (the RPC only throttles non-managers): 60 s between issues and at most
+  // 5 OTP WhatsApp messages per order per hour, so a loop cannot burn billable messages or lockouts.
+  const live = await db.from("kamai_delivery_otps").select("created_at").eq("order_id", orderId).maybeSingle();
+  if (live.data?.created_at && Date.now() - new Date(live.data.created_at).getTime() < 60 * 1000) throw new HttpError(429, "OTP was issued moments ago", { reason: "OTP_RATE_LIMITED" });
+  const sentCount = await db.from("kamai_wa_messages").select("id", { count: "exact", head: true })
+    .eq("order_id", orderId).eq("template_name", "kamai_delivery_otp").gte("created_at", new Date(Date.now() - 3600 * 1000).toISOString());
+  if ((sentCount.count ?? 0) >= 5) throw new HttpError(429, "OTP send limit reached for this order", { reason: "OTP_SEND_LIMIT" });
+
+  // Run the RPC as the caller so auth.uid() and its own checks apply (it also enforces reissue limits).
   const caller = getCallerClient(c.token);
   const rpc = await caller.rpc("kamai_issue_delivery_otp", { p_order_id: orderId });
-  if (rpc.error) throw new HttpError(rpc.error.code === "42501" ? 403 : 400, rpc.error.message);
+  if (rpc.error) {
+    const limited = /OTP_RATE_LIMITED|OTP_REISSUE_LIMIT/.test(rpc.error.message || "");
+    throw new HttpError(rpc.error.code === "42501" ? 403 : limited ? 429 : 400, rpc.error.message);
+  }
   let code = null;
   const q = await db.from("kamai_delivery_otps").select("code,expires_at").eq("order_id", orderId).order("expires_at", { ascending: false }).limit(1).maybeSingle();
   if (!q.error && q.data?.code) code = String(q.data.code);
