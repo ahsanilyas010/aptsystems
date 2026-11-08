@@ -9,5 +9,6 @@ export const authRoutes: RouteObject = {
     { path: 'callback', lazy: () => import('./pages/Callback') },
     { path: 'accept/:token', lazy: () => import('./pages/AcceptToken') },
     { path: 'logout', lazy: () => import('./pages/Logout') },
+    { path: 'password', lazy: () => import('./pages/Password') },
   ],
 }

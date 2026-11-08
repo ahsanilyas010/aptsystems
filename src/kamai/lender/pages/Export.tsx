@@ -6,9 +6,8 @@ import { downloadCsv, toCsv } from '../../lib/csv'
 import { fmtDateTime, fmtInt } from '../../lib/format'
 import type { KamaiVLenderPositionsRow } from '../../lib/db-types'
 import { ComplianceBanner } from '../parts/ComplianceBanner'
-import { TAPE_COLUMNS, errMsg, sum, usePositions, useTid } from '../lib/data'
 import { supabase } from '../../lib/supabase'
-import { fetchAll } from '../lib/data'
+import { TAPE_COLUMNS, errMsg, fetchAll, sum, usePositions, useTid } from '../lib/data'
 
 const SUM_FIELDS = ['original_minor', 'financed_minor', 'outstanding_minor', 'paid_minor', 'credited_minor'] as const
 
