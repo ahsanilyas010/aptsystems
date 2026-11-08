@@ -1398,8 +1398,7 @@ begin
   select coalesce(sum(amount_minor), 0) into v_expected from public.kamai_payments
   where tenant_id = p_tenant and collected_by = p_rider_user_id and channel = 'cash' and status <> 'rejected'
     and (collected_at at time zone 'Asia/Karachi')::date = p_business_date;
-  v_status := case when p_deposited_minor <> v_expected then 'variance'
-                   when v_priv then 'reconciled' else 'submitted' end;
+  v_status := case when p_deposited_minor <> v_expected then 'variance' else 'submitted' end;
 
   insert into public.kamai_cash_deposits
     (tenant_id, rider_user_id, business_date, expected_minor, deposited_minor, method, deposit_ref, slip_url, variance_minor, status, notes, created_by)

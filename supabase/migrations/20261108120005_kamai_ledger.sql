@@ -66,7 +66,12 @@ declare
   v_diff bigint;
   v_n int;
 begin
-  v_entry := case when tg_table_name = 'kamai_ledger_entries' then new.id else new.entry_id end;
+  -- (separate branches: plpgsql resolves new.<field> per statement, and each table's row type lacks the other's column)
+  if tg_table_name = 'kamai_ledger_entries' then
+    v_entry := new.id;
+  else
+    v_entry := new.entry_id;
+  end if;
   select coalesce(sum(case when direction = 'debit' then amount_minor else -amount_minor end), 0), count(*)
     into v_diff, v_n
   from public.kamai_ledger_lines where entry_id = v_entry;
