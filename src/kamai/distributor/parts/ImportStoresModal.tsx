@@ -19,8 +19,8 @@ const RowSchema = z.object({
     .string()
     .trim()
     .optional()
-    .transform((v) => (v ? normMobile(v) : null))
-    .refine((v) => v !== undefined, 'mobile invalid'),
+    .refine((v) => !v || normMobile(v) !== null, 'mobile invalid')
+    .transform((v) => (v ? normMobile(v) : null)),
   address: z.string().trim().optional(),
   area: z.string().trim().optional(),
   latitude: num(-90, 90),
