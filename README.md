@@ -110,3 +110,17 @@ Vercel auto-deploys within ~30 seconds of a push to `main`.
 | CORS error | Re-deploy GAS as "Anyone can access" |
 | Firebase popup blocked | Allow popups in browser; check Authorized Domains |
 | Data stale | Click **↻ Sync** in the CRM or wait for auto-refresh |
+
+## Kamai OS
+
+Kamai OS is the multi-tenant distribution platform (distributors, stores, lenders, brands, riders) built into this same Vite app alongside the legacy CRM. Full specification: [`docs/KAMAI_OS_PLAN.md`](docs/KAMAI_OS_PLAN.md).
+
+| Path | What |
+| --- | --- |
+| `/` | Legacy CRM (`src/APT_CRM_v3.1.jsx`, lazily loaded, Firebase auth) |
+| `/os`, `/distributor`, `/store`, `/lender`, `/brand`, `/delivery`, `/auth` | Kamai surfaces (`src/kamai/<surface>/`) |
+| `src/kamai/` | Kamai code: `lib/` (supabase, auth, api, format, money, i18n, geo, csv), `ui/` (component kit), `styles/kamai.css` (Tailwind v4, no preflight) |
+| `src/router.tsx` | React Router v7 route tree |
+| `supabase/migrations/` | `kamai_*` objects only; existing tables of the shared project are never altered |
+
+Route/module conventions are in [`src/kamai/README.md`](src/kamai/README.md). Run `npm run check` (typecheck + build) before committing.
