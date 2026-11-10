@@ -1,4 +1,4 @@
-import { useState, type ComponentType } from 'react'
+import { useMemo, useState, type ComponentType } from 'react'
 import { NavLink, Outlet } from 'react-router'
 import {
   AlertTriangle, Award, Bot, Building2, ClipboardCheck, ClipboardList, Cpu, CreditCard, Layers, LayoutDashboard, LogOut, Map, Megaphone,
@@ -126,9 +126,31 @@ function Brand() {
   )
 }
 
+/** True when the page is shown inside another page (the APT CRM embeds Kamai sections in a same-origin frame). */
+function useEmbedded(): boolean {
+  return useMemo(() => {
+    try {
+      return window.self !== window.top
+    } catch {
+      return true
+    }
+  }, [])
+}
+
 export function OsLayout() {
   const [open, setOpen] = useState(false)
   const { user, signOut } = useAuth()
+  const embedded = useEmbedded()
+  // Embedded in the CRM: the CRM provides the navigation, so show only the page content.
+  if (embedded) {
+    return (
+      <div className="min-h-screen bg-k-bg text-k-text">
+        <main className="min-w-0 p-4">
+          <Outlet />
+        </main>
+      </div>
+    )
+  }
   return (
     <div className="flex min-h-screen bg-k-bg text-k-text">
       <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col gap-5 overflow-y-auto bg-k-dark p-4 md:flex">
