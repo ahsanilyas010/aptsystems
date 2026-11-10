@@ -632,3 +632,116 @@ end;
 $$;
 revoke execute on function public.kamai_mark_notifications_read(uuid[]) from public, anon;
 grant execute on function public.kamai_mark_notifications_read(uuid[]) to authenticated, service_role;
+
+-- 10.7 orders may only contain approved products (re-declared from 003 with one extra join condition)
+create or replace function public.kamai_submit_order(p jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_tenant  uuid := nullif(p ->> 'tenant_id', '')::uuid;
+  v_store_id uuid := nullif(p ->> 'store_id', '')::uuid;
+  v_cid     text := nullif(btrim(p ->> 'client_order_id'), '');
+  v_mode    text := coalesce(nullif(p ->> 'payment_mode', ''), 'credit');
+  v_source  text := coalesce(nullif(p ->> 'source', ''), 'booker');
+  v_store   public.kamai_stores;
+  v_order   public.kamai_orders;
+  v_role    text;
+  v_list    uuid;
+  v_n       int;
+  v_want    int;
+  v_decision jsonb;
+begin
+  if v_tenant is null or v_store_id is null then
+    raise exception 'kamai: tenant_id and store_id are required' using errcode = '22023';
+  end if;
+  if v_mode not in ('credit','cod') then
+    raise exception 'kamai: payment_mode must be credit or cod' using errcode = '22023';
+  end if;
+  if jsonb_typeof(p -> 'items') is distinct from 'array' or jsonb_array_length(p -> 'items') = 0
+     or jsonb_array_length(p -> 'items') > 200 then
+    raise exception 'kamai: items must be a non-empty array (max 200)' using errcode = '22023';
+  end if;
+
+  select * into v_store from public.kamai_stores where id = v_store_id and tenant_id = v_tenant;
+  if not found then
+    raise exception 'kamai: store % not found in tenant', v_store_id using errcode = '22023';
+  end if;
+
+  if not ((select private.kamai_is_platform_admin()) or (select private.kamai_is_server())) then
+    v_role := (select private.kamai_my_role(v_tenant));
+    if v_role is null then
+      raise exception 'kamai: not a member of this tenant' using errcode = '42501';
+    elsif v_role = 'store' then
+      if not exists (select 1 from public.kamai_memberships m
+                     where m.tenant_id = v_tenant and m.user_id = (select auth.uid())
+                       and m.status = 'active' and m.store_id = v_store_id) then
+        raise exception 'kamai: a store member may only order for its own store' using errcode = '42501';
+      end if;
+    elsif v_role not in ('booker','manager','owner') then
+      raise exception 'kamai: role % may not place orders', v_role using errcode = '42501';
+    end if;
+  end if;
+
+  if v_store.status <> 'active' then
+    raise exception 'kamai: store is not active' using errcode = '22023';
+  end if;
+
+  -- idempotent replay
+  if v_cid is not null then
+    select * into v_order from public.kamai_orders where tenant_id = v_tenant and client_order_id = v_cid;
+    if found then
+      return jsonb_build_object(
+        'order', to_jsonb(v_order),
+        'decision', (select to_jsonb(d) from public.kamai_credit_decisions d where d.id = v_order.credit_decision_id),
+        'replayed', true);
+    end if;
+  end if;
+
+  v_list := coalesce(v_store.price_list_id,
+                     (select pl.id from public.kamai_price_lists pl where pl.tenant_id = v_tenant and pl.is_default limit 1));
+
+  insert into public.kamai_orders (tenant_id, store_id, order_no, source, payment_mode, client_order_id, notes, created_by)
+  values (v_tenant, v_store_id, public.kamai_next_counter(v_tenant, 'order'), v_source, v_mode, v_cid,
+          nullif(p ->> 'notes', ''), (select auth.uid()))
+  returning * into v_order;
+
+  select count(distinct (e ->> 'product_id')) into v_want from jsonb_array_elements(p -> 'items') e;
+
+  insert into public.kamai_order_items
+    (tenant_id, order_id, product_id, sku, name, qty, unit_price_minor, tax_rate_pct,
+     line_total_minor, tax_minor, retail_price_minor, is_third_schedule)
+  select v_tenant, v_order.id, pr.id, pr.sku, pr.name, i.qty,
+         coalesce(pli.price_minor, pr.trade_price_minor), pr.tax_rate_pct,
+         i.qty * coalesce(pli.price_minor, pr.trade_price_minor),
+         public.kamai_line_tax(i.qty, coalesce(pli.price_minor, pr.trade_price_minor), pr.retail_price_minor, pr.tax_rate_pct, pr.is_third_schedule),
+         pr.retail_price_minor, pr.is_third_schedule
+  from (select (e ->> 'product_id')::uuid as pid, sum((e ->> 'qty')::int)::int as qty
+        from jsonb_array_elements(p -> 'items') e group by 1) i
+  join public.kamai_products pr on pr.id = i.pid and pr.tenant_id = v_tenant and pr.active and pr.listing_status = 'approved'
+  left join public.kamai_price_list_items pli on pli.product_id = pr.id and pli.price_list_id = v_list
+  where i.qty > 0;
+  get diagnostics v_n = row_count;
+  if v_n <> v_want then
+    raise exception 'kamai: one or more items are unknown, inactive, not approved or have qty <= 0' using errcode = '22023';
+  end if;
+
+  update public.kamai_orders o set
+    subtotal_minor = t.sub, tax_minor = t.tax, total_minor = t.sub + t.tax, items_count = t.cnt
+  from (select coalesce(sum(line_total_minor), 0) sub, coalesce(sum(tax_minor), 0) tax, count(*)::int cnt
+        from public.kamai_order_items where order_id = v_order.id) t
+  where o.id = v_order.id;
+
+  insert into public.kamai_order_events (tenant_id, order_id, from_state, to_state, actor, reason, meta)
+  values (v_tenant, v_order.id, null, 'booked', (select auth.uid()), null,
+          jsonb_build_object('source', v_source, 'payment_mode', v_mode));
+
+  v_decision := private.kamai_credit_decide_core(v_order.id);
+  select * into v_order from public.kamai_orders where id = v_order.id;
+  return jsonb_build_object('order', to_jsonb(v_order), 'decision', v_decision, 'replayed', false);
+end;
+$$;
+revoke execute on function public.kamai_submit_order(jsonb) from public, anon;
+grant execute on function public.kamai_submit_order(jsonb) to authenticated, service_role;
