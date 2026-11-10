@@ -3350,6 +3350,7 @@ function CrmApp({ user, onLogout }) {
               <div style={{fontSize:8,color:"rgba(255,255,255,0.28)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{user.email}</div>
             </div>
           </div>
+          <a href="/os" style={{display:"block",marginBottom:6,background:"rgba(139,195,74,0.16)",border:"1px solid rgba(139,195,74,0.4)",borderRadius:6,padding:"6px 8px",color:"#8BC34A",fontSize:10,fontWeight:700,textAlign:"center",textDecoration:"none"}}>Open Kamai OS →</a>
           <button onClick={onLogout} style={{width:"100%",background:"rgba(255,255,255,0.06)",border:"none",borderRadius:6,padding:"6px 8px",color:"rgba(255,255,255,0.4)",fontSize:10,fontWeight:600,cursor:"pointer",textAlign:"center"}}>Sign Out</button>
         </div>
       </div>

@@ -1,0 +1,113 @@
+/*
+ * Kamai OS entry stylesheet. Tailwind v4 WITHOUT preflight: only the theme and
+ * utilities layers are imported, and class scanning is restricted to src/kamai
+ * (@source "../" is relative to this file). Imported only by KamaiRoot.tsx so
+ * the legacy inline-styled CRM at '/' never loads it.
+ */
+@layer legacy, theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "../";
+
+@theme {
+  --color-k-dark: #0f2b22;
+  --color-k-green: #1f8a4c;
+  --color-k-green-light: #e6f4ec;
+  --color-k-green-mid: #7fd6a3;
+  --color-k-accent: #e0a030;
+  --color-k-red: #c0392b;
+  --color-k-red-light: #fdf0ee;
+  --color-k-bg: #f0f2f0;
+  --color-k-surface: #ffffff;
+  --color-k-surface2: #f7f9f7;
+  --color-k-border: #e2e8e2;
+  --color-k-text: #0f2b22;
+  --color-k-muted: #5c6660;
+  --color-k-light: #9aaba0;
+  --font-k-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Scoped base layer: preflight is off, so the Kamai root resets itself. */
+@layer base {
+  .kamai-root {
+    box-sizing: border-box;
+    min-height: 100vh;
+    font-family: var(--font-k-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    background: var(--color-k-bg);
+    color: var(--color-k-text);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .kamai-root *,
+  .kamai-root *::before,
+  .kamai-root *::after {
+    box-sizing: border-box;
+  }
+  .kamai-root h1,
+  .kamai-root h2,
+  .kamai-root h3,
+  .kamai-root h4,
+  .kamai-root p,
+  .kamai-root ul,
+  .kamai-root ol,
+  .kamai-root figure {
+    margin: 0;
+  }
+  .kamai-root ul,
+  .kamai-root ol {
+    padding: 0;
+    list-style: none;
+  }
+  .kamai-root img,
+  .kamai-root svg,
+  .kamai-root video,
+  .kamai-root canvas {
+    max-width: 100%;
+    display: block;
+  }
+  .kamai-root button,
+  .kamai-root input,
+  .kamai-root select,
+  .kamai-root textarea {
+    font: inherit;
+    color: inherit;
+    margin: 0;
+  }
+  .kamai-root button {
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    transition: none;
+    transform: none;
+  }
+  .kamai-root button:hover:not(:disabled) {
+    opacity: 1;
+  }
+  .kamai-root button:active:not(:disabled) {
+    transform: none;
+  }
+  .kamai-root button:disabled {
+    cursor: not-allowed;
+  }
+  .kamai-root a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .kamai-root table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  .kamai-root :focus-visible {
+    outline: 2px solid var(--color-k-green);
+    outline-offset: 2px;
+  }
+  @keyframes kamai-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}

@@ -1,7 +1,11 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { existsSync } from 'fs'
-import { resolve } from 'path'
+import path, { resolve } from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // `vercel dev` assigns the dev server a port via PORT and expects Vite to bind
 // to exactly that one. Affects local dev only — `vite build` ignores `server`.
@@ -54,7 +58,16 @@ function vercelApiDev(mode) {
 }
 
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), vercelApiDev(mode)],
+  // tailwindcss() only emits utilities for CSS files that import Tailwind
+  // (src/kamai/styles/kamai.css, scoped with @source "../"); the legacy CRM
+  // and src/index.css are untouched.
+  plugins: [react(), tailwindcss(), vercelApiDev(mode)],
+  resolve: {
+    alias: { '@kamai': path.resolve(__dirname, 'src/kamai') },
+  },
+  build: {
+    chunkSizeWarningLimit: 900,
+  },
   server: {
     port: assignedPort || 5173,
     strictPort: Boolean(assignedPort),

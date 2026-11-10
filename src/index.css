@@ -1,3 +1,5 @@
+/* Legacy CRM styles live in a cascade layer declared BEFORE Kamai's layers, so Kamai Tailwind utilities win. */
+@layer legacy {
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -98,4 +100,5 @@ button:active:not(:disabled) {
   .crm-root [style*="fontSize:20"] {
     font-size: 17px !important;
   }
+}
 }
