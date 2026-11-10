@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, Checkbox, Input, Modal, useToast } from '../../ui'
 import { supabase } from '../../lib/supabase'
 import { fromMinor, toMinor } from '../../lib/money'
 import { useAuth } from '../../lib/auth'
+import { uploadProductImage } from '../../lib/product-image'
+import { ListingBadge } from '../lib/listing'
 import type { KamaiProductsRow } from '../../lib/db-types'
 import { errMsg, useRefreshAll } from '../lib/data'
 import { padGtin14, validateGtin } from '../lib/gtin'
@@ -12,16 +14,16 @@ const SKU_RE = /^[A-Za-z0-9._-]{1,40}$/
 
 interface Form {
   sku: string; name: string; name_ur: string; category: string; gtin: string; hs_code: string; fbr_uom: string
-  tax: string; sale_type: string; third: boolean; retail: string; cost: string; trade: string; pack: string; active: boolean
+  tax: string; sale_type: string; third: boolean; retail: string; cost: string; trade: string; pack: string; active: boolean; image_url: string
 }
-const EMPTY: Form = { sku: '', name: '', name_ur: '', category: '', gtin: '', hs_code: '', fbr_uom: 'Numbers, pieces, units', tax: '18', sale_type: 'Goods at standard rate (default)', third: false, retail: '', cost: '', trade: '', pack: '', active: true }
+const EMPTY: Form = { sku: '', name: '', name_ur: '', category: '', gtin: '', hs_code: '', fbr_uom: 'Numbers, pieces, units', tax: '18', sale_type: 'Goods at standard rate (default)', third: false, retail: '', cost: '', trade: '', pack: '', active: true, image_url: '' }
 
 function fromRow(p: KamaiProductsRow): Form {
   return {
     sku: p.sku, name: p.name, name_ur: p.name_ur ?? '', category: p.category ?? '', gtin: p.gtin14 ?? '', hs_code: p.hs_code ?? '', fbr_uom: p.fbr_uom ?? '',
     tax: String(p.tax_rate_pct), sale_type: p.sale_type, third: p.is_third_schedule,
     retail: p.retail_price_minor != null ? String(fromMinor(p.retail_price_minor)) : '', cost: '',
-    trade: String(fromMinor(p.trade_price_minor)), pack: p.pack_size ?? '', active: p.active,
+    trade: String(fromMinor(p.trade_price_minor)), pack: p.pack_size ?? '', active: p.active, image_url: p.image_url ?? '',
   }
 }
 
@@ -34,6 +36,8 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [origCost, setOrigCost] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (product) setF(product === 'new' ? EMPTY : fromRow(product))
     setErr(null)
@@ -54,6 +58,21 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
   const edit = product !== 'new' ? product : null
   const gtinErr = validateGtin(f.gtin)
   const set = (k: keyof Form) => (e: { target: { value: string } }) => setF((p) => ({ ...p, [k]: e.target.value }))
+
+  async function pickImage(file: File | undefined) {
+    if (!file) return
+    setErr(null)
+    setUploading(true)
+    try {
+      const url = await uploadProductImage(tenantId, file)
+      setF((p) => ({ ...p, image_url: url }))
+    } catch (e) {
+      setErr(errMsg(e))
+    } finally {
+      setUploading(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
 
   async function save() {
     setErr(null)
@@ -80,6 +99,7 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
       retail_price_minor: f.retail ? toMinor(f.retail) : null,
       trade_price_minor: toMinor(f.trade),
       pack_size: f.pack.trim() || null,
+      image_url: f.image_url || null,
       active: f.active,
     }
     if (f.third && row.retail_price_minor == null) return setErr('Third schedule items need a retail price')
@@ -115,10 +135,28 @@ export function ProductModal({ product, onClose, tenantId }: { product: KamaiPro
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} loading={busy}>Save product</Button>
+          <Button onClick={save} loading={busy} disabled={uploading}>Save product</Button>
         </>
       }
     >
+      {edit && edit.review_note && (edit.listing_status === 'changes_requested' || edit.listing_status === 'rejected') ? (
+        <div className="mb-3 rounded-lg bg-[#fff8e6] px-3 py-2 text-sm text-k-dark">
+          <div className="mb-0.5 flex items-center gap-2 font-bold"><ListingBadge status={edit.listing_status} /> Review note</div>
+          {edit.review_note}
+        </div>
+      ) : null}
+      {edit && edit.listing_status === 'approved' ? (
+        <p className="mb-3 rounded-lg bg-k-surface2 px-3 py-2 text-xs text-k-muted">This product is live. Changing its name, description, image or price sends it back to Draft and it must be submitted for review again.</p>
+      ) : null}
+      <div className="mb-3 flex items-center gap-3">
+        {f.image_url ? <img src={f.image_url} alt="" className="h-20 w-20 rounded-xl border border-k-border object-cover" /> : <div className="flex h-20 w-20 items-center justify-center rounded-xl bg-k-surface2 text-xs text-k-light">No image</div>}
+        <div className="flex flex-col gap-1.5">
+          <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => void pickImage(e.target.files?.[0])} />
+          <Button size="sm" variant="secondary" loading={uploading} onClick={() => fileRef.current?.click()}>{f.image_url ? 'Replace image' : 'Upload image'}</Button>
+          {f.image_url ? <button type="button" className="text-left text-xs font-semibold text-k-red" onClick={() => setF((p) => ({ ...p, image_url: '' }))}>Remove</button> : null}
+          <span className="text-[11px] text-k-light">JPG, PNG or WebP, up to 2 MB</span>
+        </div>
+      </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <Input label="SKU" value={f.sku} onChange={set('sku')} required disabled={!!edit} />
         <Input label="Pack size" value={f.pack} onChange={set('pack')} />

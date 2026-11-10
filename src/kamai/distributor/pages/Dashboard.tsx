@@ -5,6 +5,7 @@ import type { Column } from '../../ui'
 import { PKR, PKRCompact, pct, fmtDate, humanize } from '../../lib/format'
 import { supabase } from '../../lib/supabase'
 import type { KamaiCreditAccountsRow, KamaiCreditExposuresRow, KamaiOrdersRow, KamaiPaymentsRow } from '../../lib/db-types'
+import { OnboardingBanner } from '../lib/listing'
 import { daysBetween, ErrorState, NoTenant, startOfTodayPkt, todayPktDate, useStores, useTenantId, useTq } from '../lib/data'
 
 const STATES = ['booked', 'credit_approved', 'packed', 'dispatched', 'delivered', 'cancelled', 'rejected', 'disputed'] as const
@@ -79,6 +80,7 @@ export function Component() {
   return (
     <>
       <PageHeader title="Dashboard" eyebrow="Distributor" description="Today at a glance: orders, receivables and credit health." />
+      <OnboardingBanner />
       {firstErr ? <div className="mb-4"><ErrorState error={firstErr} /></div> : null}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Orders today" value={calc.total} sub={`${calc.byState.delivered ?? 0} delivered`} />

@@ -1,17 +1,20 @@
 import { useState, type ComponentType } from 'react'
 import { NavLink, Outlet } from 'react-router'
 import {
-  AlertTriangle, Award, Bot, Building2, ClipboardList, Cpu, CreditCard, Layers, LayoutDashboard, LogOut, Map, Megaphone,
+  AlertTriangle, Award, Bot, Building2, ClipboardCheck, ClipboardList, Cpu, CreditCard, Layers, LayoutDashboard, LogOut, Map, Megaphone,
   Menu, Server, Settings, ShieldCheck, ShoppingCart, Store, Truck, Users, Wallet, X,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { TenantSwitcher, cx } from '../ui'
+import { useReviewPending } from './lib/reviews'
 
 interface Item {
   to: string
   label: string
   icon: ComponentType<{ size?: number | string; className?: string }>
   end?: boolean
+  /** show the pending-reviews count */
+  badge?: boolean
 }
 interface Group {
   label: string
@@ -29,6 +32,7 @@ export const OS_NAV: Group[] = [
       { to: '/os/orders', label: 'Orders', icon: ClipboardList },
       { to: '/os/credit', label: 'Credit', icon: CreditCard },
       { to: '/os/tenants', label: 'Tenants', icon: Building2 },
+      { to: '/os/reviews', label: 'Reviews', icon: ClipboardCheck, badge: true },
     ],
   },
   {
@@ -77,6 +81,7 @@ export const OS_NAV: Group[] = [
 ]
 
 function NavGroups({ onNavigate }: { onNavigate?: () => void }) {
+  const pending = useReviewPending()
   return (
     <nav className="flex flex-col gap-4">
       {OS_NAV.map((g) => (
@@ -102,6 +107,7 @@ function NavGroups({ onNavigate }: { onNavigate?: () => void }) {
               >
                 <Icon size={16} className="shrink-0" />
                 <span className="truncate">{n.label}</span>
+                {n.badge && pending > 0 ? <span className="ml-auto rounded-full bg-[#d9822b] px-1.5 py-px text-[10px] font-bold text-white">{pending}</span> : null}
               </NavLink>
             )
           })}

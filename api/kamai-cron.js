@@ -3,6 +3,7 @@
 // GET with 'Authorization: Bearer <CRON_SECRET>'.
 import { createClient } from "@supabase/supabase-js";
 import { timingSafeEqual } from "node:crypto";
+import { deliverPending } from "./_kamai-mail.js";
 
 function safeEqual(a, b) {
   const x = Buffer.from(a), y = Buffer.from(b);
@@ -20,8 +21,10 @@ export default async function handler(req, res) {
   try {
     const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
     const { data, error } = await db.rpc("kamai_run_daily");
-    if (error) { console.error("[kamai-cron]", error.message); return res.status(500).json({ success: false, error: "kamai_run_daily failed" }); }
-    return res.status(200).json({ ok: true, result: data });
+    // also retry admin notification emails that are still pending/failed (attempts < 5)
+    const notifications = await deliverPending(db, { tenantIds: null, limit: 50 });
+    if (error) { console.error("[kamai-cron]", error.message); return res.status(500).json({ success: false, error: "kamai_run_daily failed", notifications }); }
+    return res.status(200).json({ ok: true, result: data, notifications });
   } catch (e) {
     console.error("[kamai-cron]", e);
     return res.status(500).json({ success: false, error: "Internal error" });

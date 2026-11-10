@@ -24,6 +24,7 @@ export const osRoutes: RouteObject = {
       { path: 'roadmap', lazy: () => import('./pages/Roadmap') },
       { path: 'gaps', lazy: () => import('./pages/Gaps') },
       { path: 'tenants', lazy: () => import('./pages/Tenants') },
+      { path: 'reviews', lazy: () => import('./pages/Reviews') },
       { path: 'orders', lazy: () => import('./pages/Orders') },
       { path: 'credit', lazy: () => import('./pages/Credit') },
       { path: 'audit', lazy: () => import('./pages/Audit') },

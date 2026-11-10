@@ -1,6 +1,6 @@
 # Kamai OS database
 
-Source of truth: `supabase/migrations/20261108120001..9_kamai_*.sql`. Types: `src/kamai/lib/db-types.ts`.
+Source of truth: `supabase/migrations/20261108120001..9_kamai_*.sql` (+ 010 below). Types: `src/kamai/lib/db-types.ts`.
 Every object is prefixed `kamai_` (RLS helpers live in schema `private`). No existing table, enum, function, trigger,
 policy or bucket of the shared project is touched (the only new bucket is `kamai-pod`). Money is `bigint` minor units (paisa). Status columns are `text` + CHECK.
 
@@ -129,3 +129,42 @@ orders assigned to them; a store member the folders of its own store's orders; d
 
 `kamai_products.cost_price_minor` moved to `kamai_product_costs(product_id, tenant_id, cost_price_minor)`; the store app should read prices from `kamai_price_list_items` (default list or its own list);
 the store app should call `kamai_set_wa_opt_in` instead of updating `kamai_stores`; the brand app should use `kamai_brand_sellthrough` for sell-through instead of reading orders and stores.
+
+## 010 distributor onboarding (`20261110100001_kamai_distributor_onboarding.sql`)
+
+Manual copy for the Supabase SQL editor: `supabase/manual/kamai_010_distributor_onboarding.sql` (byte-identical). Idempotent (verified by applying it twice on top of 001..009), additive. Apply after 009.
+
+Flow: a distributor signs up through `/api/kamai-signup` (service role): tenant `type='distributor'`, `settings.onboarding_status='pending_review'`, `settings.signup={contact_name,mobile,city,email,source}`, owner membership, a `distributor_signup` notification. The distributor uploads products (always `draft`), submits them (`kamai_submit_products`), the platform admin reviews them (`kamai_review_product`, margin hidden from the distributor) and approval publishes the product to the default price list. Tenants that existed before 010 (apt, kamai, anything admin-made) are set to `onboarding_status='approved'`.
+
+Schema changes
+- `kamai_products` + `description`, `listing_status` (`draft|submitted|changes_requested|approved|rejected`, default `approved` so existing rows stay live), `submitted_at`, `reviewed_at`, `reviewed_by`, `review_note`, `original` (jsonb snapshot `{name, description, image_url, category, price_minor}` taken at submission). Column mapping: price = `trade_price_minor` (the distributor's own price), image = `image_url`.
+- `kamai_price_list_items` + `managed boolean` (true = written by a platform review, i.e. the marked-up price).
+- `kamai_product_margins(product_id pk, tenant_id, margin_pct 0..500, distributor_price_minor, final_price_minor, updated_by, updated_at)`: platform admins only (select/insert/update/delete); everybody else reads 0 rows.
+- `kamai_admin_notifications` (`distributor_signup | products_submitted`, `email_status pending|sent|failed|skipped`, attempts, error, `read_at`): select for platform admins only; writes by the server or SECURITY DEFINER RPCs only.
+- `kamai_signup_log(ip_hash, email_hash, created_at)`: RLS on, no policies, service role only.
+- Bucket `kamai-product-images` (public read, 2 MB, jpeg/png/webp). Object name `<tenant_id>/<file>`. `storage.objects` policies `kamai_prodimg_select|insert|update|delete`: anyone reads; write = owner/manager/booker of the tenant in the FIRST path folder (`private.kamai_prodimg_access`), platform admins anywhere in the bucket.
+
+Rules enforced in the database
+- `kamai_tenants_guard` additionally blocks non-admin changes of `settings.onboarding_status`, `onboarding_note`, `onboarding_reviewed_at` and `signup`.
+- Trigger `kamai_products_review_guard`: rows inserted by a client (not platform admin, not a SECURITY DEFINER function/server) are forced to `draft` with empty review fields; a client cannot change `listing_status`, `submitted_at`, `reviewed_*`, `review_note`, `original`; a client edit of name, name_ur, description, category, image_url, trade/retail price on a product that is not `draft`/`changes_requested` sets it back to `draft`, and trigger `kamai_products_unpublish` deletes its price list rows.
+- Product SELECT: platform admin all; owner, manager, finance, viewer of the tenant all statuses; store, rider, booker and supplier/brand readers only `approved`.
+- Price list items: tenant members cannot read `managed` rows unless they are `store` or `booker` members (so the distributor never sees the final price); the old FOR ALL write policy was split into insert/update/delete and excludes managed rows; trigger `kamai_price_items_guard` stops a client from pricing an unapproved product or a product that has a margin row. `kamai_audit_log` select hides audit copies of managed price rows from tenant members.
+
+RPCs (SECURITY DEFINER, `search_path = ''`, denial = errcode 42501, bad input = 22023)
+
+| Function | Returns | Who |
+|---|---|---|
+| `kamai_submit_products(p_product_ids uuid[])` | `{submitted, notification_id}` | owner/manager of the (single) tenant of the products, platform admin. Only `draft`/`changes_requested` move to `submitted`; stores `original`, sets `submitted_at`, clears `review_note`; inserts ONE `products_submitted` notification `{count, product_names (10), tenant_name}`. Rejected accounts get 42501 |
+| `kamai_review_product(p_product_id, p_action, p_margin_pct = null, p_patch = '{}', p_note = null)` | `{product_id, listing_status, margin_pct, distributor_price_minor, final_price_minor}` | platform admin. `approve`/`request_changes`/`reject`; patch keys `name, description, image_url, category` (others ignored); `request_changes` needs a note. Approve: `final = ceil(distributor_price * (1 + margin/100))`, upserts the margin row and the default price list item (`managed = true`); margin defaults to the stored one, else 0. Other actions delete the product's price list rows |
+| `kamai_review_products_bulk(p_product_ids, p_action, p_margin_pct = null, p_note = null)` | `{done, failed, errors[]}` | platform admin; each product in its own subtransaction; max 500 |
+| `kamai_review_distributor(p_tenant_id, p_action, p_note = null)` | `{tenant_id, onboarding_status}` | platform admin; `approve`/`reject` sets `settings.onboarding_status` (+ `onboarding_reviewed_at`, `onboarding_note`) |
+| `kamai_review_queue()` | one row per distributor tenant: `tenant_id, tenant_name, slug, onboarding_status, contact, submitted_count, draft_count (draft + changes_requested), approved_count, oldest_submitted_at, created_at` | platform admin; pending accounts first, then tenants with submitted products |
+| `kamai_mark_notifications_read(p_ids uuid[])` | int | platform admin |
+
+Tests: `supabase/tests/kamai_rls_test.sql` (now 106 assertions; the 010 block covers margin/notification isolation, forced drafts, onboarding guard, review RPC denial, ceil pricing, publish, snapshot + single notification, store/booker visibility, managed price hiding, unpublish on edit, storage isolation). Without pgTAP use `supabase/tests/pgtap_shim.sql` (+ `local_stub.sql` for the auth/storage/legacy tables of a plain Postgres); a ~20 line shim defining `plan/is/ok/lives_ok/throws_ok/finish` over a results table is enough.
+
+Known limits
+- Raw prices: `kamai_products.trade_price_minor` is the distributor's price and is still selectable by store/booker members for approved products (column level hiding is impossible with RLS). A store comparing it with the price list could infer the margin. The store app must read prices only from `kamai_price_list_items`; move the column behind a view if stores get direct PostgREST access they should not have.
+- Orders, order items and invoices of a distributor tenant carry the marked-up unit price (`unit_price_minor`), readable by that tenant's owner/manager/finance. Hiding it needs a product model decision (who invoices whom) and is not done in 010.
+- `kamai_submit_order` is unchanged: it only requires the product to be `active`, not `approved`; protection relies on stores never seeing non-approved product ids.
+- Description and image edits by a distributor on an approved product also reset it to `draft` (by design, all content edits re-enter review).

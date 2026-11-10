@@ -610,7 +610,70 @@ export interface KamaiProductsRow {
   created_by: string | null
   created_at: string
   updated_at: string
+  // distributor onboarding (migration 20261110100001)
+  listing_status: ListingStatus
+  submitted_at: string | null
+  reviewed_at: string | null
+  reviewed_by: string | null
+  review_note: string | null
+  original: ProductOriginal | null
+  /** only present if the DB migration added a description column */
+  description?: string | null
 }
+
+export type ListingStatus = 'draft' | 'submitted' | 'changes_requested' | 'approved' | 'rejected'
+export type OnboardingStatus = 'pending_review' | 'approved' | 'rejected'
+/** Snapshot of the distributor's submission (what they typed before admin edits). */
+export interface ProductOriginal {
+  name?: string | null
+  description?: string | null
+  image_url?: string | null
+  category?: string | null
+  price?: number | null
+  [k: string]: Json | undefined
+}
+
+/** Admin-only (RLS): platform margin per product. NEVER query from distributor/store surfaces. */
+export interface KamaiProductMarginsRow {
+  product_id: string
+  tenant_id: string
+  margin_pct: number
+  distributor_price_minor: number | null
+  final_price_minor: number | null
+  updated_by: string | null
+  updated_at: string
+}
+
+export type AdminNotificationKind = 'distributor_signup' | 'products_submitted'
+export type EmailStatus = 'pending' | 'sent' | 'failed' | 'skipped'
+export interface KamaiAdminNotificationsRow {
+  id: string
+  kind: AdminNotificationKind
+  tenant_id: string | null
+  payload: { [key: string]: Json | undefined }
+  email_status: EmailStatus
+  email_attempts: number
+  email_error: string | null
+  emailed_at: string | null
+  read_at: string | null
+  created_at: string
+}
+
+export interface KamaiReviewQueueRow {
+  tenant_id: string
+  tenant_name: string
+  slug: string
+  onboarding_status: OnboardingStatus | string
+  contact: { contact_name?: string; mobile?: string; city?: string; email?: string } | null
+  submitted_count: number
+  draft_count: number
+  approved_count: number
+  oldest_submitted_at: string | null
+  created_at: string
+}
+
+export type ReviewAction = 'approve' | 'request_changes' | 'reject'
+export interface ReviewPatch { name?: string; description?: string; image_url?: string; category?: string }
 
 export interface KamaiStoreImportsRow {
   id: string
@@ -844,6 +907,8 @@ export const KAMAI_TABLES = [
   'kamai_price_lists',
   'kamai_product_costs',
   'kamai_products',
+  'kamai_product_margins',
+  'kamai_admin_notifications',
   'kamai_store_imports',
   'kamai_stores',
   'kamai_tenant_links',
@@ -899,6 +964,8 @@ export interface KamaiTableMap {
   kamai_price_list_items: KamaiPriceListItemsRow
   kamai_price_lists: KamaiPriceListsRow
   kamai_products: KamaiProductsRow
+  kamai_product_margins: KamaiProductMarginsRow
+  kamai_admin_notifications: KamaiAdminNotificationsRow
   kamai_store_imports: KamaiStoreImportsRow
   kamai_stores: KamaiStoresRow
   kamai_tenant_links: KamaiTenantLinksRow
@@ -1050,6 +1117,18 @@ export interface KamaiRpc {
   kamai_line_tax: { args: { p_qty: number; p_unit_minor: number; p_retail_minor: number | null; p_rate: number; p_third: boolean }; returns: number }
   kamai_dpd_bucket: { args: { p_dpd: number }; returns: DpdBucket }
   kamai_gtin_check_digit_ok: { args: { p_gtin14: string }; returns: boolean }
+  kamai_submit_products: { args: { p_product_ids: string[] }; returns: { submitted: number; notification_id: string | null } }
+  kamai_review_product: {
+    args: { p_product_id: string; p_action: ReviewAction; p_margin_pct?: number | null; p_patch?: ReviewPatch; p_note?: string | null }
+    returns: Json
+  }
+  kamai_review_products_bulk: {
+    args: { p_product_ids: string[]; p_action: ReviewAction; p_margin_pct?: number | null; p_note?: string | null }
+    returns: { done: number; failed: number }
+  }
+  kamai_review_distributor: { args: { p_tenant_id: string; p_action: 'approve' | 'reject'; p_note?: string | null }; returns: Json }
+  kamai_review_queue: { args: Record<string, never>; returns: KamaiReviewQueueRow[] }
+  kamai_mark_notifications_read: { args: { p_ids: string[] }; returns: number }
 }
 export type KamaiRpcName = keyof KamaiRpc
 
@@ -1061,6 +1140,7 @@ export const KAMAI_RPCS = [
   'kamai_match_bank_lines', 'kamai_confirm_bank_match', 'kamai_close_cash_day', 'kamai_post_entry',
   'kamai_reverse_entry', 'kamai_finance_order', 'kamai_settle_financing', 'kamai_os_kpis', 'kamai_run_daily',
   'kamai_import_legacy', 'kamai_distance_m', 'kamai_line_tax', 'kamai_dpd_bucket', 'kamai_gtin_check_digit_ok',
+  'kamai_submit_products', 'kamai_review_product', 'kamai_review_products_bulk', 'kamai_review_distributor', 'kamai_review_queue', 'kamai_mark_notifications_read',
 ] as const
 
 export interface OsKpis {
