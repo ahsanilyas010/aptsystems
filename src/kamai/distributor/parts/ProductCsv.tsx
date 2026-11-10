@@ -108,7 +108,7 @@ export function ImportProductsModal({ open, onClose, tenantId }: { open: boolean
           if (cr.error) throw new Error(`Batch ${i / 200 + 1} costs: ${cr.error.message}`)
         }
       }
-      toast.success(`${payload.length} products imported`)
+      toast.success(`${payload.length} products imported as drafts. Submit them for review from the Catalog.`)
       await refresh()
       setRows([])
       onClose()

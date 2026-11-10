@@ -62,3 +62,21 @@ export async function callKamaiApi<TResult = unknown, TPayload extends Record<st
   }
   return (b.data !== undefined ? b.data : body) as TResult
 }
+
+/**
+ * Fire-and-forget: ask the server to email any pending admin notifications for
+ * the signed-in user's tenant(s). Never throws; failures are ignored (the admin
+ * panel still shows the notification, and the daily cron retries).
+ */
+export function notifyAdmin(): void {
+  void (async () => {
+    try {
+      const { data } = await supabase.auth.getSession()
+      const token = data.session?.access_token
+      if (!token) return
+      await fetch('/api/kamai-notify', { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    } catch {
+      /* ignore */
+    }
+  })()
+}

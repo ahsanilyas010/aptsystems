@@ -138,7 +138,12 @@ export function Component() {
           <p className="text-center text-xs text-k-muted">PIN bhool gaye? Apne distributor se reset karwayein. / Forgot your PIN? Ask your distributor to reset it.</p>
         )}
       </form>
-      <div className="mt-4 text-center text-xs text-k-light">
+      <div className="mt-4 text-center text-sm">
+        <Link to="/auth/signup" className="font-semibold text-k-green">
+          Distributor? Apply here
+        </Link>
+      </div>
+      <div className="mt-3 text-center text-xs text-k-light">
         <Link to="/auth/logout" className="underline">
           Logout
         </Link>

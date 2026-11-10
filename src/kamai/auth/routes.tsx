@@ -6,6 +6,7 @@ export const authRoutes: RouteObject = {
   element: <AuthLayout />,
   children: [
     { path: 'login', lazy: () => import('./pages/Login') },
+    { path: 'signup', lazy: () => import('./pages/Signup') },
     { path: 'callback', lazy: () => import('./pages/Callback') },
     { path: 'accept/:token', lazy: () => import('./pages/AcceptToken') },
     { path: 'logout', lazy: () => import('./pages/Logout') },

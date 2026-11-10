@@ -2,7 +2,7 @@
 --   begin; create extension if not exists pgtap with schema extensions; \i supabase/tests/kamai_rls_test.sql
 -- Everything runs inside a transaction and is rolled back.
 begin;
-select plan(42);
+select plan(106);
 
 insert into auth.users (id, email) values
   ('00000000-0000-4000-8000-0000000000a1', 'pgtap-owner@test.local'),
@@ -192,6 +192,185 @@ reset role;
 -- anon has no table access
 set local role anon;
 select throws_ok($$select 1 from public.kamai_tenants$$, '42501', null, 'anon cannot select kamai_tenants');
+reset role;
+
+-- ===========================================================================
+-- Migration 010: distributor onboarding, product review, hidden platform margin
+-- ===========================================================================
+select set_config('request.jwt.claims', '', true);   -- server context
+insert into auth.users (id, email) values
+  ('00000000-0000-4000-8000-0000000000b1', 'pgtap-dist@test.local'),
+  ('00000000-0000-4000-8000-0000000000b2', 'pgtap-admin@test.local'),
+  ('00000000-0000-4000-8000-0000000000b3', 'pgtap-dstore@test.local'),
+  ('00000000-0000-4000-8000-0000000000b4', 'pgtap-dbooker@test.local');
+insert into public.kamai_platform_admins (user_id, note) values ('00000000-0000-4000-8000-0000000000b2', 'pgtap admin');
+select is((select count(*)::int from public.kamai_tenants where slug in ('apt','kamai') and settings ->> 'onboarding_status' = 'approved'), 2,
+  'seeded tenants apt and kamai are approved by the migration');
+select is((select count(*)::int from public.kamai_products where tenant_id = (select id from public.kamai_tenants where slug = 'apt') and listing_status <> 'approved'), 0,
+  'existing products stay approved');
+
+-- what the signup API does (service role): tenant with pending_review + owner membership + notification
+select public.kamai_create_tenant('pgtap-d', 'PgTap Dist', 'distributor',
+  '{"onboarding_status":"pending_review","signup":{"contact_name":"Dee","mobile":"+923001234567","city":"Lahore","email":"d@x.pk","source":"self_signup"}}');
+select public.kamai_add_member((select id from public.kamai_tenants where slug = 'pgtap-d'), '00000000-0000-4000-8000-0000000000b1', 'owner');
+insert into public.kamai_stores (tenant_id, name, payment_ref_code)
+select id, 'Store D1', 'KM-PGD-0001' from public.kamai_tenants where slug = 'pgtap-d';
+select public.kamai_add_member((select id from public.kamai_tenants where slug = 'pgtap-d'), '00000000-0000-4000-8000-0000000000b3', 'store',
+  (select id from public.kamai_stores where name = 'Store D1'));
+select public.kamai_add_member((select id from public.kamai_tenants where slug = 'pgtap-d'), '00000000-0000-4000-8000-0000000000b4', 'booker');
+insert into public.kamai_admin_notifications (kind, tenant_id, payload)
+select 'distributor_signup', id, '{"company":"PgTap Dist"}' from public.kamai_tenants where slug = 'pgtap-d';
+
+-- distributor owner
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b1","role":"authenticated"}', true);
+select lives_ok($$insert into public.kamai_products (tenant_id, sku, name, trade_price_minor, listing_status, review_note, reviewed_at)
+  select id, s.sku, s.nm, s.pr, 'approved', 'fake note', now() from public.kamai_tenants,
+    (values ('D-1', 'Soap', 10001), ('D-2', 'Shampoo', 5000), ('D-3', 'Cream', 700)) s(sku, nm, pr) where slug = 'pgtap-d'$$,
+  'distributor owner inserts products');
+select is((select count(*)::int from public.kamai_products where sku like 'D-%' and listing_status = 'draft' and review_note is null and reviewed_at is null), 3,
+  'client inserts are forced to draft and cannot pre-set review fields');
+select is((select count(*)::int from public.kamai_product_margins), 0, 'distributor reads no margins');
+select throws_ok($$insert into public.kamai_product_margins (product_id, tenant_id, margin_pct)
+  select id, tenant_id, 10 from public.kamai_products where sku = 'D-1'$$, '42501', null, 'distributor cannot write margins');
+select is((select count(*)::int from public.kamai_admin_notifications), 0, 'distributor reads no admin notifications');
+select throws_ok($$insert into public.kamai_admin_notifications (kind, payload) values ('distributor_signup', '{}')$$, '42501', null,
+  'clients cannot insert notifications');
+select throws_ok($$select 1 from public.kamai_signup_log$$, '42501', null, 'clients cannot read the signup log');
+select throws_ok($$update public.kamai_tenants set settings = settings || '{"onboarding_status":"approved"}' where slug = 'pgtap-d'$$, '42501', null,
+  'owner cannot change onboarding_status');
+select throws_ok($$update public.kamai_tenants set settings = jsonb_set(settings, '{signup,city}', '"X"') where slug = 'pgtap-d'$$, '42501', null,
+  'owner cannot edit settings.signup');
+select lives_ok($$update public.kamai_tenants set name = 'PgTap Dist Ltd' where slug = 'pgtap-d'$$, 'owner can still rename the tenant');
+select throws_ok($$update public.kamai_products set listing_status = 'approved' where sku = 'D-1'$$, '42501', null,
+  'owner cannot approve a product directly');
+select throws_ok($$select public.kamai_review_product((select id from public.kamai_products where sku = 'D-1'), 'approve', 10)$$, '42501', null,
+  'non admin cannot call kamai_review_product');
+select throws_ok($$select public.kamai_review_products_bulk(array[(select id from public.kamai_products where sku = 'D-1')], 'approve', 10)$$, '42501', null,
+  'non admin cannot call kamai_review_products_bulk');
+select throws_ok($$select public.kamai_review_distributor((select id from public.kamai_tenants where slug = 'pgtap-d'), 'approve')$$, '42501', null,
+  'non admin cannot call kamai_review_distributor');
+select throws_ok($$select * from public.kamai_review_queue()$$, '42501', null, 'non admin cannot call kamai_review_queue');
+select throws_ok($$select public.kamai_mark_notifications_read(array[gen_random_uuid()])$$, '42501', null, 'non admin cannot mark notifications read');
+select is((public.kamai_submit_products(array[(select id from public.kamai_products where sku = 'D-1'), (select id from public.kamai_products where sku = 'D-2')]) ->> 'submitted')::int, 2,
+  'owner submits two drafts');
+select is((select original ->> 'name' || ':' || (original ->> 'price_minor') from public.kamai_products where sku = 'D-1'), 'Soap:10001', 'submit snapshots the original');
+select is((public.kamai_submit_products(array[(select id from public.kamai_products where sku = 'D-1')]) ->> 'submitted')::int, 0,
+  'an already submitted product is not submitted twice');
+update public.kamai_products set name = 'Shampoo 2' where sku = 'D-2';
+select is((select listing_status from public.kamai_products where sku = 'D-2'), 'draft', 'editing a submitted product sends it back to draft');
+select is((public.kamai_submit_products(array[(select id from public.kamai_products where sku = 'D-2')]) ->> 'submitted')::int, 1, 'owner resubmits the edited product');
+reset role;
+
+select is((select count(*)::int from public.kamai_admin_notifications where kind = 'products_submitted'
+           and tenant_id = (select id from public.kamai_tenants where slug = 'pgtap-d')), 2, 'one notification per submission call');
+select is((select payload ->> 'count' || ':' || (payload ->> 'tenant_name') || ':' || jsonb_array_length(payload -> 'product_names') from public.kamai_admin_notifications
+           where kind = 'products_submitted' order by (payload ->> 'count')::int desc limit 1), '2:PgTap Dist Ltd:2', 'notification payload carries count, tenant name and product names');
+
+-- another tenant's owner cannot submit them
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000a1","role":"authenticated"}', true);
+select throws_ok($$select public.kamai_submit_products(array[(select id from public.kamai_products where sku = 'D-3')])$$, '42501', null,
+  'owner of another tenant cannot submit these products');
+reset role;
+
+-- store and booker of the distributor see nothing yet
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b3","role":"authenticated"}', true);
+select is((select count(*)::int from public.kamai_products where sku like 'D-%'), 0, 'store member sees no unapproved product');
+reset role;
+
+-- platform admin: review
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b2","role":"authenticated"}', true);
+select is((select onboarding_status || ':' || submitted_count from public.kamai_review_queue() where slug = 'pgtap-d'), 'pending_review:2', 'queue lists the pending distributor');
+select is((select (public.kamai_review_product((select id from public.kamai_products where sku = 'D-1'), 'approve', 12.5,
+  '{"name":"Soap Deluxe","bogus":"x"}', 'ok') ->> 'final_price_minor')::bigint), 11252::bigint, 'approve computes ceil(price*(1+margin/100))');
+select is((select name from public.kamai_products where sku = 'D-1'), 'Soap Deluxe', 'admin patch edits the product');
+select is((select margin_pct::text from public.kamai_product_margins where product_id = (select id from public.kamai_products where sku = 'D-1')), '12.50', 'margin is stored');
+select is((select price_minor from public.kamai_price_list_items i join public.kamai_price_lists l on l.id = i.price_list_id and l.is_default
+           where i.product_id = (select id from public.kamai_products where sku = 'D-1') and i.managed), 11252::bigint,
+  'approval publishes to the default price list at the final price');
+select throws_ok($$select public.kamai_review_product((select id from public.kamai_products where sku = 'D-1'), 'approve', 900)$$, '22023', null, 'margin above 500 is rejected');
+select throws_ok($$select public.kamai_review_product((select id from public.kamai_products where sku = 'D-2'), 'request_changes')$$, '22023', null, 'request_changes needs a note');
+select is((public.kamai_review_products_bulk(array[(select id from public.kamai_products where sku = 'D-2'), gen_random_uuid()], 'request_changes', null, 'add a photo') ->> 'done')::int
+          * 10 + (public.kamai_review_products_bulk(array[gen_random_uuid()], 'reject', null, 'x') ->> 'failed')::int, 11, 'bulk review counts done and failed');
+select is((select listing_status from public.kamai_products where sku = 'D-2'), 'changes_requested', 'bulk request_changes applied');
+select is((select count(*)::int from public.kamai_product_margins), 1, 'admin reads margins');
+select is((select count(*)::int from public.kamai_admin_notifications), 3, 'admin reads notifications');
+select is(public.kamai_mark_notifications_read(array(select id from public.kamai_admin_notifications)), 3, 'admin marks notifications read');
+select is((select onboarding_status from public.kamai_review_queue() where slug = 'pgtap-d') || ':' ||
+          (select approved_count from public.kamai_review_queue() where slug = 'pgtap-d'), 'pending_review:1', 'queue counts approved products');
+select is(public.kamai_review_distributor((select id from public.kamai_tenants where slug = 'pgtap-d'), 'approve') ->> 'onboarding_status', 'approved', 'admin approves the account');
+reset role;
+
+-- store and booker now see exactly the approved product, and the final price only
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b3","role":"authenticated"}', true);
+select is((select count(*)::int from public.kamai_products where sku like 'D-%'), 1, 'store member sees only the approved product');
+select is((select price_minor from public.kamai_price_list_items), 11252::bigint, 'store member reads the default list price');
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b4","role":"authenticated"}', true);
+select is((select count(*)::int from public.kamai_products where sku like 'D-%'), 1, 'booker sees only the approved product');
+reset role;
+
+-- distributor owner again: status and note visible, margin and final price not
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b1","role":"authenticated"}', true);
+select is((select count(*)::int from public.kamai_products where sku like 'D-%'), 3, 'owner sees every status of its own products');
+select is((select review_note from public.kamai_products where sku = 'D-2'), 'add a photo', 'owner sees the review note');
+select is((select count(*)::int from public.kamai_price_list_items), 0, 'owner cannot read the marked-up price list rows');
+select is((select count(*)::int from public.kamai_audit_log where table_name = 'kamai_price_list_items'), 0, 'audit log hides marked-up price rows');
+select is((select count(*)::int from public.kamai_product_margins), 0, 'owner still reads no margins');
+select throws_ok($$insert into public.kamai_price_list_items (tenant_id, price_list_id, product_id, price_minor)
+  select i.tenant_id, i.price_list_id, i.product_id, 1 from public.kamai_products p, lateral (select tenant_id, (select id from public.kamai_price_lists where tenant_id = p.tenant_id and is_default) price_list_id, p.id product_id) i
+  where p.sku = 'D-1'$$, '42501', null, 'owner cannot price a margin-managed product');
+select throws_ok($$insert into public.kamai_price_list_items (tenant_id, price_list_id, product_id, price_minor)
+  select p.tenant_id, (select id from public.kamai_price_lists where tenant_id = p.tenant_id and is_default), p.id, 1 from public.kamai_products p where p.sku = 'D-3'$$,
+  '42501', null, 'owner cannot price an unapproved product');
+update public.kamai_products set trade_price_minor = 1 where sku = 'D-2';
+select is((select listing_status from public.kamai_products where sku = 'D-2'), 'changes_requested', 'editing a changes_requested product keeps its status');
+update public.kamai_products set trade_price_minor = 20000 where sku = 'D-1';
+select is((select listing_status from public.kamai_products where sku = 'D-1'), 'draft', 'editing an approved product pulls it out of the catalog');
+reset role;
+select is((select count(*)::int from public.kamai_price_list_items where product_id = (select id from public.kamai_products where sku = 'D-1')), 0, 'unpublished product leaves the price list');
+select is((select count(*)::int from public.kamai_product_margins where product_id = (select id from public.kamai_products where sku = 'D-1')), 1, 'margin survives an unpublish');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b3","role":"authenticated"}', true);
+select is((select count(*)::int from public.kamai_products where sku like 'D-%'), 0, 'store member no longer sees the edited product');
+reset role;
+
+-- rejected accounts cannot submit
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b2","role":"authenticated"}', true);
+select is(public.kamai_review_distributor((select id from public.kamai_tenants where slug = 'pgtap-d'), 'reject', 'no') ->> 'onboarding_status', 'rejected', 'admin rejects the account');
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b1","role":"authenticated"}', true);
+select throws_ok($$select public.kamai_submit_products(array[(select id from public.kamai_products where sku = 'D-3')])$$, '42501', null, 'rejected account cannot submit');
+reset role;
+
+-- storage: public read, tenant-prefix isolation, admin anywhere
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b1","role":"authenticated"}', true);
+select lives_ok(format($$insert into storage.objects (bucket_id, name, owner) values ('kamai-product-images', '%s/a.jpg', auth.uid())$$,
+  (select id from public.kamai_tenants where slug = 'pgtap-d')), 'owner uploads into the own tenant folder');
+select throws_ok(format($$insert into storage.objects (bucket_id, name, owner) values ('kamai-product-images', '%s/a.jpg', auth.uid())$$,
+  (select id from public.kamai_tenants where slug = 'pgtap-a')), '42501', null, 'owner cannot upload into another tenant folder');
+select throws_ok($$insert into storage.objects (bucket_id, name, owner) values ('kamai-product-images', 'loose.jpg', auth.uid())$$, '42501', null, 'owner cannot upload outside a tenant folder');
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b3","role":"authenticated"}', true);
+select throws_ok(format($$insert into storage.objects (bucket_id, name, owner) values ('kamai-product-images', '%s/b.jpg', auth.uid())$$,
+  (select id from public.kamai_tenants where slug = 'pgtap-d')), '42501', null, 'store member cannot upload product images');
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000000b2","role":"authenticated"}', true);
+select lives_ok($$insert into storage.objects (bucket_id, name, owner) values ('kamai-product-images', 'misc/x.png', auth.uid())$$, 'platform admin uploads anywhere in the bucket');
+reset role;
+set local role anon;
+select is((select count(*)::int from storage.objects where bucket_id = 'kamai-product-images'), 2, 'product images are publicly readable');
 reset role;
 
 select * from finish();

@@ -22,6 +22,11 @@ Add in Vercel, Project, Settings, Environment Variables. Set Production AND Prev
 | `WHATSAPP_APP_SECRET` | server, optional | HMAC key for `X-Hub-Signature-256`. Without it the webhook rejects every POST with 401. |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | server, optional | Random string you choose; must match the Meta webhook config. |
 | `WHATSAPP_GRAPH_VERSION` | server, optional | `v25.0` (default in code). |
+| `RESEND_API_KEY` | server, optional | Resend API key for admin emails (distributor sign-up, products submitted). Missing => notifications are `skipped`, never an error. |
+| `KAMAI_ADMIN_EMAIL` | server, optional | Recipient of review emails. Default `ahsanilyas35@gmail.com`. |
+| `KAMAI_FROM_EMAIL` | server, optional | Sender. Default `Kamai OS <onboarding@resend.dev>`. |
+| `KAMAI_PUBLIC_URL` | server, optional | Base for links in emails (`/os/reviews`). Default `https://aptsystems.vercel.app`. |
+| `KAMAI_HASH_SALT` | server, optional | Salt for hashed IP/email in `kamai_signup_log` (sign-up rate limit). Falls back to a value derived from the service key. |
 
 The client does not require the two `VITE_` variables: `src/kamai/lib/supabase.ts` falls back to
 the public project URL and anon key. Set them anyway so the values are explicit per environment.
@@ -167,3 +172,25 @@ message; confirm against Meta's official rate card.
 - `GET /api/kamai-cron` with `Authorization: Bearer $CRON_SECRET` runs `kamai_run_daily()` on demand.
 - `POST /api/kamai-admin` actions: `provision_user`, `reset_pin`, `disable_user`, `send_whatsapp`,
   `send_delivery_otp` (Bearer Supabase access token required).
+
+## Distributor sign-up and admin email
+
+Flow: `/auth/signup` -> `POST /api/kamai-signup` (public, honeypot field `website`, 5 sign-ups/hour per
+IP hash, 3/day per email hash, via `kamai_signup_log`) creates the auth user (email pre-confirmed), a
+`distributor` tenant with `settings.onboarding_status='pending_review'` and the owner membership, a
+`kamai_admin_notifications` row (`distributor_signup`) and emails the admin. Submitting products
+(`kamai_submit_products`) adds a `products_submitted` notification; the console then calls
+`POST /api/kamai-notify` (Bearer user token) which emails every pending/failed notification of the
+caller's tenants (platform admins: all). `GET /api/kamai-cron` also retries them (max 5 attempts per row).
+If the email never arrives, the notification is still listed in `/os/reviews` (Notifications tab) with
+its `email_status` (`sent`, `failed`, `skipped`, `pending`) and `email_error`.
+
+Resend sender-domain step (needed to email anyone other than yourself):
+1. Create a Resend account and an API key (Sending access); set `RESEND_API_KEY` in Vercel.
+2. Until a domain is verified, only `onboarding@resend.dev` works and Resend delivers only to the email
+   of the Resend account owner. Make that address `KAMAI_ADMIN_EMAIL` (or sign up to Resend with it).
+3. Recommended: Resend, Domains, add your domain, add the DKIM/SPF (and optional DMARC) DNS records,
+   wait for "Verified", then set `KAMAI_FROM_EMAIL="Kamai OS <noreply@yourdomain.com>"`.
+4. Set `KAMAI_PUBLIC_URL` to the host you actually use (e.g. `https://apt.assorted.group`) and redeploy.
+5. Supabase Auth: sign-ups do not use Supabase confirmation emails (the user is created pre-confirmed
+   by the API), so the Site URL being localhost does not affect distributors.
