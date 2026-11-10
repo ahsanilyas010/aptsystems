@@ -20,7 +20,7 @@ import {
   LayoutDashboard, Users, FileText, CreditCard, ShoppingCart, Truck, Receipt,
   TrendingUp, Scale, Package, BarChart3, ClipboardList, Store, Bike, MapPin,
   Boxes, Link2, Map as MapIcon, FileBarChart, Settings, Menu, RefreshCw, Leaf,
-  Banknote, Undo2,
+  Banknote, Undo2, Building2, ClipboardCheck, ShieldCheck, Activity,
 } from "lucide-react";
 
 const firebaseConfig = {
@@ -135,7 +135,38 @@ const NAV_ICONS = {
   "rider-config":   { Icon: Settings,      color: "#607D8B" },
   "rider-commission":{ Icon: Banknote,     color: "#2E7D32" },
   "returns":         { Icon: Undo2,        color: "#C62828" },
+  "kamai-command":  { Icon: Activity,       color: "#2E7D32" },
+  "kamai-reviews":  { Icon: ClipboardCheck, color: "#F9A825" },
+  "kamai-tenants":  { Icon: Building2,      color: "#1565C0" },
+  "kamai-orders":   { Icon: ClipboardList,  color: "#E53935" },
+  "kamai-credit":   { Icon: CreditCard,     color: "#6A1B9A" },
+  "kamai-audit":    { Icon: ShieldCheck,    color: "#00897B" },
+  "kamai-settings": { Icon: Settings,       color: "#607D8B" },
 };
+
+// Kamai OS sections shown inside the CRM. Each tab id maps to a Kamai route; the page is
+// shown in a same-origin frame (Kamai hides its own sidebar when it detects it is framed).
+// The frame shares the browser's Kamai Supabase session, so admins sign in to Kamai once.
+const KAMAI_TABS = {
+  "kamai-command":  "/os",
+  "kamai-reviews":  "/os/reviews",
+  "kamai-tenants":  "/os/tenants",
+  "kamai-orders":   "/os/orders",
+  "kamai-credit":   "/os/credit",
+  "kamai-audit":    "/os/audit",
+  "kamai-settings": "/os/settings",
+};
+// Plain function (no hooks) so it is safe to call from CrmApp's PAGES map.
+function KamaiFrame({ path }) {
+  return (
+    <iframe
+      key={path}
+      title="Kamai OS"
+      src={path}
+      style={{width:"100%",height:"100%",border:0,display:"block",background:"#F4FAF4"}}
+    />
+  );
+}
 
 // Responsive helper — true on phone-width viewports.
 function useIsMobile(bp = 768) {
@@ -869,6 +900,15 @@ function CrmApp({ user, onLogout }) {
       {id:"rider-reports",  label:"Rider Reports"},
       {id:"rider-config",   label:"Rider Config"},
       {id:"rider-commission",label:"Commission"},
+    ]},
+    {group:"Kamai OS",items:[
+      {id:"kamai-command",  label:"Command"},
+      {id:"kamai-reviews",  label:"Reviews & Applications"},
+      {id:"kamai-tenants",  label:"Tenants"},
+      {id:"kamai-orders",   label:"Kamai Orders"},
+      {id:"kamai-credit",   label:"Credit"},
+      {id:"kamai-audit",    label:"Audit Log"},
+      {id:"kamai-settings", label:"Kamai Settings"},
     ]},
   ];
 
@@ -3300,6 +3340,7 @@ function CrmApp({ user, onLogout }) {
     "rider-orders":<RiderOrdersTab/>,"rider-stores":<RiderStoresTab/>,
     riders:<RidersTab/>,locations:<LocationsTab/>,"rider-products":<RiderProductsTab/>,
     "store-assign":<StoreAssignTab/>,areas:<AreasTab/>,"rider-reports":<RiderReportsTab/>,"rider-config":<RiderConfigTab/>,"rider-commission":<RiderCommissionTab/>,"returns":<ReturnsTab/>,
+    ...Object.fromEntries(Object.entries(KAMAI_TABS).map(([id,path])=>[id,<KamaiFrame path={path}/>])),
   };
 
   return (
@@ -3364,7 +3405,7 @@ function CrmApp({ user, onLogout }) {
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
             {(syncing||sbSyncing)&&<span style={{fontSize:10,color:G.muted,fontWeight:600,display:"inline-flex",alignItems:"center",gap:4}}><RefreshCw size={11} style={{animation:"spin 1s linear infinite"}}/>{!isMobile&&"Syncing…"}</span>}
-            {RIDER_HUB_TABS.has(tab)
+            {tab in KAMAI_TABS?null:RIDER_HUB_TABS.has(tab)
               ?<button onClick={()=>loadSupabase()} style={{background:"#E3F2FD",border:`1px solid ${G.blue}`,borderRadius:7,padding:"5px 11px",fontSize:10,fontWeight:700,color:G.blue,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}><RefreshCw size={12}/>{!isMobile&&"Rider Sync"}</button>
               :<button onClick={()=>loadData(true)} style={{background:G.pale,border:`1px solid ${G.mid}`,borderRadius:7,padding:"5px 11px",fontSize:10,fontWeight:700,color:G.dark,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}><RefreshCw size={12}/>{!isMobile&&"Sync"}</button>}
           </div>
@@ -3383,7 +3424,7 @@ function CrmApp({ user, onLogout }) {
           </div>
         )}
 
-        <div style={{flex:1,overflow:"auto",padding:isMobile?12:18}}>{PAGES[tab]}</div>
+        <div style={tab in KAMAI_TABS?{flex:1,overflow:"hidden",padding:0}:{flex:1,overflow:"auto",padding:isMobile?12:18}}>{PAGES[tab]}</div>
       </div>
 
       {renderModal()}
