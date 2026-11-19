@@ -456,11 +456,32 @@ export default async function handler(req, res) {
         for (const group of groups) {
           const { keepId, mergeIds } = group;
           if (!keepId || !mergeIds?.length) continue;
-          const [{ data: mergedCustomers }, { data: affectedInvoices }, { data: affectedPayments }] = await Promise.all([
+          const [{ data: mergedCustomers }, { data: keeperRow }, { data: affectedInvoices }, { data: affectedPayments }] = await Promise.all([
             db.from("customers").select("*").in("id", mergeIds),
+            db.from("customers").select("*").eq("id", keepId).maybeSingle(),
             db.from("invoices").select("id,cust_id").in("cust_id", mergeIds),
             db.from("payments").select("id,party_id").in("party_id", mergeIds).eq("type", "Received"),
           ]);
+          // Carry the merged rows' opening balances over to the kept customer (they are
+          // deleted below, so the balance would otherwise vanish), and fill any contact
+          // fields the kept row is missing from the rows being merged in.
+          let keeperBefore = null;
+          if (keeperRow && mergedCustomers?.length) {
+            const patch = {};
+            const extraOpen = mergedCustomers.reduce((s, c) => s + (Number(c.open_bal) || 0), 0);
+            if (extraOpen) patch.open_bal = (Number(keeperRow.open_bal) || 0) + extraOpen;
+            for (const f of ["mobile", "area", "city", "owner_name"]) {
+              if (!String(keeperRow[f] ?? "").trim()) {
+                const donor = mergedCustomers.find(c => String(c[f] ?? "").trim());
+                if (donor) patch[f] = donor[f];
+              }
+            }
+            if (Object.keys(patch).length) {
+              const { error } = await db.from("customers").update(patch).eq("id", keepId);
+              if (error) throw error;
+              keeperBefore = keeperRow; // full original row, restored on undo
+            }
+          }
           if (affectedInvoices?.length) {
             const { error } = await db.from("invoices").update({ cust_id: keepId }).in("cust_id", mergeIds);
             if (error) throw error;
@@ -473,6 +494,7 @@ export default async function handler(req, res) {
           if (delErr) throw delErr;
           snapshotGroups.push({
             keepId, mergeIds,
+            keeperBefore,
             mergedCustomers: mergedCustomers || [],
             invoiceChanges: (affectedInvoices || []).map(inv => ({ id: inv.id, originalCustId: inv.cust_id })),
             paymentChanges: (affectedPayments || []).map(pay => ({ id: pay.id, originalPartyId: pay.party_id })),
@@ -509,9 +531,13 @@ export default async function handler(req, res) {
       case "undo_merge_customers": {
         const { groups } = params;
         for (const group of groups) {
-          const { mergedCustomers, invoiceChanges, paymentChanges } = group;
+          const { mergedCustomers, keeperBefore, invoiceChanges, paymentChanges } = group;
           if (mergedCustomers?.length) {
             const { error } = await db.from("customers").upsert(mergedCustomers, { onConflict: "id" });
+            if (error) throw error;
+          }
+          if (keeperBefore) {
+            const { error } = await db.from("customers").upsert(keeperBefore, { onConflict: "id" });
             if (error) throw error;
           }
           for (const change of invoiceChanges || []) {

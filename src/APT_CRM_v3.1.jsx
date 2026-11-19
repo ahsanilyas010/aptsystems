@@ -200,6 +200,45 @@ const digitsOnly = s => (s || "").toString().replace(/\D+/g, "");
 // A finite, non-negative number (for amount/qty/price fields submitted as strings).
 const validNum = v => Number.isFinite(+v) && +v >= 0;
 
+// ── Similar-store detection ──────────────────────────────────
+// "HBK", "H.B.K", "H B K" and "hbk " are the same store typed differently. compactName drops
+// case, spaces and punctuation so they collapse to "hbk". coreName also drops generic trade
+// words ("Store", "Mart", "Traders"…) so "HBK Store" lines up with "HBK" — those matches are
+// flagged "similar" (not "exact") so the user reviews them before anything is merged.
+const GENERIC_STORE_WORDS = new Set(["store","stores","mart","shop","shops","general","super","supermarket","traders","trader","pharmacy","chemist","chemists","and","co","company"]);
+const compactName = s => normTxt(s).replace(/ /g, "");
+const coreName = s => {
+  const core = normTxt(s).split(" ").filter(w => w && !GENERIC_STORE_WORDS.has(w)).join("");
+  return core.length >= 2 ? core : compactName(s);
+};
+// Groups customers whose names match once case/spacing/punctuation are ignored, with each
+// member's invoice count, billed, received and outstanding so the merge can be reviewed.
+// Voided invoices are excluded (same as the AR ledger). The kept record is the one with the
+// most invoices, then the lowest id.
+const buildSimilarStoreGroups = (customers, invoices, payments) => {
+  const stat = {};
+  customers.forEach(c => { stat[c.id] = { invoices: 0, billed: 0, paid: 0 }; });
+  invoices.forEach(i => { if (i.status === "VOIDED") return; const s = stat[i.custId]; if (s) { s.invoices++; s.billed += Number(i.total) || 0; } });
+  payments.forEach(p => { if (p.type !== "Received") return; const s = stat[p.partyId]; if (s) s.paid += Number(p.amount) || 0; });
+  const byKey = {};
+  customers.forEach(c => { if (compactName(c.name).length < 2) return; (byKey[coreName(c.name)] = byKey[coreName(c.name)] || []).push(c); });
+  const groups = [];
+  Object.entries(byKey).forEach(([key, arr]) => {
+    if (arr.length < 2) return;
+    const members = arr.map(c => ({ c, ...stat[c.id], outstanding: stat[c.id].billed - stat[c.id].paid }))
+      .sort((a, b) => (b.invoices - a.invoices) || String(a.c.id).localeCompare(String(b.c.id)));
+    const totals = members.reduce((t, m) => ({ invoices: t.invoices + m.invoices, billed: t.billed + m.billed, paid: t.paid + m.paid, outstanding: t.outstanding + m.outstanding }), { invoices: 0, billed: 0, paid: 0, outstanding: 0 });
+    groups.push({
+      key, members, totals,
+      keepId: members[0].c.id,
+      mergeIds: members.slice(1).map(m => m.c.id),
+      exact: new Set(arr.map(c => compactName(c.name))).size === 1,
+    });
+  });
+  // Exact matches first, then biggest balances.
+  return groups.sort((a, b) => (b.exact - a.exact) || (b.totals.billed - a.totals.billed));
+};
+
 // ── Primitive components ──────────────────────────────────────
 const Badge = ({ text }) => {
   const m = {
@@ -545,6 +584,40 @@ function CrmApp({ user, onLogout }) {
   }, [undoStack, notify]);
 
   const closeModal = () => setModal(null);
+
+  // Merge groups of customers ({keepId, mergeIds}) into their kept record: the backend moves
+  // invoices + received payments and carries opening balances over; rider stores synced to a
+  // merged-away customer are re-pointed here. One undo reverses all of it.
+  const mergeCustomerGroups = async (groups, label) => {
+    if (!groups.length) return;
+    setCustMerging(true);
+    try {
+      const payload = groups.map(g => ({ keepId: g.keepId, mergeIds: g.mergeIds }));
+      const count = payload.reduce((n, g) => n + g.mergeIds.length, 0);
+      const result = await sbPost("merge_customers", { groups: payload });
+      const target = {};
+      payload.forEach(g => g.mergeIds.forEach(id => { target[id] = g.keepId; }));
+      const storeRepoints = [];
+      for (const s of sbData.stores) {
+        if (s.gas_customer_id && target[s.gas_customer_id]) {
+          storeRepoints.push({ id: s.id, from: s.gas_customer_id });
+          try { await sbPost("update_store", { id: s.id, gas_customer_id: target[s.gas_customer_id] }); } catch { /* non-fatal */ }
+        }
+      }
+      closeModal();
+      notify(`✅ ${label}: merged ${count} store(s) into ${payload.length}`);
+      await loadData(true); await loadSupabase(true);
+      if (result?.snapshot?.groups?.length) {
+        pushUndo(`${label}: ${count} store(s)`, async () => {
+          await sbPost("undo_merge_customers", result.snapshot);
+          for (const r of storeRepoints) {
+            try { await sbPost("update_store", { id: r.id, gas_customer_id: r.from }); } catch { /* non-fatal */ }
+          }
+          await loadData(true); await loadSupabase(true);
+        }, 20000);
+      }
+    } catch (e) { notify("❌ " + e.message, "err"); } finally { setCustMerging(false); }
+  };
 
   const loadData = useCallback(async (showSync=false) => {
     if (showSync) setSyncing(true); else setLoading(true);
@@ -1103,6 +1176,7 @@ function CrmApp({ user, onLogout }) {
       return { dupIds, groupSize, groups };
     })();
     const merging = custMerging, setMerging = setCustMerging;
+    const similarGroups = buildSimilarStoreGroups(customers, invoices, payments);
     const importingSb = custImportingSb, setImportingSb = setCustImportingSb;
     const importRiderStores = async (stores) => {
       if(!stores.length){ notify("No unsynced rider stores to import","err"); return; }
@@ -1213,6 +1287,7 @@ function CrmApp({ user, onLogout }) {
           <Btn sm onClick={()=>setModal({t:"addCustomer"})}>+ Add Store</Btn>
           {dupInfo.dupIds.size>0&&<Btn sm v={hideDupes?"secondary":"amber"} onClick={()=>setHideDupes(h=>!h)}>{hideDupes?`🔁 ${dupInfo.dupIds.size} dup hidden`:"Hide duplicates"}</Btn>}
           {dupInfo.dupIds.size>0&&<Btn sm v="danger" disabled={merging} onClick={mergeDuplicates}>{merging?"⏳ Merging…":`🔀 Merge ${dupInfo.dupIds.size} duplicate(s)`}</Btn>}
+          {similarGroups.length>0&&<Btn sm v="amber" disabled={merging} onClick={()=>setModal({t:"mergeSimilar"})}>{`🔍 Review ${similarGroups.length} similar-name group${similarGroups.length===1?"":"s"}`}</Btn>}
           {FALLBACK_EMAILS.includes(user?.email)&&<Btn sm v="danger" disabled={merging} onClick={removeKnownDuplicates}>{merging?"⏳ Removing…":"🗑 Remove 15 Known Duplicates"}</Btn>}
           <Btn sm v="secondary" onClick={()=>exportCsv("customers.csv",fil,[["id","ID"],["name","Name"],["area","Area"],["city","City"],["phone","Phone"]])}>⬇ Export</Btn>
           {virtualStores.length>0&&<Btn sm v="secondary" disabled={importingSb} onClick={()=>importRiderStores(virtualStores)}>{importingSb?"⏳ Importing…":`⬆ Import ${virtualStores.length} Rider Store${virtualStores.length===1?"":"s"} to Supabase`}</Btn>}
@@ -1899,6 +1974,64 @@ function CrmApp({ user, onLogout }) {
         );
       };
       return <Modal title="🛒 New Purchase" onClose={closeModal}><PurForm/></Modal>;
+    }
+
+    // ── Merge similar-name stores (review before merging) ─────
+    if(modal.t==="mergeSimilar"){
+      const groups=buildSimilarStoreGroups(customers,invoices,payments);
+      // Exact matches (same letters, ignoring case/spacing/punctuation) start ticked; looser
+      // "Store/Mart/Traders" matches start unticked. modal.picked holds the user's overrides.
+      const isPicked=g=>modal.picked&&g.key in modal.picked?modal.picked[g.key]:g.exact;
+      const chosen=groups.filter(isPicked);
+      const toggle=g=>setModal(m=>({...m,picked:{...(m.picked||{}),[g.key]:!isPicked(g)}}));
+      const sum=chosen.reduce((t,g)=>({n:t.n+g.mergeIds.length,billed:t.billed+g.totals.billed,paid:t.paid+g.totals.paid,out:t.out+g.totals.outstanding}),{n:0,billed:0,paid:0,out:0});
+      return(
+        <Modal title="🔍 Merge similar stores" onClose={closeModal} wide>
+          <div style={{fontSize:11,color:G.muted,marginBottom:12,lineHeight:1.5}}>
+            Stores below have the same letters once case, spaces and punctuation are ignored (e.g. <b>HBK</b> / <b>H.B.K</b>). Merging moves every invoice and payment onto the kept record, so totals and outstanding add up under one store, and opening balances are added together. <b>Review each group — tick only the ones that are really the same store.</b> You can undo right after.
+          </div>
+          {groups.length===0&&<div style={{padding:24,textAlign:"center",color:G.muted,fontSize:12}}>No similar store names found 🎉</div>}
+          <div style={{display:"flex",flexDirection:"column",gap:10,maxHeight:"52vh",overflow:"auto",paddingRight:2}}>
+            {groups.map(g=>{
+              const on=isPicked(g);
+              return(
+                <div key={g.key} style={{border:`1.5px solid ${on?G.mid:G.border}`,borderRadius:10,background:on?G.pale:G.white,overflow:"hidden"}}>
+                  <label style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",cursor:"pointer",flexWrap:"wrap"}}>
+                    <input type="checkbox" checked={on} onChange={()=>toggle(g)} style={{width:16,height:16,accentColor:G.mid}}/>
+                    <span style={{fontWeight:800,fontSize:13,color:G.ink}}>{g.members[0].c.name}</span>
+                    <span style={{fontSize:9,fontWeight:800,padding:"2px 7px",borderRadius:6,background:g.exact?"#E8F5E9":"#FFF8E1",color:g.exact?G.mid:G.amber}}>{g.exact?"SAME LETTERS":"SIMILAR — CHECK"}</span>
+                    <span style={{marginLeft:"auto",fontSize:10,color:G.muted}}>
+                      {g.totals.invoices} inv · Billed <b>{fmt(g.totals.billed)}</b> · Received <b>{fmt(g.totals.paid)}</b> · Outstanding <b style={{color:g.totals.outstanding>0?G.red:G.ink}}>{fmt(g.totals.outstanding)}</b>
+                    </span>
+                  </label>
+                  <div style={{overflowX:"auto",background:G.white}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+                      <tbody>
+                        {g.members.map((m,i)=>(
+                          <tr key={m.c.id} style={{borderTop:`1px solid ${G.pale}`}}>
+                            <td style={{padding:"5px 12px",whiteSpace:"nowrap"}}>{i===0?<span style={{fontSize:8,fontWeight:800,color:G.white,background:G.mid,borderRadius:5,padding:"1px 6px"}}>KEEP</span>:<span style={{fontSize:8,fontWeight:800,color:G.red,background:G.pink,borderRadius:5,padding:"1px 6px"}}>MERGE</span>}</td>
+                            <td style={{padding:"5px 8px",fontWeight:700,color:G.ink}}>{m.c.name}<div style={{fontWeight:400,color:G.muted}}>{m.c.id}</div></td>
+                            <td style={{padding:"5px 8px",color:G.muted}}>{[m.c.area,m.c.city].filter(Boolean).join(" · ")||"—"}<div>📞 {m.c.phone||"—"}</div></td>
+                            <td style={{padding:"5px 8px",textAlign:"right",whiteSpace:"nowrap"}}>{m.invoices} inv<div style={{color:G.muted}}>{fmt(m.billed)} billed</div></td>
+                            <td style={{padding:"5px 12px 5px 8px",textAlign:"right",whiteSpace:"nowrap"}}>{fmt(m.paid)} paid<div style={{color:m.outstanding>0?G.red:G.muted,fontWeight:700}}>{fmt(m.outstanding)} due</div></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",gap:8,justifyContent:"space-between",alignItems:"center",marginTop:14,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,color:G.muted}}>{chosen.length} of {groups.length} group(s) selected · {sum.n} record(s) will be merged · Outstanding after merge <b style={{color:G.ink}}>{fmt(sum.out)}</b></span>
+            <div style={{display:"flex",gap:8}}>
+              <Btn v="secondary" onClick={closeModal}>Cancel</Btn>
+              <Btn v="danger" disabled={!chosen.length||custMerging} onClick={()=>{if(confirm(`Merge ${sum.n} store record(s) into ${chosen.length} store(s)?\n\nTheir invoices and payments move to the kept record and the merged records are removed. You can undo right after.`))mergeCustomerGroups(chosen,"Merged similar stores");}}>{custMerging?"⏳ Merging…":`🔀 Merge ${chosen.length} group${chosen.length===1?"":"s"}`}</Btn>
+            </div>
+          </div>
+        </Modal>
+      );
     }
 
     // ── Add Customer ──────────────────────────────────────────
